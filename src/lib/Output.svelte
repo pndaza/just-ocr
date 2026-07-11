@@ -18,7 +18,7 @@
 
 <div class="panel" role="region" aria-label="Recognized text">
   <div class="head">
-    <span class="title">Text</span>
+    <span class="title">{job?.outputMode === "hocr" ? "hOCR" : "Text"}</span>
     {#if job?.status === "done"}
       <span class="meta">{job.elapsedMs} ms</span>
       <button class="copy" onclick={copy} disabled={!job.text.trim()}>
@@ -40,7 +40,9 @@
     {:else if job.status === "queued"}
       <div class="placeholder">Queued — run OCR to extract text.</div>
     {:else if job.text.trim()}
-      <pre class="text">{job.text.replace(/\s+$/, "")}</pre>
+      <pre class="text" class:hocr={job.outputMode === "hocr"}>{
+        job.outputMode === "hocr" ? job.text : job.text.replace(/\s+$/, "")
+      }</pre>
     {:else}
       <div class="placeholder">No text recognized. Try a different PSM or image.</div>
     {/if}
@@ -96,6 +98,11 @@
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .text.hocr {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
   .placeholder {
     color: var(--text-faint);

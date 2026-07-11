@@ -2,10 +2,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 
+/** How the OCR engine returns its result. hOCR is structured XML with
+ * per-word bounding boxes; text is plain UTF-8. */
+export type OutputMode = "text" | "hocr";
+
 export interface OcrOpts {
   language: string;
   psm: number;
   whitelist: string | null;
+  outputMode: OutputMode;
 }
 
 export interface OcrResult {
@@ -24,6 +29,8 @@ export interface Job {
   url: string; // object URL for thumbnail
   status: JobStatus;
   text: string;
+  /** The mode this job's `text` was produced in (drives display/export). */
+  outputMode: OutputMode;
   confidence: number;
   elapsedMs: number;
   error: string | null;
@@ -38,6 +45,7 @@ export function makeJob(file: File): Promise<Job> {
     url: URL.createObjectURL(file),
     status: "queued",
     text: "",
+    outputMode: "text",
     confidence: -1,
     elapsedMs: 0,
     error: null,
@@ -57,6 +65,7 @@ export function makeJobsFromReadFiles(files: { name: string; bytes: number[] }[]
       url: URL.createObjectURL(blob),
       status: "queued" as const,
       text: "",
+      outputMode: "text" as const,
       confidence: -1,
       elapsedMs: 0,
       error: null,
@@ -111,11 +120,14 @@ export async function exportResults(jobs: Job[]): Promise<void> {
     filters: [
       { name: "CSV", extensions: ["csv"] },
       { name: "Text", extensions: ["txt"] },
+      { name: "hOCR", extensions: ["hocr", "html"] },
     ],
   });
   if (!dest) return; // user cancelled
 
-  const isCsv = dest.toLowerCase().endsWith(".csv");
+  const lower = dest.toLowerCase();
+  const isCsv = lower.endsWith(".csv");
+  const isHocr = lower.endsWith(".hocr") || lower.endsWith(".html");
   let content: string;
   if (isCsv) {
     const rows = ["filename,confidence,elapsed_ms,text"];
@@ -125,11 +137,24 @@ export async function exportResults(jobs: Job[]): Promise<void> {
           csvField(j.name),
           j.confidence,
           j.elapsedMs,
-          csvField(j.text.replace(/\s+$/, "")),
+          // hOCR XML is kept verbatim; plain text gets a trailing trim.
+          csvField(j.outputMode === "hocr" ? j.text : j.text.replace(/\s+$/, "")),
         ].join(",")
       );
     }
     content = rows.join("\n") + "\n";
+  } else if (isHocr) {
+    // Each job's hOCR is a standalone document; separate them with XML
+    // comments so the file remains parseable per-block.
+    const blocks = done.map((j) => {
+      if (j.outputMode === "hocr") {
+        return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) -->\n${j.text}`;
+      }
+      // A text-mode job has no hOCR; record its result as a comment.
+      const body = j.text.replace(/\s+$/, "");
+      return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) — plain text, no hOCR -->\n<!-- ${body.replace(/-->/g, "-")} -->`;
+    });
+    content = blocks.join("\n\n") + "\n";
   } else {
     const blocks = done.map(
       (j) =>

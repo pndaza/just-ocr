@@ -23,7 +23,12 @@
   function cycleTheme() {
     theme = toggleTheme();
   }
-  let opts = $state<OcrOpts>({ language: "eng", psm: 3, whitelist: null });
+  let opts = $state<OcrOpts>({
+    language: "eng",
+    psm: 3,
+    whitelist: null,
+    outputMode: "text",
+  });
 
   let jobs = $state<Job[]>([]);
   let selectedId = $state<number | null>(null);
@@ -170,6 +175,9 @@
 
   async function processJob(job: Job) {
     job.status = "running";
+    // Record the output mode used so display/export follow the job, not the
+    // live setting (which the user may change between runs).
+    job.outputMode = opts.outputMode;
     try {
       const res = await ocrFromBytes(job.bytes, opts);
       job.text = res.text;

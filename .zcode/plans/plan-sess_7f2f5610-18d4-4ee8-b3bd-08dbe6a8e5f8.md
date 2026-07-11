@@ -1,47 +1,39 @@
-## Plan: Light/Dark theme support with a single toggle button
+## Plan: Add hOCR output mode (Text / hOCR toggle)
 
-The app's entire color system already flows through 13 CSS variables in `src/styles.css :root`. There's no existing theme code (no `prefers-color-scheme`, `localStorage`, or `data-theme` anywhere). So the plan is: define a light palette as overrides on those same variables, add a `data-theme` attribute switch, persist the choice, and add one toggle button to the toolbar.
+The tesseract-rs binding already exposes `api.get_hocr_text(page: i32) -> Result<String>` (`api.rs:309`) — no config flags or renderers needed. The existing `run_ocr` calls `get_utf8_text()`; we just branch on a new option. `OcrResult` already carries a plain `String`, so the result shape is unchanged — only how we interpret/display it changes.
 
-### 1. `index.html` — no-flash inline script
-Add a tiny inline `<script>` in `<head>` that reads `localStorage["just-ocr:theme"]` (falling back to `matchMedia("(prefers-color-scheme: light)")`) and sets `document.documentElement.dataset.theme` **before** the app renders. This prevents a flash of the wrong theme on load. No styling in this file otherwise.
+### 1. Backend — `src-tauri/src/lib.rs`
+- Add `pub output_mode: Option<String>` to `OcrOpts`. Optional so existing behavior (text) is the default when the field is absent. (serde `camelCase` makes the frontend's `outputMode` line up.)
+- In `run_ocr`, after `api.set_image(...)`, branch:
+  - `output_mode == Some("hocr")` → `api.get_hocr_text(0)?`
+  - otherwise → `api.get_utf8_text()?` (unchanged)
+- `mean_text_conf()` works the same after either getter — confidence semantics are unchanged.
+- `OcrResult` unchanged.
 
-### 2. `src/styles.css` — light palette + shared translucent variables
-- Keep the existing `:root` block as the **dark** (default) palette, but also set `data-theme="dark"` semantics by defining the dark values there.
-- Introduce a few new shared variables for the translucent/overlay shades that are currently hardcoded as rgba literals in components, so both themes share them:
-  - `--accent-soft` (already exists — keep)
-  - `--ok-soft`, `--danger-soft` — replaces `rgba(139,216,139,0.1)` / `rgba(255,107,107,0.1/0.06/0.2)` in Preview, Output, LanguageManager
-  - `--overlay` — replaces the `rgba(0,0,0,…)` scrim/backdrop/drop-overlay literals
-- Add a `[data-theme="light"]` selector that re-defines all 13 color variables + the new soft/overlay ones to a warm light palette (warm off-white backgrounds, dark brown text, same orange accent). Dark remains the default in `:root`.
+### 2. Frontend types — `src/lib/ocr.ts`
+- Add `outputMode: "text" | "hocr"` to `OcrOpts`.
+- Add `outputMode: "text" | "hocr"` to `Job` so each job remembers the mode it was produced in (important: a user can run some images in text mode, switch to hOCR, run more — the display/export must follow the per-job mode, not the live setting).
+- In `exportResults`: add a third filter `{ name: "hOCR", extensions: ["hocr"] }` and an `.html`/`.xml` alias. When the chosen extension is hOCR, write each job's raw text verbatim (no trim). For multi-job hOCR export, concatenate each document's `<body>` content or write each as a separate file — simplest correct approach: one `.hocr` file per job isn't possible with a single save dialog, so concatenate with a separator header per image (matching the TXT block style but writing raw XML). I'll write each job's hOCR wrapped so it remains valid standalone XML per block.
+- `makeJob`/`makeJobsFromReadFiles`: stamp the current `opts.outputMode` onto each new job.
 
-### 3. `src/theme.ts` (new, ~20 lines)
-A small helper module so theme logic lives in one place:
-- `type Theme = "light" | "dark"`
-- `getTheme()` / `setTheme(t)` — reads/writes `localStorage["just-ocr:theme"]` and applies `document.documentElement.dataset.theme`
-- `toggleTheme()` — flips between the two
-- `initTheme()` — reads stored (or system) preference; the inline script already did this, but `initTheme` is the SSOT used on app boot so the Svelte state stays in sync.
+### 3. Output mode selector — `src/lib/Toolbar.svelte`
+- Add an `outputModeOptions` array: `[{ value: "text", label: "Text" }, { value: "hocr", label: "hOCR" }]`.
+- Add a `<label class="field">` with a `<select bind:value={opts.outputMode}>` next to the PSM field, reusing the existing `.field`/`.lbl`/`select` styles. Label: "Output".
 
-### 4. `src/App.svelte` — theme state
-- Add `let theme = $state<Theme>(currentTheme())` (from `theme.ts`).
-- Add `function toggleTheme() { theme = toggleAndPersist(); }` and pass it down to the Toolbar as a callback prop.
-- Replace the two hardcoded rgba literals identified by exploration so they theme-swap cleanly:
-  - line ~276 app gradient `rgba(255,184,107,0.04)` → `var(--accent-soft)` (or a new `--bg-glow` var)
-  - line ~322 drop overlay `rgba(22,19,15,0.7)` → `var(--overlay)`
+### 4. Display — `src/lib/Output.svelte`
+- Branch on `job.outputMode`:
+  - `"text"` → unchanged `<pre class="text">` rendering.
+  - `"hocr"` → render the XML in a `<pre class="text hocr">` (raw markup, monospace, scrollable, no trailing-trim). Change header label from "Text" to "hOCR".
+- Copy button copies `job.text` verbatim either way (already does).
+- Disable the `disabled={!job.text.trim()}` logic for hOCR (XML always has content if produced).
 
-### 5. `src/lib/Toolbar.svelte` — the toggle button
-- Add `ontoggletheme: () => void` and `theme: "light" | "dark"` to the `Props` interface and destructure them.
-- Insert a single compact icon button in the right cluster (after the spacer, near Export/Run buttons) styled like the existing `.btn.ghost`. It shows a sun glyph (`☀`) in dark mode (click → go light) and a moon glyph (`☾`) in light mode (click → go dark). One button, swaps both icon and `title`/`aria-label` based on current theme.
+### 5. Wire mode through `src/App.svelte`
+- Default `opts.outputMode = "text"` in the initial `opts` state.
+- When running OCR, the existing `opts` is passed to `ocrFromBytes`; stamp the resulting `outputMode` onto the job's state in the run handlers (`runCurrent`/`runAll`).
 
-### 6. Replace hardcoded rgba literals in components (so light theme is fully correct)
-- `src/lib/Preview.svelte` — `.status-pill.done`/`.error` backgrounds → `var(--ok-soft)` / `var(--danger-soft)`
-- `src/lib/Output.svelte` — `.error` backgrounds → `var(--danger-soft)`
-- `src/lib/LanguageManager.svelte` — `.backdrop` → `var(--overlay)`; `.banner` green tint → `var(--ok-soft)`
-- `src/lib/Thumbnail.svelte` — `.thumb-wrap { background:#000 }` → `var(--bg-inset)`; the badge/remove black overlays → `var(--overlay)`; the spinner `rgba(255,255,255,0.3)` → `var(--accent-soft)` (already dark-on-dark friendly)
-
-### 7. Verify
-- `npm run build` (frontend type-check + build)
-- `cargo tauri dev`, confirm: toggle flips all panels/modal/scrollbars, persists across reload (localStorage), and respects system preference on first launch.
+### 6. Verify
+- `cargo check` (Rust), `npm run build` (frontend type-check), then `cargo tauri dev` to confirm: Text mode unchanged, hOCR mode returns XML containing `ocr_page`/`ocr_line`/`ocr_word` elements, copy works, export-to-.hocr writes valid XML.
 
 ### Not doing
-- No new dependencies (no color-system libraries).
-- No Rust/Tauri changes — theme is purely a frontend concern.
-- Not adding an auto/system option as a third state — request was a single switch button that toggles between light and dark.
+- Not rendering hOCR as formatted HTML — hOCR is structured layout data (bounding boxes per word), and showing the raw XML is the honest, useful representation for this tool. Rendered HTML would hide the very information hOCR provides.
+- Not adding ALTO/TSV/box formats now — request was two modes (text or hOCR). The branch is trivially extensible later.

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
+  import type { OutputMode } from "./ocr";
   import type { Theme } from "../theme";
 
   interface Props {
@@ -47,6 +48,11 @@
     { value: 13, label: "13 · Raw line" },
   ];
 
+  const outputModes: { value: OutputMode; label: string }[] = [
+    { value: "text", label: "Text" },
+    { value: "hocr", label: "hOCR" },
+  ];
+
   let useWhitelist = $state(false);
   $effect(() => {
     opts.whitelist = useWhitelist ? (opts.whitelist ?? "") : null;
@@ -85,6 +91,13 @@
     <span class="lbl">PSM</span>
     <select bind:value={opts.psm}>
       {#each psmOptions as o}<option value={o.value}>{o.label}</option>{/each}
+    </select>
+  </label>
+
+  <label class="field">
+    <span class="lbl">Output</span>
+    <select bind:value={opts.outputMode}>
+      {#each outputModes as m}<option value={m.value}>{m.label}</option>{/each}
     </select>
   </label>
 

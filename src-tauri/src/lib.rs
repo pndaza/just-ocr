@@ -14,6 +14,8 @@ pub struct OcrOpts {
     pub psm: i32,
     /// When non-null, restricts recognition to these characters.
     pub whitelist: Option<String>,
+    /// "hocr" returns hOCR XML; anything else (or None) returns plain text.
+    pub output_mode: Option<String>,
 }
 
 /// OCR result returned to the frontend.
@@ -114,9 +116,21 @@ fn run_ocr(
     )
     .map_err(|e| format!("Failed to set image: {e}"))?;
 
-    let text = api
-        .get_utf8_text()
-        .map_err(|e| format!("OCR failed: {e}"))?;
+    // hOCR output returns structured XML with per-word bounding boxes;
+    // otherwise we return plain UTF-8 text. Both getters run recognition on
+    // the image set above, so only one is called.
+    let is_hocr = opts
+        .output_mode
+        .as_deref()
+        .map(|m| m.eq_ignore_ascii_case("hocr"))
+        .unwrap_or(false);
+    let text = if is_hocr {
+        api.get_hocr_text(0)
+            .map_err(|e| format!("OCR (hOCR) failed: {e}"))?
+    } else {
+        api.get_utf8_text()
+            .map_err(|e| format!("OCR failed: {e}"))?
+    };
 
     let confidence = api.mean_text_conf().unwrap_or(-1);
     let _ = api.end(); // best-effort cleanup
