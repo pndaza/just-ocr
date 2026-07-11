@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Job } from "./ocr";
-  import { parseHocrWords } from "./hocr";
+  import { parseHocrLines } from "./hocr";
 
   interface Props {
     job: Job | null;
@@ -13,7 +13,7 @@
   // so nothing can drift when the panel or window is resized.
   let parsed = $derived(
     job?.outputMode === "hocr" && job.status === "done" && job.text
-      ? parseHocrWords(job.text)
+      ? parseHocrLines(job.text)
       : null
   );
   let showBoxes = $derived(!!parsed && parsed.boxes.length > 0);
