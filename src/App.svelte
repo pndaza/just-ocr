@@ -28,7 +28,7 @@
   // ── Resizable panels ──────────────────────────────────────────────────────
   // Widths are pixel values; the middle/right columns split the remaining space
   // proportionally. Two drag handles sit between the three panels.
-  let leftW = $state(240);
+  let leftW = $state(200);
   let rightW = $state(460); // middle is flexible (flex: 1)
 
   let draggingHandle = $state<null | "left" | "right">(null);
@@ -46,7 +46,7 @@
     const rect = main.getBoundingClientRect();
     if (draggingHandle === "left") {
       // Left panel width = cursor x relative to main's left edge.
-      leftW = Math.max(200, Math.min(350, e.clientX - rect.left));
+      leftW = Math.max(150, Math.min(250, e.clientX - rect.left));
     } else {
       // Right panel width = distance from cursor to main's right edge.
       rightW = Math.max(200, Math.min(rect.width - leftW - 200, rect.right - e.clientX));

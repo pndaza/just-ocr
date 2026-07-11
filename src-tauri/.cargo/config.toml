@@ -1,0 +1,6 @@
+# Limit which languages the `embed-tessdata` feature of tesseract-rs compiles
+# into the binary. The crate's build script reads this variable (default
+# "eng,tur") and only embeds the listed codes. Burmese is shipped separately
+# via `include_bytes!` in src/languages.rs, so it isn't needed here.
+[env]
+TESSERACT_EMBED_LANGUAGES = "eng"
