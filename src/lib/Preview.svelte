@@ -7,58 +7,16 @@
   }
   let { job }: Props = $props();
 
-  // ── hOCR bounding-box overlay ─────────────────────────────────────────────
-  // When the selected job was produced in hOCR mode, parse its word boxes and
-  // draw them as an SVG layer positioned exactly over the fitted image.
-  let imgEl = $state<HTMLImageElement | null>(null);
-  let stageEl = $state<HTMLDivElement | null>(null);
-
+  // When the job was produced in hOCR mode, embed the image inside the same SVG
+  // as the bounding boxes. Both then share one coordinate system and scale as a
+  // single unit — no JS measurement, ResizeObserver, or getBoundingClientRect,
+  // so nothing can drift when the panel or window is resized.
   let parsed = $derived(
     job?.outputMode === "hocr" && job.status === "done" && job.text
       ? parseHocrWords(job.text)
       : null
   );
   let showBoxes = $derived(!!parsed && parsed.boxes.length > 0);
-
-  // Rendered image rect, relative to the stage. The img has no object-fit
-  // (max-width/height already preserve aspect ratio for auto-sized replaced
-  // elements), so its element box IS the drawn image — no letterbox math
-  // needed, just getBoundingClientRect relative to the stage.
-  let rect = $state({ left: 0, top: 0, width: 0, height: 0 });
-
-  function measure() {
-    const img = imgEl;
-    const stage = stageEl;
-    if (!img || !stage) return;
-    const ir = img.getBoundingClientRect();
-    const sr = stage.getBoundingClientRect();
-    rect = {
-      left: ir.left - sr.left,
-      top: ir.top - sr.top,
-      width: ir.width,
-      height: ir.height,
-    };
-  }
-
-  // Re-measure when the parsed result or image element changes.
-  $effect(() => {
-    parsed; // depend on parsed
-    const img = imgEl;
-    if (!img) return;
-    if (img.complete) measure();
-    const onLoad = () => measure();
-    img.addEventListener("load", onLoad);
-    return () => img.removeEventListener("load", onLoad);
-  });
-
-  // Re-measure on stage resize (panel dragged / window resized).
-  $effect(() => {
-    const stage = stageEl;
-    if (!stage) return;
-    const ro = new ResizeObserver(() => measure());
-    ro.observe(stage);
-    return () => ro.disconnect();
-  });
 </script>
 
 <div class="panel" role="region" aria-label="Image preview">
@@ -73,23 +31,21 @@
       </span>
     {/if}
   </div>
-  <div class="stage" bind:this={stageEl}>
-    {#if job}
-      <img src={job.url} alt={job.name} bind:this={imgEl} />
-    {:else}
-      <div class="placeholder">
-        <div class="ph-icon">▢</div>
-        <p>Select an image to preview</p>
-      </div>
-    {/if}
-
+  <div class="stage">
     {#if showBoxes && parsed}
+      <!-- Image + boxes in one SVG: they cannot drift apart. -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <svg
-        class="bbox-layer"
-        style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
+        class="ocr-canvas"
         viewBox="0 0 {parsed.width} {parsed.height}"
       >
+        <image
+          href={job!.url}
+          x="0"
+          y="0"
+          width={parsed.width}
+          height={parsed.height}
+        />
         {#each parsed.boxes as b}
           <rect
             x={b.x0}
@@ -101,6 +57,13 @@
           />
         {/each}
       </svg>
+    {:else if job}
+      <img src={job.url} alt={job.name} />
+    {:else}
+      <div class="placeholder">
+        <div class="ph-icon">▢</div>
+        <p>Select an image to preview</p>
+      </div>
     {/if}
   </div>
 </div>
@@ -143,7 +106,6 @@
   .status-pill.running { color: var(--accent); background: var(--accent-soft); }
   .status-pill.error { color: var(--danger); background: var(--danger-soft); }
   .stage {
-    position: relative;
     flex: 1;
     display: flex;
     align-items: center;
@@ -155,16 +117,20 @@
   .stage img {
     max-width: 100%;
     max-height: 100%;
-    /* The OCR backend reads raw pixels without applying EXIF orientation, so
-       the hOCR bbox coordinates are in the un-rotated pixel space. Force the
-       browser to show the same orientation so boxes line up with the image. */
+    /* OCR backend reads raw pixels (no EXIF rotation); match that here. */
     image-orientation: none;
     border-radius: 4px;
   }
-  .bbox-layer {
-    position: absolute;
-    pointer-events: none;
-    overflow: visible;
+  /* The SVG scales like an image: max-width/height cap it within the stage
+     while the viewBox preserves aspect ratio, so image and boxes resize
+     together with the panel. */
+  .ocr-canvas {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+    display: block;
+    border-radius: 4px;
   }
   .bbox {
     fill: none;
