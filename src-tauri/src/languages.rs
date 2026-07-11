@@ -12,6 +12,16 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tesseract_rs::{embedded_languages, get_embedded_tessdata};
 
+/// Languages shipped with the binary (in addition to whatever the
+/// `embed-tessdata` feature compiles in). Each entry pairs a language code
+/// with the raw `*.traineddata` bytes embedded at compile time via
+/// `include_bytes!`.
+const BUNDLED_LANGUAGES: &[(&str, &[u8])] = &[
+    // Burmese isn't part of the crate's embedded set, so we ship the
+    // traineddata next to the source and compile it in here.
+    ("mya", include_bytes!("mya.traineddata")),
+];
+
 /// Description of a language the user can install or has installed.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,8 +198,9 @@ fn pretty_name(code: &str) -> String {
         .unwrap_or_else(|| code.to_string())
 }
 
-/// List every available language: embedded ones, plus any installed on disk.
-/// Duplicates (an installed copy of an embedded language) collapse to "embedded".
+/// List every available language: embedded ones, the ones we ship alongside
+/// the binary, plus any installed on disk. Duplicates (e.g. an installed copy
+/// of an embedded or bundled language) collapse to the higher-priority source.
 #[tauri::command]
 pub fn list_languages(app: AppHandle) -> Vec<LanguageInfo> {
     let mut out: Vec<LanguageInfo> = embedded_languages()
@@ -202,8 +213,23 @@ pub fn list_languages(app: AppHandle) -> Vec<LanguageInfo> {
         .collect();
 
     let embedded: Vec<String> = embedded_languages().into_iter().map(String::from).collect();
+    for (code, _bytes) in BUNDLED_LANGUAGES {
+        if embedded.contains(&(*code).to_string()) {
+            continue;
+        }
+        out.push(LanguageInfo {
+            code: code.to_string(),
+            name: pretty_name(code),
+            source: "bundled",
+        });
+    }
+
+    let bundled: Vec<String> = BUNDLED_LANGUAGES
+        .iter()
+        .map(|(c, _)| c.to_string())
+        .collect();
     for code in installed_codes(&app) {
-        if embedded.contains(&code) {
+        if embedded.contains(&code) || bundled.contains(&code) {
             continue;
         }
         out.push(LanguageInfo {
@@ -342,10 +368,17 @@ fn save_traineddata(app: &AppHandle, code: &str, bytes: &[u8]) -> Result<(), Str
     Ok(())
 }
 
-/// Delete a user-installed language. Embedded languages cannot be removed.
+/// Delete a user-installed language. Embedded and bundled languages cannot be
+/// removed.
 #[tauri::command]
 pub fn delete_language(app: AppHandle, code: String) -> Result<(), String> {
     if embedded_languages().iter().any(|c| *c == code.as_str()) {
+        return Err(format!(
+            "'{}' is bundled into the app and cannot be removed.",
+            code
+        ));
+    }
+    if BUNDLED_LANGUAGES.iter().any(|(c, _)| *c == code.as_str()) {
         return Err(format!(
             "'{}' is bundled into the app and cannot be removed.",
             code
@@ -359,10 +392,17 @@ pub fn delete_language(app: AppHandle, code: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Load the traineddata bytes for a language, embedded first then on-disk.
+/// Load the traineddata bytes for a language: embedded first, then the ones
+/// shipped alongside the binary, then user-installed files on disk.
 /// Returns `(bytes, was_embedded)`.
 pub fn resolve_tessdata(app: &AppHandle, language: &str) -> Result<(Vec<u8>, bool), String> {
     if let Some(bytes) = get_embedded_tessdata(language) {
+        return Ok((bytes.to_vec(), true));
+    }
+    if let Some((_, bytes)) = BUNDLED_LANGUAGES
+        .iter()
+        .find(|(code, _)| *code == language)
+    {
         return Ok((bytes.to_vec(), true));
     }
     let path = tessdata_dir(app).join(format!("{language}.traineddata"));

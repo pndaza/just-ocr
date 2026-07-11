@@ -334,7 +334,8 @@
     background: var(--surface);
     color: var(--text-faint);
   }
-  .tag.embedded {
+  .tag.embedded,
+  .tag.bundled {
     color: var(--accent);
     background: var(--accent-soft);
   }
