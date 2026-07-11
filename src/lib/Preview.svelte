@@ -20,29 +20,23 @@
   );
   let showBoxes = $derived(!!parsed && parsed.boxes.length > 0);
 
-  // Rendered (fitted) image rect, relative to the stage. Updated on image
-  // load, panel resize, and selection change.
+  // Rendered image rect, relative to the stage. The img has no object-fit
+  // (max-width/height already preserve aspect ratio for auto-sized replaced
+  // elements), so its element box IS the drawn image — no letterbox math
+  // needed, just getBoundingClientRect relative to the stage.
   let rect = $state({ left: 0, top: 0, width: 0, height: 0 });
 
   function measure() {
     const img = imgEl;
     const stage = stageEl;
-    if (!img || !stage || !parsed) return;
-    const nw = img.naturalWidth || parsed.width;
-    const nh = img.naturalHeight || parsed.height;
-    if (!nw || !nh) return;
-    // object-fit: contain scales the image to fit inside its element box,
-    // centering it and leaving margins on the overflow axis.
-    const scale = Math.min(img.clientWidth / nw, img.clientHeight / nh);
-    const drawW = nw * scale;
-    const drawH = nh * scale;
-    const imgRect = img.getBoundingClientRect();
-    const stageRect = stage.getBoundingClientRect();
+    if (!img || !stage) return;
+    const ir = img.getBoundingClientRect();
+    const sr = stage.getBoundingClientRect();
     rect = {
-      left: imgRect.left - stageRect.left + (img.clientWidth - drawW) / 2,
-      top: imgRect.top - stageRect.top + (img.clientHeight - drawH) / 2,
-      width: drawW,
-      height: drawH,
+      left: ir.left - sr.left,
+      top: ir.top - sr.top,
+      width: ir.width,
+      height: ir.height,
     };
   }
 
@@ -95,7 +89,6 @@
         class="bbox-layer"
         style="left:{rect.left}px; top:{rect.top}px; width:{rect.width}px; height:{rect.height}px;"
         viewBox="0 0 {parsed.width} {parsed.height}"
-        preserveAspectRatio="none"
       >
         {#each parsed.boxes as b}
           <rect
@@ -162,7 +155,10 @@
   .stage img {
     max-width: 100%;
     max-height: 100%;
-    object-fit: contain;
+    /* The OCR backend reads raw pixels without applying EXIF orientation, so
+       the hOCR bbox coordinates are in the un-rotated pixel space. Force the
+       browser to show the same orientation so boxes line up with the image. */
+    image-orientation: none;
     border-radius: 4px;
   }
   .bbox-layer {
