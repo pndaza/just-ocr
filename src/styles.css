@@ -1,5 +1,5 @@
 :root {
-  /* warm dark "developer tool" palette */
+  /* warm dark "developer tool" palette (default theme) */
   --bg: #16130f;
   --bg-elev: #1f1b15;
   --bg-inset: #100e0b;
@@ -14,6 +14,10 @@
   --accent-soft: rgba(255, 184, 107, 0.12);
   --danger: #ff6b6b;
   --ok: #8bd88b;
+  /* translucent tints & scrims shared across both themes */
+  --ok-soft: rgba(139, 216, 139, 0.12);
+  --danger-soft: rgba(255, 107, 107, 0.1);
+  --overlay: rgba(0, 0, 0, 0.55);
   --radius: 10px;
   --mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui,
@@ -21,6 +25,29 @@
   font-family: var(--sans);
   color: var(--text);
   background: var(--bg);
+  color-scheme: dark;
+}
+
+/* Light palette — same variable names, warm paper-like values. */
+[data-theme="light"] {
+  --bg: #f7f3ec;
+  --bg-elev: #fffdf8;
+  --bg-inset: #ece6db;
+  --surface: #efe8db;
+  --border: #ddd3c2;
+  --border-strong: #c4b8a3;
+  --text: #2a241c;
+  --text-dim: #6a6052;
+  --text-faint: #9a8f7d;
+  --accent: #c9761f;
+  --accent-dim: #a85f12;
+  --accent-soft: rgba(201, 118, 31, 0.12);
+  --danger: #c83838;
+  --ok: #2f8f3c;
+  --ok-soft: rgba(47, 143, 60, 0.12);
+  --danger-soft: rgba(200, 56, 56, 0.1);
+  --overlay: rgba(40, 30, 20, 0.45);
+  color-scheme: light;
 }
 
 * {

@@ -15,8 +15,14 @@
     type OcrOpts,
     type Job,
   } from "./lib/ocr";
+  import { currentTheme, toggleTheme, type Theme } from "./theme";
 
   let languages = $state<string[]>(["eng"]);
+  let theme = $state<Theme>(currentTheme());
+
+  function cycleTheme() {
+    theme = toggleTheme();
+  }
   let opts = $state<OcrOpts>({ language: "eng", psm: 3, whitelist: null });
 
   let jobs = $state<Job[]>([]);
@@ -213,6 +219,8 @@
     onrunall={runAll}
     onexport={exportAll}
     onmanagelanguages={openLangManager}
+    {theme}
+    ontoggletheme={cycleTheme}
   />
   <main id="main-area">
     <section class="col left" style="width:{leftW}px">
@@ -272,7 +280,7 @@
     height: 100vh;
     background: radial-gradient(
         1200px 600px at 100% -10%,
-        rgba(255, 184, 107, 0.04),
+        var(--accent-soft),
         transparent 60%
       ),
       var(--bg);
@@ -317,7 +325,7 @@
   .drop-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(22, 19, 15, 0.7);
+    background: var(--overlay);
     display: flex;
     align-items: center;
     justify-content: center;

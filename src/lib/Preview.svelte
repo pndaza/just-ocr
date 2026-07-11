@@ -65,9 +65,9 @@
     background: var(--surface);
     color: var(--text-dim);
   }
-  .status-pill.done { color: var(--ok); background: rgba(139, 216, 139, 0.1); }
+  .status-pill.done { color: var(--ok); background: var(--ok-soft); }
   .status-pill.running { color: var(--accent); background: var(--accent-soft); }
-  .status-pill.error { color: var(--danger); background: rgba(255, 107, 107, 0.1); }
+  .status-pill.error { color: var(--danger); background: var(--danger-soft); }
   .stage {
     flex: 1;
     display: flex;

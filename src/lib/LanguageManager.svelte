@@ -210,7 +210,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--overlay);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -226,7 +226,7 @@
     border: 1px solid var(--border-strong);
     border-radius: 14px;
     overflow: hidden;
-    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 24px 70px var(--overlay);
   }
   .modal-head {
     display: flex;
@@ -255,8 +255,8 @@
     padding: 9px 20px;
     font-size: 12px;
     color: var(--ok);
-    background: rgba(139, 216, 139, 0.08);
-    border-bottom: 1px solid rgba(139, 216, 139, 0.2);
+    background: var(--ok-soft);
+    border-bottom: 1px solid var(--ok);
   }
   .block {
     padding: 14px 20px;

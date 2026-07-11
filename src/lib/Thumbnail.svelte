@@ -241,7 +241,7 @@
     aspect-ratio: 3 / 4;
     border-radius: 7px;
     overflow: hidden;
-    background: #000;
+    background: var(--bg-inset);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -260,7 +260,7 @@
     height: 8px;
     border-radius: 50%;
     background: var(--text-faint);
-    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 0 0 2px var(--overlay);
   }
   .status-dot.queued { background: var(--text-faint); }
   .status-dot.running { background: var(--accent); animation: pulse 1.2s infinite; }
@@ -279,7 +279,7 @@
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 4px;
-    background: rgba(0, 0, 0, 0.65);
+    background: var(--overlay);
     backdrop-filter: blur(3px);
   }
   .badge.conf { color: var(--ok); }
@@ -291,7 +291,7 @@
     transform: translate(-50%, -50%);
     width: 20px;
     height: 20px;
-    border: 2px solid rgba(255, 255, 255, 0.3);
+    border: 2px solid var(--accent-soft);
     border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
@@ -315,7 +315,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--overlay);
     backdrop-filter: blur(3px);
     border: none;
     border-radius: 5px;
@@ -328,7 +328,7 @@
   .vrow.sel .remove { opacity: 1; }
   .remove:hover {
     color: var(--danger);
-    background: rgba(0, 0, 0, 0.85);
+    background: var(--overlay);
   }
   @keyframes spin { to { transform: translate(-50%, -50%) rotate(360deg); } }
 

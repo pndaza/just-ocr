@@ -107,8 +107,8 @@
   }
   .error {
     color: var(--danger);
-    background: rgba(255, 107, 107, 0.06);
-    border: 1px solid rgba(255, 107, 107, 0.2);
+    background: var(--danger-soft);
+    border: 1px solid var(--danger);
     border-radius: 8px;
     padding: 14px;
     font-size: 13px;

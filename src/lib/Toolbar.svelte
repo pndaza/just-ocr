@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
+  import type { Theme } from "../theme";
 
   interface Props {
     opts: OcrOpts;
@@ -9,10 +10,12 @@
     doneCount: number;
     canRunCurrent: boolean;
     hasSelection: boolean;
+    theme: Theme;
     onruncurrent: () => void;
     onrunall: () => void;
     onexport: () => void;
     onmanagelanguages: () => void;
+    ontoggletheme: () => void;
   }
   let {
     opts,
@@ -22,10 +25,12 @@
     doneCount,
     canRunCurrent,
     hasSelection,
+    theme,
     onruncurrent,
     onrunall,
     onexport,
     onmanagelanguages,
+    ontoggletheme,
   }: Props = $props();
 
   const psmOptions = [
@@ -55,6 +60,13 @@
   </div>
 
   <div class="divider"></div>
+
+  <button
+    class="theme-toggle"
+    onclick={ontoggletheme}
+    title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+    aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+  >{theme === "dark" ? "☀" : "☾"}</button>
 
   <label class="field">
     <span class="lbl">Lang</span>
@@ -145,6 +157,25 @@
     width: 1px;
     height: 24px;
     background: var(--border);
+  }
+  .theme-toggle {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 14px;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+  }
+  .theme-toggle:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
   }
   .field {
     display: flex;
