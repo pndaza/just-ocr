@@ -12,7 +12,86 @@
 //! image-based OCR pipeline.
 
 use lopdf::{Dictionary, Document, Object};
+use rayon::prelude::*;
 use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+/// Output color format for the per-page PNGs fed to Tesseract.
+///
+/// - `Color`: 24-bit RGB (verbatim from the source image).
+/// - `Gray`: 8-bit grayscale — the recommended default. Tesseract 4/5 (LSTM)
+///   binarizes internally from grayscale, so this keeps everything it needs
+///   while cutting the PNG to ~1/3 the size of RGB.
+/// - `Bw`: 8-bit black & white, Otsu-thresholded. Smallest and ideal for
+///   pristine printed scans, but can hurt accuracy on noisy/photographic pages
+///   because it discards the gray levels Tesseract relies on.
+#[derive(Clone, Copy)]
+pub(crate) enum ImageMode {
+    Color,
+    Gray,
+    Bw,
+}
+
+impl Default for ImageMode {
+    fn default() -> Self {
+        ImageMode::Gray
+    }
+}
+
+/// Convert a decoded page image (24-bit RGB, or RGB composited over white)
+/// into the requested color format for Tesseract.
+fn to_target(img: image::DynamicImage, mode: ImageMode) -> image::DynamicImage {
+    match mode {
+        ImageMode::Color => img,
+        ImageMode::Gray => img.grayscale(),
+        ImageMode::Bw => {
+            let gray = img.grayscale().into_luma8();
+            let thresh = otsu_threshold(&gray);
+            let bin = image::GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
+                image::Luma([if gray.get_pixel(x, y).0[0] < thresh { 0 } else { 255 }])
+            });
+            image::DynamicImage::ImageLuma8(bin)
+        }
+    }
+}
+
+/// Otsu's method: pick the 0..=255 threshold maximizing between-class variance,
+/// so foreground text and background are split automatically (no fixed cutoff).
+fn otsu_threshold(img: &image::GrayImage) -> u8 {
+    let mut hist = [0u32; 256];
+    for p in img.pixels() {
+        hist[p.0[0] as usize] += 1;
+    }
+    let total = img.pixels().count() as u64;
+    let mut sum = 0u64;
+    for (i, &c) in hist.iter().enumerate() {
+        sum += i as u64 * c as u64;
+    }
+    let mut w_b = 0u64;
+    let mut sum_b = 0u64;
+    let mut max_var = 0.0_f64;
+    let mut threshold = 127u8;
+    for t in 0..256 {
+        w_b += hist[t] as u64;
+        if w_b == 0 {
+            continue;
+        }
+        let w_f = total - w_b;
+        if w_f == 0 {
+            break;
+        }
+        sum_b += t as u64 * hist[t] as u64;
+        let m_b = sum_b as f64 / w_b as f64;
+        let m_f = (sum - sum_b) as f64 / w_f as f64;
+        let between = w_b as f64 * w_f as f64 * (m_b - m_f) * (m_b - m_f);
+        if between > max_var {
+            max_var = between;
+            threshold = t as u8;
+        }
+    }
+    threshold
+}
 
 /// Formats the display name for a page extracted from a PDF.
 ///
@@ -30,39 +109,87 @@ pub(crate) fn page_name(pdf_name: &str, page: usize) -> String {
 /// to RGB8 and re-encoded as PNG (so it drops into the existing image pipeline).
 /// Returns one entry per page that yielded an image, in page order. Pages with
 /// no extractable image are skipped; the caller surfaces the count.
-pub(crate) fn extract_pages(pdf_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+///
+/// `on_progress(done, total)` is called once with the total page count, then
+/// once per page after it is processed, so the UI can show progress.
+///
+/// Decoding/re-encoding each page's image is independent and CPU-bound (the
+/// `image`/inflate/fax decoders are single-threaded), so pages run across a
+/// rayon pool. The cheap "pick the largest image" step stays inline; a shared
+/// `seen_ids` set preserves the cross-page dedup of repeated image XObjects.
+pub(crate) fn extract_pages(
+    pdf_bytes: &[u8],
+    on_progress: impl Fn(usize, usize) + Send + Sync,
+    image_mode: ImageMode,
+) -> Result<Vec<Vec<u8>>, String> {
     // Load from memory via a temp file: lopdf's Document::load takes a path,
     // and load_from takes a Read. Bytes in memory satisfy the latter.
     let doc = Document::load_from(pdf_bytes).map_err(|e| format!("Failed to load PDF: {e}"))?;
     let pages = doc.get_pages();
+    let total = pages.len();
+    on_progress(0, total);
 
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    // Pages is a BTreeMap<u32, ObjectId>, so iteration is already in page order.
-    for (&page_num, &page_id) in &pages {
-        let pdf_images = match doc.get_page_images(page_id) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Warning: page {page_num} images: {e}");
-                continue;
-            }
-        };
-        // Pick the largest image on the page — the full-page scan, typically.
-        // Smaller images (logos, signatures) are ignored.
-        let best = pdf_images
-            .iter()
-            .filter(|i| seen_ids.insert(i.id))
-            .max_by_key(|i| i.width * i.height);
-        let Some(img) = best else { continue };
-        match decode_image(img) {
-            Ok((rgb, w, h)) => match reencode_png(&rgb, w, h) {
-                Ok(png) => out.push(png),
-                Err(e) => eprintln!("Warning: page {page_num} re-encode: {e}"),
-            },
-            Err(e) => eprintln!("Warning: page {page_num} decode: {e}"),
-        }
-    }
-    Ok(out)
+    // Dedup of image XObjects shared across pages (e.g. a logo on every page).
+    // Guarded because pages decode on multiple threads.
+    let seen_ids = Mutex::new(std::collections::HashSet::new());
+    // Counts completed pages so progress events stay monotonic across threads.
+    let completed = AtomicUsize::new(0);
+
+    // BTreeMap iterates in page order; rayon preserves that order in `collect`,
+    // so the returned PNGs line up with `page_name(..., i + 1)`.
+    let pngs: Vec<Option<Vec<u8>>> = pages
+        .par_iter()
+        .map(|(&page_num, &page_id)| {
+            // Locate + pick the largest image for this page (cheap, borrows doc).
+            let pdf_images = match doc.get_page_images(page_id) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("Warning: page {page_num} images: {e}");
+                    let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+                    on_progress(done, total);
+                    return None;
+                }
+            };
+            let best = pdf_images
+                .iter()
+                .filter(|i| seen_ids.lock().unwrap().insert(i.id))
+                .max_by_key(|i| i.width * i.height);
+
+            // Heavy, independent work: decode to RGB8, convert to the requested
+            // color mode, then re-encode as PNG.
+            let png = match best {
+                Some(img) => match decode_image(img) {
+                    Ok((rgb, w, h)) => {
+                        let dyn_img = match image::RgbImage::from_raw(w, h, rgb) {
+                            Some(b) => image::DynamicImage::ImageRgb8(b),
+                            None => {
+                                eprintln!("Warning: page {page_num} RGB buffer size mismatch");
+                                return None;
+                            }
+                        };
+                        match reencode_png(&to_target(dyn_img, image_mode)) {
+                            Ok(png) => Some(png),
+                            Err(e) => {
+                                eprintln!("Warning: page {page_num} re-encode: {e}");
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: page {page_num} decode: {e}");
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            let done = completed.fetch_add(1, Ordering::SeqCst) + 1;
+            on_progress(done, total);
+            png
+        })
+        .collect();
+
+    Ok(pngs.into_iter().flatten().collect())
 }
 
 /// Render every page of `pdf_bytes` to a PNG at a fixed output height of
@@ -73,7 +200,15 @@ pub(crate) fn extract_pages(pdf_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 /// Scaling is derived from each page's own dimensions so every page ends up
 /// the same pixel height regardless of its MediaBox — important because scanned
 /// PDFs often declare oversized pages that would otherwise explode the output.
-pub(crate) fn render_pages(pdf_bytes: &[u8], target_height: u16) -> Result<Vec<Vec<u8>>, String> {
+///
+/// `on_progress(done, total)` is called once with the total page count, then
+/// once per page after it is rasterized, so the UI can show progress.
+pub(crate) fn render_pages(
+    pdf_bytes: &[u8],
+    target_height: u16,
+    on_progress: impl Fn(usize, usize) + Send + Sync,
+    image_mode: ImageMode,
+) -> Result<Vec<Vec<u8>>, String> {
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::hayro_syntax::Pdf;
     use hayro::vello_cpu::color::palette::css::WHITE;
@@ -86,8 +221,12 @@ pub(crate) fn render_pages(pdf_bytes: &[u8], target_height: u16) -> Result<Vec<V
     // vector PDFs fall back to the standard 14 fonts.
     let interpreter_settings = InterpreterSettings::default();
 
+    let pages = pdf.pages();
+    let total = pages.len();
+    on_progress(0, total);
+
     let mut out = Vec::new();
-    for page in pdf.pages().iter() {
+    for (i, page) in pages.iter().enumerate() {
         // page.render_dimensions() is the unscaled (width, height) in points.
         // Scale so the rendered height is exactly target_height px.
         let (_w, h) = page.render_dimensions();
@@ -103,10 +242,36 @@ pub(crate) fn render_pages(pdf_bytes: &[u8], target_height: u16) -> Result<Vec<V
             ..Default::default()
         };
         let pixmap = render(page, &cache, &interpreter_settings, &settings);
-        let png = pixmap
-            .into_png()
-            .map_err(|e| format!("PNG encode failed: {e}"))?;
+        let (pw, ph) = (pixmap.width(), pixmap.height());
+        // Composite the straight-alpha RGBA pixmap over white, then convert to
+        // the requested color mode before encoding the PNG.
+        let rgba = pixmap.take_unpremultiplied();
+        let mut rgb_buf = Vec::with_capacity(rgba.len() * 3);
+        for p in &rgba {
+            let a = p.a as f32 / 255.0;
+            let blend = |c: u8| (c as f32 * a + 255.0 * (1.0 - a)) as u8;
+            rgb_buf.push(blend(p.r));
+            rgb_buf.push(blend(p.g));
+            rgb_buf.push(blend(p.b));
+        }
+        let rgb_img = match image::RgbImage::from_raw(pw as u32, ph as u32, rgb_buf) {
+            Some(b) => b,
+            None => {
+                eprintln!("Warning: page {} RGB buffer size mismatch", i + 1);
+                on_progress(i + 1, total);
+                continue;
+            }
+        };
+        let png = match reencode_png(&to_target(image::DynamicImage::ImageRgb8(rgb_img), image_mode)) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: page {} PNG encode: {e}", i + 1);
+                on_progress(i + 1, total);
+                continue;
+            }
+        };
         out.push(png);
+        on_progress(i + 1, total);
     }
     Ok(out)
 }
@@ -491,12 +656,9 @@ fn decode_ccitt(
 
 /// Re-encode RGB8 pixels as PNG bytes so the result drops into the existing
 /// image-based OCR pipeline (which decodes via `image::load_from_memory`).
-fn reencode_png(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let buf = image::RgbImage::from_raw(width, height, rgb.to_vec())
-        .ok_or_else(|| "failed to create image buffer".to_string())?;
+fn reencode_png(img: &image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
-    image::DynamicImage::ImageRgb8(buf)
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| format!("PNG encode: {e}"))?;
     Ok(out)
 }
@@ -523,7 +685,7 @@ mod tests {
 
 #[cfg(test)]
 mod extract_tests {
-    use super::extract_pages;
+    use super::{extract_pages, ImageMode};
     use std::path::PathBuf;
 
     fn fixture() -> Option<PathBuf> {
@@ -538,7 +700,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read fixture");
-        let pages = extract_pages(&bytes).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
         assert!(!pages.is_empty(), "expected at least one extracted page");
         for png in &pages {
             assert!(!png.is_empty(), "extracted page PNG must be non-empty");
@@ -548,7 +710,7 @@ mod extract_tests {
 
     #[test]
     fn rejects_garbage_bytes() {
-        let err = extract_pages(b"not a pdf").unwrap_err();
+        let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray).unwrap_err();
         assert!(
             err.to_lowercase().contains("load") || err.to_lowercase().contains("pdf"),
             "expected a load error, got: {err}"

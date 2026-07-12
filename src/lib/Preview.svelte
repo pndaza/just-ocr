@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Job } from "./ocr";
+  import { ensureThumb } from "./ocr";
   import { parseHocrLines } from "./hocr";
 
   interface Props {
@@ -33,6 +34,11 @@
   $effect(() => {
     job?.id; // track selection
     zoom = null;
+  });
+  // Path-based (PDF page) jobs hold their pixels in a temp file; load the
+  // preview image on demand instead of keeping all pages in memory.
+  $effect(() => {
+    if (job?.path && !job.url) ensureThumb(job);
   });
   // hOCR mode: dimensions are known immediately from the page bbox.
   $effect(() => {

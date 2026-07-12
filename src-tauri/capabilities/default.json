@@ -6,8 +6,9 @@
   "permissions": [
     "core:default",
     "dialog:allow-save",
-    "dialog:allow-message",
     "fs:allow-write-file",
+    "fs:allow-read-file",
+    "fs:allow-remove",
     {
       "identifier": "fs:scope",
       "allow": [
