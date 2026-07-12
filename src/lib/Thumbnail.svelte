@@ -156,7 +156,7 @@
   <input
     bind:this={input}
     type="file"
-    accept="image/*"
+    accept="image/*,.pdf,application/pdf"
     multiple
     onchange={(e) => e.currentTarget.files && onfiles(e.currentTarget.files)}
     hidden
