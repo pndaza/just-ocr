@@ -15,6 +15,10 @@ export interface HocrParseResult {
   width: number;
   height: number;
   boxes: HocrBox[];
+  /// Plain UTF-8 text reconstructed from the word spans, one line per
+  /// `.ocr_line` (joined with "\n"). Used to display `text`-mode jobs whose
+  /// stored `text` is actually hOCR XML.
+  text: string;
 }
 
 /** Extract the first `bbox x0 y0 x1 y1` from an hOCR element's `title`
@@ -36,10 +40,11 @@ function parseTitle(title: string): {
   return out;
 }
 
-/** Parse hOCR markup into page dimensions + line boxes. Defensive: on any
- * failure returns width/height 0 and an empty box list. */
+/** Parse hOCR markup into page dimensions + line boxes + plain text.
+ * Defensive: on any failure returns width/height 0, an empty box list, and
+ * an empty text string. */
 export function parseHocrLines(hocr: string): HocrParseResult {
-  const empty: HocrParseResult = { width: 0, height: 0, boxes: [] };
+  const empty: HocrParseResult = { width: 0, height: 0, boxes: [], text: "" };
   try {
     const doc = new DOMParser().parseFromString(hocr, "text/html");
     const page = doc.querySelector(".ocr_page");
@@ -48,12 +53,26 @@ export function parseHocrLines(hocr: string): HocrParseResult {
     if (pg.x1 === 0 || pg.y1 === 0) return empty;
 
     const boxes: HocrBox[] = [];
+    const lines: string[] = [];
     for (const el of doc.querySelectorAll(".ocr_line")) {
       const t = parseTitle(el.getAttribute("title") || "");
-      if (t.x1 <= t.x0 || t.y1 <= t.y0) continue;
-      boxes.push(t);
+      if (t.x1 > t.x0 && t.y1 > t.y0) boxes.push(t);
+
+      // Reconstruct the line's text from its word spans; fall back to the raw
+      // line text if no word spans are present.
+      const words = el.querySelectorAll(".ocrx_word");
+      let line: string;
+      if (words.length) {
+        line = Array.from(words)
+          .map((w) => w.textContent?.trim() ?? "")
+          .filter((w) => w.length)
+          .join(" ");
+      } else {
+        line = (el.textContent ?? "").trim();
+      }
+      lines.push(line);
     }
-    return { width: pg.x1, height: pg.y1, boxes };
+    return { width: pg.x1, height: pg.y1, boxes, text: lines.join("\n") };
   } catch {
     return empty;
   }

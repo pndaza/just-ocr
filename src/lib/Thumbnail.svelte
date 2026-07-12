@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ensureThumb } from "./ocr";
   import type { Job } from "./ocr";
 
   interface Props {
@@ -50,6 +51,15 @@
   let visible = $derived(jobs.slice(startIdx, endIdx));
   let spacerTop = $derived(startIdx * rowH);
   let spacerBottom = $derived((total - endIdx) * rowH);
+
+  // Lazily load thumbnails for path-based jobs (PDF pages) as their rows become
+  // visible. Only the on-screen rows are fetched, so we never ship all page
+  // images at once. ensureThumb is idempotent (skips jobs that already have a URL).
+  $effect(() => {
+    for (const job of visible) {
+      if (job.path && !job.url) ensureThumb(job);
+    }
+  });
 
   function handleScroll(e: Event) {
     scrollTop = (e.currentTarget as HTMLDivElement).scrollTop;
@@ -156,7 +166,7 @@
   <input
     bind:this={input}
     type="file"
-    accept="image/*"
+    accept="image/*,.pdf,application/pdf"
     multiple
     onchange={(e) => e.currentTarget.files && onfiles(e.currentTarget.files)}
     hidden

@@ -1,6 +1,5 @@
 <script lang="ts">
-  import type { OcrOpts } from "./ocr";
-  import type { OutputMode } from "./ocr";
+  import type { OcrOpts, OutputMode } from "./ocr";
   import type { Theme } from "../theme";
 
   interface Props {

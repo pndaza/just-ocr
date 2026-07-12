@@ -7,14 +7,22 @@
   import LanguageManager from "./lib/LanguageManager.svelte";
   import {
     availableLanguages,
+    isPdf,
     makeJob,
     makeJobsFromReadFiles,
     ocrFromBytes,
     readFiles,
+    renderPdf,
     exportResults,
+    readJobBytes,
+    disposeJobFile,
     type OcrOpts,
     type Job,
+    type PdfMode,
+    type ImageMode,
+    type ReadFile,
   } from "./lib/ocr";
+  import PdfModeDialog from "./lib/PdfModeDialog.svelte";
   import { currentTheme, toggleTheme, type Theme } from "./theme";
 
   let languages = $state<string[]>(["eng"]);
@@ -35,6 +43,59 @@
   let running = $state(false);
   let dropping = $state(false);
   let showLangManager = $state(false);
+
+  // ── PDF processing (in-app dialog with progress) ───────────────────────────
+  // promptPdf() parks a promise that resolves to the per-page images (or null
+  // if the user cancels). After a mode is chosen, runPdfRendering() drives the
+  // backend and streams page progress into `pdfDialog` so the dialog can show
+  // a progress bar.
+  let pdfDialog = $state<{
+    name: string;
+    bytes: Uint8Array;
+    status: "choosing" | "working";
+    mode: PdfMode | null;
+    done: number;
+    total: number;
+    resolve: (pages: ReadFile[] | null) => void;
+  } | null>(null);
+
+  function promptPdf(name: string, bytes: Uint8Array): Promise<ReadFile[] | null> {
+    return new Promise((resolve) => {
+      pdfDialog = { name, bytes, status: "choosing", mode: null, done: 0, total: 0, resolve };
+    });
+  }
+
+  function onPdfModeChosen(mode: PdfMode, imageMode: ImageMode) {
+    if (!pdfDialog) return;
+    pdfDialog = { ...pdfDialog, status: "working", mode };
+    runPdfRendering(mode, imageMode);
+  }
+
+  async function runPdfRendering(mode: PdfMode, imageMode: ImageMode) {
+    const dlg = pdfDialog;
+    if (!dlg) return;
+    try {
+      const pages = await renderPdf(
+        dlg.name,
+        dlg.bytes,
+        mode,
+        (done, total) => {
+          if (pdfDialog) pdfDialog = { ...pdfDialog, done, total };
+        },
+        imageMode,
+      );
+      dlg.resolve(pages.length ? pages : null);
+    } catch (e) {
+      console.warn(`Could not process "${dlg.name}":`, e);
+      dlg.resolve(null);
+    }
+    pdfDialog = null;
+  }
+
+  function cancelPdf() {
+    pdfDialog?.resolve(null);
+    pdfDialog = null;
+  }
 
   // ── Resizable panels ──────────────────────────────────────────────────────
   // Widths are pixel values; the middle/right columns split the remaining space
@@ -111,7 +172,23 @@
   }
 
   async function addFiles(files: FileList) {
-    const added = await Promise.all(Array.from(files).map(makeJob));
+    const added: Job[] = [];
+    for (const file of Array.from(files)) {
+      try {
+        if (isPdf(file.name)) {
+          // Ask how to process the PDF, then extract/render it (progress is
+          // shown in the dialog). Cancel → skip the file.
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const pages = await promptPdf(file.name, buf);
+          if (!pages) continue;
+          added.push(...makeJobsFromReadFiles(pages));
+        } else {
+          added.push(await makeJob(file));
+        }
+      } catch (e) {
+        console.warn(`Could not add "${file.name}":`, e);
+      }
+    }
     jobs = [...jobs, ...added];
     if (selectedId === null && added.length) selectedId = added[0].id;
   }
@@ -121,7 +198,20 @@
     if (!paths.length) return;
     const read = await readFiles(paths);
     if (!read.length) return;
-    const added = makeJobsFromReadFiles(read);
+    const added: Job[] = [];
+    for (const f of read) {
+      try {
+        if (isPdf(f.name)) {
+          const pages = await promptPdf(f.name, new Uint8Array(f.bytes));
+          if (!pages) continue;
+          added.push(...makeJobsFromReadFiles(pages));
+        } else {
+          added.push(...makeJobsFromReadFiles([f]));
+        }
+      } catch (e) {
+        console.warn(`Could not add "${f.name}":`, e);
+      }
+    }
     jobs = [...jobs, ...added];
     if (selectedId === null && added.length) selectedId = added[0].id;
   }
@@ -159,7 +249,9 @@
   function remove(id: number) {
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return;
-    URL.revokeObjectURL(jobs[idx].url);
+    const job = jobs[idx];
+    URL.revokeObjectURL(job.url);
+    disposeJobFile(job); // best-effort cleanup of the temp PNG
     jobs = jobs.filter((j) => j.id !== id);
     if (selectedId === id) {
       const next = jobs[idx] ?? jobs[idx - 1] ?? null;
@@ -168,7 +260,10 @@
   }
 
   function clearAll() {
-    for (const j of jobs) URL.revokeObjectURL(j.url);
+    for (const j of jobs) {
+      URL.revokeObjectURL(j.url);
+      disposeJobFile(j); // best-effort cleanup of temp PNGs
+    }
     jobs = [];
     selectedId = null;
   }
@@ -179,7 +274,10 @@
     // live setting (which the user may change between runs).
     job.outputMode = opts.outputMode;
     try {
-      const res = await ocrFromBytes(job.bytes, opts);
+      // Path-based (PDF page) jobs read their pixels from the temp file; others
+      // use the in-memory bytes.
+      const bytes = await readJobBytes(job);
+      const res = await ocrFromBytes(bytes, opts);
       job.text = res.text;
       job.confidence = res.confidence;
       job.elapsedMs = res.elapsed_ms;
@@ -278,6 +376,18 @@
   <LanguageManager
     onclose={() => (showLangManager = false)}
     onchanged={onLanguagesChanged}
+  />
+{/if}
+
+{#if pdfDialog}
+  <PdfModeDialog
+    name={pdfDialog.name}
+    status={pdfDialog.status}
+    mode={pdfDialog.mode}
+    done={pdfDialog.done}
+    total={pdfDialog.total}
+    onprocess={onPdfModeChosen}
+    oncancel={cancelPdf}
   />
 {/if}
 
