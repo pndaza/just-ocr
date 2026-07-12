@@ -143,16 +143,15 @@ fn run_ocr(
     })
 }
 
-/// DPI is fixed at 300 — the Tesseract-recommended sweet spot for scans.
-const PDF_RENDER_DPI: f32 = 300.0;
-
-/// Rasterize every page of a PDF to a PNG at 300 DPI. Runs on a blocking
-/// thread so the UI stays responsive while large scans render. `pdf_name` is
-/// the original file name, used to label each page `<stem> · p<n>`.
+/// Extract the embedded image from each page of a PDF (one PNG per page).
+/// Runs on a blocking thread so the UI stays responsive while large scans
+/// decode. `pdf_name` is the original file name, used to label each page
+/// `<stem> · p<n>`. Extraction gives Tesseract the native scan resolution,
+/// which is both faster and more accurate than rasterizing the page.
 #[tauri::command]
 async fn render_pdf(pdf_name: String, bytes: Vec<u8>) -> Result<Vec<ReadFile>, String> {
     async_runtime::spawn_blocking(move || {
-        let pages = pdf::render_pages(&bytes, PDF_RENDER_DPI)?;
+        let pages = pdf::extract_pages(&bytes)?;
         Ok(pages
             .into_iter()
             .enumerate()
@@ -163,7 +162,7 @@ async fn render_pdf(pdf_name: String, bytes: Vec<u8>) -> Result<Vec<ReadFile>, S
             .collect())
     })
     .await
-    .map_err(|e| format!("PDF render task failed: {e}"))?
+    .map_err(|e| format!("PDF extract task failed: {e}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

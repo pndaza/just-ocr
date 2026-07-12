@@ -92,8 +92,9 @@ export function isPdf(name: string): boolean {
   return /\.pdf$/i.test(name);
 }
 
-/** Rasterize every page of a PDF to a PNG via the Rust `render_pdf` command.
- * Returns one ReadFile per page, named `<stem> · p<n>`. */
+/** Extract the embedded image from each page of a PDF (one PNG per page)
+ * via the Rust `render_pdf` command. Returns one ReadFile per page, named
+ * `<stem> · p<n>`. */
 export async function renderPdf(name: string, bytes: Uint8Array): Promise<ReadFile[]> {
   return invoke<ReadFile[]>("render_pdf", {
     pdfName: name,

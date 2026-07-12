@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline Tesseract OCR GUI"
 authors = ["you"]
 edition = "2021"
-rust-version = "1.92"
+rust-version = "1.88"
 
 [lib]
 name = "just_ocr_lib"
@@ -24,7 +24,12 @@ image = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["io-util"] }
-pdq = { version = "0.3", default-features = false, features = ["render"] }
+# PDF image extraction: lopdf walks page resources; flate2/fax decode the
+# common compressed image streams (FlateDecode, CCITTFaxDecode). The `image`
+# crate (above) handles JPEG decode and PNG re-encode.
+lopdf = { version = "0.43", default-features = false }
+flate2 = "1"
+fax = "0.2"
 
 [profile.release]
 panic = "abort"
