@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Offline Tesseract OCR GUI"
 authors = ["you"]
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.92"
 
 [lib]
 name = "just_ocr_lib"
@@ -24,6 +24,7 @@ image = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["io-util"] }
+pdq = { version = "0.3", default-features = false, features = ["render"] }
 
 [profile.release]
 panic = "abort"
