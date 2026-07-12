@@ -85,8 +85,8 @@
     if (id === null || !container) return;
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return;
-    const top = idx * ROW_H;
-    const bottom = top + ROW_H;
+    const top = idx * rowH;
+    const bottom = top + rowH;
     if (top < container.scrollTop) {
       container.scrollTop = top;
     } else if (bottom > container.scrollTop + container.clientHeight) {
@@ -241,9 +241,16 @@
   .vrow:hover {
     background: var(--bg-inset);
   }
-  .vrow.sel {
-    background: var(--accent-soft);
-    border-left-color: var(--accent);
+  /* The row is focusable (tabindex=0) for clicks, but the native focus outline
+     is redundant with our selection ring and reads as a stray blue border.
+     Suppress it; selection is shown by .vrow.sel .thumb-wrap. */
+  .vrow:focus {
+    outline: none;
+  }
+  .vrow.sel .thumb-wrap {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .thumb-wrap {
     position: relative;
@@ -270,7 +277,6 @@
     height: 8px;
     border-radius: 50%;
     background: var(--text-faint);
-    box-shadow: 0 0 0 2px var(--overlay);
   }
   .status-dot.queued { background: var(--text-faint); }
   .status-dot.running { background: var(--accent); animation: pulse 1.2s infinite; }
@@ -289,7 +295,7 @@
     font-weight: 600;
     padding: 1px 5px;
     border-radius: 4px;
-    background: var(--overlay);
+    background: var(--badge-bg);
     backdrop-filter: blur(3px);
   }
   .badge.conf { color: var(--ok); }
@@ -315,7 +321,10 @@
     margin-top: 4px;
     padding: 0 1px;
   }
-  .vrow.sel .name { color: var(--accent); }
+  .vrow.sel .name {
+    color: var(--accent);
+    font-weight: 600;
+  }
   .remove {
     position: absolute;
     top: 4px;
@@ -325,11 +334,11 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--overlay);
+    background: var(--badge-bg);
     backdrop-filter: blur(3px);
-    border: none;
+    border: 1px solid var(--border-strong);
     border-radius: 5px;
-    color: var(--text-dim);
+    color: var(--text);
     font-size: 11px;
     opacity: 0;
     transition: opacity 0.1s;
@@ -338,7 +347,8 @@
   .vrow.sel .remove { opacity: 1; }
   .remove:hover {
     color: var(--danger);
-    background: var(--overlay);
+    background: var(--badge-bg);
+    border-color: var(--danger);
   }
   @keyframes spin { to { transform: translate(-50%, -50%) rotate(360deg); } }
 

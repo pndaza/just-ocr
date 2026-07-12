@@ -150,6 +150,46 @@
     };
   });
 
+  // ── Keyboard navigation of the thumbnail list ──────────────────────────────
+  // Arrow keys move the selection (Up/Left = previous, Down/Right = next),
+  // wrapping at the ends. Ignored while typing in a field (whitelist, selects)
+  // or while a modal dialog is open, so it never steals keystrokes there.
+  // Reads happen inside the handler, so this effect registers exactly once.
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (pdfDialog || showLangManager) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      const up = e.key === "ArrowUp" || e.key === "ArrowLeft";
+      const down = e.key === "ArrowDown" || e.key === "ArrowRight";
+      if (!up && !down) return;
+      if (!jobs.length) return;
+      e.preventDefault();
+
+      const ids = jobs.map((j) => j.id);
+      const cur = selectedId === null ? -1 : ids.indexOf(selectedId);
+      let next: number;
+      if (cur === -1) {
+        // No selection yet: start from the relevant end.
+        next = up ? ids.length - 1 : 0;
+      } else {
+        // Clamp at the ends — don't wrap around to the opposite side.
+        next = Math.min(ids.length - 1, Math.max(0, cur + (up ? -1 : 1)));
+      }
+      select(ids[next]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
   function openLangManager() {
     showLangManager = true;
   }

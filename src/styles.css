@@ -18,6 +18,8 @@
   --ok-soft: rgba(139, 216, 139, 0.12);
   --danger-soft: rgba(255, 107, 107, 0.1);
   --overlay: rgba(0, 0, 0, 0.55);
+  /* frosted background for on-image pills (confidence badge) — dark by default */
+  --badge-bg: rgba(0, 0, 0, 0.55);
   --radius: 10px;
   --mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui,
@@ -43,10 +45,12 @@
   --accent-dim: #a85f12;
   --accent-soft: rgba(201, 118, 31, 0.12);
   --danger: #c83838;
-  --ok: #2f8f3c;
-  --ok-soft: rgba(47, 143, 60, 0.12);
+  --ok: #16a34a;
+  --ok-soft: rgba(22, 163, 74, 0.14);
   --danger-soft: rgba(200, 56, 56, 0.1);
   --overlay: rgba(40, 30, 20, 0.45);
+  /* frosted white pill on light backgrounds so the colored text stays legible */
+  --badge-bg: rgba(255, 255, 255, 0.8);
   color-scheme: light;
 }
 
