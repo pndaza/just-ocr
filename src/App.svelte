@@ -7,10 +7,12 @@
   import LanguageManager from "./lib/LanguageManager.svelte";
   import {
     availableLanguages,
+    isPdf,
     makeJob,
     makeJobsFromReadFiles,
     ocrFromBytes,
     readFiles,
+    renderPdf,
     exportResults,
     type OcrOpts,
     type Job,
@@ -111,7 +113,16 @@
   }
 
   async function addFiles(files: FileList) {
-    const added = await Promise.all(Array.from(files).map(makeJob));
+    const added: Job[] = [];
+    for (const file of Array.from(files)) {
+      if (isPdf(file.name)) {
+        const buf = new Uint8Array(await file.arrayBuffer());
+        const pages = await renderPdf(file.name, buf);
+        added.push(...makeJobsFromReadFiles(pages));
+      } else {
+        added.push(await makeJob(file));
+      }
+    }
     jobs = [...jobs, ...added];
     if (selectedId === null && added.length) selectedId = added[0].id;
   }
@@ -121,7 +132,15 @@
     if (!paths.length) return;
     const read = await readFiles(paths);
     if (!read.length) return;
-    const added = makeJobsFromReadFiles(read);
+    const added: Job[] = [];
+    for (const f of read) {
+      if (isPdf(f.name)) {
+        const pages = await renderPdf(f.name, new Uint8Array(f.bytes));
+        added.push(...makeJobsFromReadFiles(pages));
+      } else {
+        added.push(...makeJobsFromReadFiles([f]));
+      }
+    }
     jobs = [...jobs, ...added];
     if (selectedId === null && added.length) selectedId = added[0].id;
   }
