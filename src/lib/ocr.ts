@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
+import { parseHocrLines } from "./hocr";
 
 /** How the OCR engine returns its result. hOCR is structured XML with
  * per-word bounding boxes; text is plain UTF-8. */
@@ -243,6 +244,11 @@ export async function exportResults(jobs: Job[]): Promise<void> {
   });
   if (!dest) return; // user cancelled
 
+  // `text`-mode jobs store hOCR XML; reconstruct plain text for those exports.
+  // `hocr`-mode jobs keep the XML verbatim.
+  const plainText = (j: Job) =>
+    j.outputMode === "hocr" ? j.text : parseHocrLines(j.text).text;
+
   const lower = dest.toLowerCase();
   const isCsv = lower.endsWith(".csv");
   const isHocr = lower.endsWith(".hocr") || lower.endsWith(".html");
@@ -256,7 +262,9 @@ export async function exportResults(jobs: Job[]): Promise<void> {
           j.confidence,
           j.elapsedMs,
           // hOCR XML is kept verbatim; plain text gets a trailing trim.
-          csvField(j.outputMode === "hocr" ? j.text : j.text.replace(/\s+$/, "")),
+          csvField(
+            j.outputMode === "hocr" ? j.text : plainText(j).replace(/\s+$/, "")
+          ),
         ].join(",")
       );
     }
@@ -268,15 +276,15 @@ export async function exportResults(jobs: Job[]): Promise<void> {
       if (j.outputMode === "hocr") {
         return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) -->\n${j.text}`;
       }
-      // A text-mode job has no hOCR; record its result as a comment.
-      const body = j.text.replace(/\s+$/, "");
-      return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) — plain text, no hOCR -->\n<!-- ${body.replace(/-->/g, "-")} -->`;
+      // A text-mode job has no hOCR; record its reconstructed text as a comment.
+      const body = plainText(j).replace(/\s+$/, "");
+      return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) — plain text -->\n<!-- ${body.replace(/-->/g, "-")} -->`;
     });
     content = blocks.join("\n\n") + "\n";
   } else {
     const blocks = done.map(
       (j) =>
-        `=== ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) ===\n${j.text.replace(/\s+$/, "")}`
+        `=== ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) ===\n${plainText(j).replace(/\s+$/, "")}`
     );
     content = blocks.join("\n\n") + "\n";
   }

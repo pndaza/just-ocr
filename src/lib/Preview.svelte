@@ -8,14 +8,13 @@
   }
   let { job }: Props = $props();
 
-  // When the job was produced in hOCR mode, embed the image inside the same SVG
-  // as the bounding boxes. Both then share one coordinate system and scale as a
-  // single unit — no JS measurement, ResizeObserver, or getBoundingClientRect,
-  // so nothing can drift when the panel or window is resized.
+  // Every completed job stores hOCR XML in `job.text`, so we can overlay
+  // bounding boxes on the preview regardless of output mode. The image and the
+  // boxes live in one SVG, sharing a coordinate system that scales as a single
+  // unit — no JS measurement, ResizeObserver, or getBoundingClientRect, so
+  // nothing can drift when the panel or window is resized.
   let parsed = $derived(
-    job?.outputMode === "hocr" && job.status === "done" && job.text
-      ? parseHocrLines(job.text)
-      : null
+    job?.status === "done" && job.text ? parseHocrLines(job.text) : null
   );
   let showBoxes = $derived(!!parsed && parsed.boxes.length > 0);
 

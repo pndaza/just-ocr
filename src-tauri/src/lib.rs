@@ -17,7 +17,10 @@ pub struct OcrOpts {
     pub psm: i32,
     /// When non-null, restricts recognition to these characters.
     pub whitelist: Option<String>,
-    /// "hocr" returns hOCR XML; anything else (or None) returns plain text.
+    /// Selects how the frontend *displays* the result: "hocr" shows the raw
+    /// hOCR XML, anything else shows plain text. The engine always recognizes
+    /// as hOCR (so bounding boxes are available for the preview in both modes);
+    /// this flag only steers rendering/export on the frontend.
     pub output_mode: Option<String>,
 }
 
@@ -146,21 +149,13 @@ fn run_ocr(
     )
     .map_err(|e| format!("Failed to set image: {e}"))?;
 
-    // hOCR output returns structured XML with per-word bounding boxes;
-    // otherwise we return plain UTF-8 text. Both getters run recognition on
-    // the image set above, so only one is called.
-    let is_hocr = opts
-        .output_mode
-        .as_deref()
-        .map(|m| m.eq_ignore_ascii_case("hocr"))
-        .unwrap_or(false);
-    let text = if is_hocr {
-        api.get_hocr_text(0)
-            .map_err(|e| format!("OCR (hOCR) failed: {e}"))?
-    } else {
-        api.get_utf8_text()
-            .map_err(|e| format!("OCR failed: {e}"))?
-    };
+    // Always run recognition as hOCR. The hOCR XML carries per-word bounding
+    // boxes (overlaid on the preview for both output modes) and is parsed on
+    // the frontend into either raw hOCR (hOCR mode) or plain text (text mode).
+    // A single pass thus serves both outputs instead of running two getters.
+    let text = api
+        .get_hocr_text(0)
+        .map_err(|e| format!("OCR failed: {e}"))?;
 
     let confidence = api.mean_text_conf().unwrap_or(-1);
     let _ = api.end(); // best-effort cleanup

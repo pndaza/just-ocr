@@ -1,16 +1,25 @@
 <script lang="ts">
   import type { Job } from "./ocr";
+  import { parseHocrLines } from "./hocr";
 
   interface Props {
     job: Job | null;
   }
   let { job }: Props = $props();
 
+  // `text`-mode jobs store hOCR XML in `job.text`; show the reconstructed plain
+  // text. `hocr`-mode jobs show the raw XML. Both fall back to "" until done.
+  let displayText = $derived.by(() => {
+    if (!job || job.status !== "done" || !job.text) return "";
+    if (job.outputMode === "hocr") return job.text;
+    return parseHocrLines(job.text).text.replace(/\s+$/, "");
+  });
+
   let copied = $state(false);
 
   async function copy() {
-    if (!job?.text) return;
-    await navigator.clipboard.writeText(job.text);
+    if (!displayText) return;
+    await navigator.clipboard.writeText(displayText);
     copied = true;
     setTimeout(() => (copied = false), 1300);
   }
@@ -21,7 +30,7 @@
     <span class="title">{job?.outputMode === "hocr" ? "hOCR" : "Text"}</span>
     {#if job?.status === "done"}
       <span class="meta">{job.elapsedMs} ms</span>
-      <button class="copy" onclick={copy} disabled={!job.text.trim()}>
+      <button class="copy" onclick={copy} disabled={!displayText.trim()}>
         {copied ? "Copied ✓" : "Copy"}
       </button>
     {/if}
@@ -39,10 +48,8 @@
       <div class="placeholder"><span class="spin" aria-hidden="true"></span> Recognizing…</div>
     {:else if job.status === "queued"}
       <div class="placeholder">Queued — run OCR to extract text.</div>
-    {:else if job.text.trim()}
-      <pre class="text" class:hocr={job.outputMode === "hocr"}>{
-        job.outputMode === "hocr" ? job.text : job.text.replace(/\s+$/, "")
-      }</pre>
+    {:else if displayText.trim()}
+      <pre class="text" class:hocr={job.outputMode === "hocr"}>{displayText}</pre>
     {:else}
       <div class="placeholder">No text recognized. Try a different PSM or image.</div>
     {/if}
