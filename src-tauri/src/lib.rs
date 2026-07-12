@@ -5,6 +5,7 @@ use tauri::async_runtime;
 use tesseract_rs::TesseractAPI;
 
 mod languages;
+mod pdf;
 
 /// OCR options sent from the frontend.
 #[derive(Debug, Clone, Deserialize)]
