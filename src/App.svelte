@@ -16,6 +16,8 @@
     exportResults,
     readJobBytes,
     disposeJobFile,
+    lastLanguage,
+    saveLanguage,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -32,10 +34,17 @@
     theme = toggleTheme();
   }
   let opts = $state<OcrOpts>({
-    language: "eng",
+    language: lastLanguage() ?? "eng",
     psm: 3,
     whitelist: null,
     outputMode: "text",
+  });
+
+  // Remember the chosen language so it is pre-selected on the next launch.
+  // loadLanguages() validates the value against available models, so a language
+  // that was removed in the meantime is corrected automatically.
+  $effect(() => {
+    saveLanguage(opts.language);
   });
 
   let jobs = $state<Job[]>([]);

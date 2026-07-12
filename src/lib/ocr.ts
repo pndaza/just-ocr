@@ -338,3 +338,30 @@ export async function deleteLanguage(code: string): Promise<void> {
   await invoke("delete_language", { code });
 }
 
+// ── Last-used OCR language (persisted) ───────────────────────────────────────
+// Mirrors the theme persistence in theme.ts: the chosen language is stored in
+// localStorage and pre-selected on the next launch. loadLanguages() still
+// validates the value against the available models and falls back if it was
+// removed in the meantime.
+
+const LAST_LANG_KEY = "just-ocr:language";
+
+/** Read the last-used OCR language from localStorage, or null if unset. */
+export function lastLanguage(): string | null {
+  try {
+    return localStorage.getItem(LAST_LANG_KEY) ?? null;
+  } catch {
+    // storage may be unavailable (private mode) — behave as unset
+    return null;
+  }
+}
+
+/** Persist the chosen OCR language so it is pre-selected on next launch. */
+export function saveLanguage(lang: string): void {
+  try {
+    localStorage.setItem(LAST_LANG_KEY, lang);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
