@@ -143,15 +143,41 @@ fn run_ocr(
     })
 }
 
-/// Extract the embedded image from each page of a PDF (one PNG per page).
-/// Runs on a blocking thread so the UI stays responsive while large scans
-/// decode. `pdf_name` is the original file name, used to label each page
-/// `<stem> · p<n>`. Extraction gives Tesseract the native scan resolution,
-/// which is both faster and more accurate than rasterizing the page.
+/// How to turn a PDF page into an image. "extract" pulls the embedded raster
+/// scan (fast, native resolution); "render" rasterizes the page at 1500px
+/// height (slower, handles vector/mixed content).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfMode {
+    Extract,
+    Render,
+}
+
+impl Default for PdfMode {
+    fn default() -> Self {
+        PdfMode::Extract
+    }
+}
+
+/// Fixed output height for render mode. Chosen as a balance between OCR
+/// accuracy and speed; wide enough to keep body text legible at any page size.
+const PDF_RENDER_HEIGHT: u16 = 1500;
+
+/// Turn each page of a PDF into a PNG, via extract or render mode. Runs on a
+/// blocking thread so the UI stays responsive while large scans decode.
+/// `pdf_name` labels each page `<stem> · p<n>`.
 #[tauri::command]
-async fn render_pdf(pdf_name: String, bytes: Vec<u8>) -> Result<Vec<ReadFile>, String> {
+async fn render_pdf(
+    pdf_name: String,
+    bytes: Vec<u8>,
+    mode: Option<PdfMode>,
+) -> Result<Vec<ReadFile>, String> {
+    let mode = mode.unwrap_or_default();
     async_runtime::spawn_blocking(move || {
-        let pages = pdf::extract_pages(&bytes)?;
+        let pages = match mode {
+            PdfMode::Extract => pdf::extract_pages(&bytes)?,
+            PdfMode::Render => pdf::render_pages(&bytes, PDF_RENDER_HEIGHT)?,
+        };
         Ok(pages
             .into_iter()
             .enumerate()
@@ -162,7 +188,7 @@ async fn render_pdf(pdf_name: String, bytes: Vec<u8>) -> Result<Vec<ReadFile>, S
             .collect())
     })
     .await
-    .map_err(|e| format!("PDF extract task failed: {e}"))?
+    .map_err(|e| format!("PDF task failed: {e}"))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

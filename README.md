@@ -33,9 +33,10 @@ cargo tauri build
 ## Usage
 
 1. Drag an image (PNG/JPG/BMP/WebP) or a PDF onto the dropzone, or click to
-   browse. For PDFs, the embedded image on each page is extracted and added as
-   one job per page — no rendering, so it's fast and preserves the native scan
-   resolution.
+   browse. PDFs become one job per page. The **PDF** selector in the toolbar
+   chooses how: **Extract** (default, fast) pulls the embedded scan at its
+   native resolution; **Render** rasterizes each page at 1500 px height for
+   vector or mixed-content PDFs. Set the mode before dropping a PDF.
 2. Pick a language and page-segmentation mode (and optionally a char whitelist).
 3. Click **Run OCR** — recognized text, mean confidence, and elapsed time appear
    in the result panel. Use **Copy** to copy the text.

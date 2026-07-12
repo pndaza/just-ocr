@@ -1,16 +1,15 @@
-//! Extract embedded raster images from PDF pages.
+//! Two ways to turn a PDF into per-page images for OCR:
 //!
-//! Scanned PDFs are containers around full-page raster scans. Rendering the
-//! *page* (as a general-purpose PDF rasterizer would) is both slow and
-//! inaccurate here: many scans declare an oversized MediaBox, so rendering at
-//! a fixed DPI produces enormous, wrongly-scaled images that confuse OCR.
-//! Extracting the embedded image directly yields the native scan resolution —
-//! the correct input for Tesseract — with no rasterization cost.
+//! - **Extract** (default): pull the embedded raster image straight off each
+//!   page via `lopdf`. No rendering, so it's fast and preserves the native scan
+//!   resolution — correct for Tesseract. Best for scanned PDFs, which are just
+//!   containers around full-page images.
+//! - **Render**: rasterize each page with `hayro` at a fixed output height of
+//!   1500 px. Slower, but handles PDFs with no extractable image (vector text,
+//!   mixed content) by producing a faithful bitmap of the page.
 //!
-//! The heavy lifting (walking page resource trees, reporting image XObjects)
-//! is done by `lopdf::Document::get_page_images`. This module decodes each
-//! image's bytes into RGB8 according to its PDF filter and re-encodes to PNG so
-//! the result feeds straight into the existing image-based OCR pipeline.
+//! Both return one PNG per page so the result drops straight into the existing
+//! image-based OCR pipeline.
 
 use lopdf::{Dictionary, Document, Object};
 use std::io::Read;
@@ -62,6 +61,52 @@ pub(crate) fn extract_pages(pdf_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
             },
             Err(e) => eprintln!("Warning: page {page_num} decode: {e}"),
         }
+    }
+    Ok(out)
+}
+
+/// Render every page of `pdf_bytes` to a PNG at a fixed output height of
+/// `target_height` pixels (width scales to preserve aspect ratio). Used when a
+/// PDF has no extractable image (vector text, mixed content) or when the user
+/// explicitly wants a page bitmap rather than the embedded scan.
+///
+/// Scaling is derived from each page's own dimensions so every page ends up
+/// the same pixel height regardless of its MediaBox — important because scanned
+/// PDFs often declare oversized pages that would otherwise explode the output.
+pub(crate) fn render_pages(pdf_bytes: &[u8], target_height: u16) -> Result<Vec<Vec<u8>>, String> {
+    use hayro::hayro_interpret::InterpreterSettings;
+    use hayro::hayro_syntax::Pdf;
+    use hayro::vello_cpu::color::palette::css::WHITE;
+    use hayro::{RenderCache, RenderSettings, render};
+
+    let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("Failed to load PDF: {e:?}"))?;
+    let cache = RenderCache::new();
+    // Default font resolver (uses hayro's built-in standard-font fallbacks).
+    // Scanned PDFs have no live text, so font resolution rarely matters here;
+    // vector PDFs fall back to the standard 14 fonts.
+    let interpreter_settings = InterpreterSettings::default();
+
+    let mut out = Vec::new();
+    for page in pdf.pages().iter() {
+        // page.render_dimensions() is the unscaled (width, height) in points.
+        // Scale so the rendered height is exactly target_height px.
+        let (_w, h) = page.render_dimensions();
+        let scale = if h > 0.0 {
+            target_height as f32 / h
+        } else {
+            1.0
+        };
+        let settings = RenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            bg_color: WHITE,
+            ..Default::default()
+        };
+        let pixmap = render(page, &cache, &interpreter_settings, &settings);
+        let png = pixmap
+            .into_png()
+            .map_err(|e| format!("PNG encode failed: {e}"))?;
+        out.push(png);
     }
     Ok(out)
 }

@@ -1,11 +1,11 @@
 <script lang="ts">
-  import type { OcrOpts } from "./ocr";
-  import type { OutputMode } from "./ocr";
+  import type { OcrOpts, OutputMode, PdfMode } from "./ocr";
   import type { Theme } from "../theme";
 
   interface Props {
     opts: OcrOpts;
     languages: string[];
+    pdfMode: PdfMode;
     running: boolean;
     pending: number;
     doneCount: number;
@@ -21,6 +21,7 @@
   let {
     opts,
     languages,
+    pdfMode,
     running,
     pending,
     doneCount,
@@ -51,6 +52,11 @@
   const outputModes: { value: OutputMode; label: string }[] = [
     { value: "text", label: "Text" },
     { value: "hocr", label: "hOCR" },
+  ];
+
+  const pdfModes: { value: PdfMode; label: string }[] = [
+    { value: "extract", label: "Extract" },
+    { value: "render", label: "Render" },
   ];
 
   let useWhitelist = $state(false);
@@ -98,6 +104,13 @@
     <span class="lbl">Output</span>
     <select bind:value={opts.outputMode}>
       {#each outputModes as m}<option value={m.value}>{m.label}</option>{/each}
+    </select>
+  </label>
+
+  <label class="field" title="How PDF pages are turned into images before OCR">
+    <span class="lbl">PDF</span>
+    <select bind:value={pdfMode}>
+      {#each pdfModes as m}<option value={m.value}>{m.label}</option>{/each}
     </select>
   </label>
 

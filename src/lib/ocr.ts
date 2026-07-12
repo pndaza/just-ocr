@@ -6,6 +6,11 @@ import { writeFile } from "@tauri-apps/plugin-fs";
  * per-word bounding boxes; text is plain UTF-8. */
 export type OutputMode = "text" | "hocr";
 
+/** How a PDF is turned into per-page images before OCR.
+ * - "extract": pull the embedded raster scan (fast, native resolution)
+ * - "render":  rasterize the page at 1500px height (handles vector content) */
+export type PdfMode = "extract" | "render";
+
 export interface OcrOpts {
   language: string;
   psm: number;
@@ -92,13 +97,17 @@ export function isPdf(name: string): boolean {
   return /\.pdf$/i.test(name);
 }
 
-/** Extract the embedded image from each page of a PDF (one PNG per page)
- * via the Rust `render_pdf` command. Returns one ReadFile per page, named
- * `<stem> · p<n>`. */
-export async function renderPdf(name: string, bytes: Uint8Array): Promise<ReadFile[]> {
+/** Extract or render each page of a PDF to a PNG via the Rust `render_pdf`
+ * command. Returns one ReadFile per page, named `<stem> · p<n>`. */
+export async function renderPdf(
+  name: string,
+  bytes: Uint8Array,
+  mode: PdfMode,
+): Promise<ReadFile[]> {
   return invoke<ReadFile[]>("render_pdf", {
     pdfName: name,
     bytes: Array.from(bytes),
+    mode,
   });
 }
 

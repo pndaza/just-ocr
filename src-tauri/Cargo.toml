@@ -30,6 +30,18 @@ tokio = { version = "1", features = ["io-util"] }
 lopdf = { version = "0.43", default-features = false }
 flate2 = "1"
 fax = "0.2"
+# Optional PDF page renderer (used when the user picks "render" mode). hayro
+# interprets the page content stream and rasterizes it; we scale to a 1500px
+# page height regardless of MediaBox size, so oversized pages render at a sane
+# resolution for OCR.
+hayro = "0.7"
+
+# CPU rasterization (hayro/vello_cpu) is 30-50× slower unoptimized; in
+# `cargo tauri dev` (debug) that makes PDF render mode unusably slow. Optimize
+# all dependency crates in debug builds so dev stays responsive, while keeping
+# the just-ocr crate itself unoptimized (fast app rebuilds, debug assertions on).
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 panic = "abort"

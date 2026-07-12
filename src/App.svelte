@@ -16,6 +16,7 @@
     exportResults,
     type OcrOpts,
     type Job,
+    type PdfMode,
   } from "./lib/ocr";
   import { currentTheme, toggleTheme, type Theme } from "./theme";
 
@@ -31,6 +32,11 @@
     whitelist: null,
     outputMode: "text",
   });
+  // How PDFs are turned into per-page images before OCR. Extract is faster and
+  // preserves native scan resolution; Render rasterizes at 1500px height and
+  // handles vector/mixed PDFs. Set before dropping a PDF; switching it after a
+  // PDF is queued re-imports the affected pages with the new mode.
+  let pdfMode = $state<PdfMode>("extract");
 
   let jobs = $state<Job[]>([]);
   let selectedId = $state<number | null>(null);
@@ -118,7 +124,7 @@
       try {
         if (isPdf(file.name)) {
           const buf = new Uint8Array(await file.arrayBuffer());
-          const pages = await renderPdf(file.name, buf);
+          const pages = await renderPdf(file.name, buf, pdfMode);
           if (!pages.length) console.warn(`"${file.name}" has no pages`);
           added.push(...makeJobsFromReadFiles(pages));
         } else {
@@ -141,7 +147,7 @@
     for (const f of read) {
       try {
         if (isPdf(f.name)) {
-          const pages = await renderPdf(f.name, new Uint8Array(f.bytes));
+          const pages = await renderPdf(f.name, new Uint8Array(f.bytes), pdfMode);
           if (!pages.length) console.warn(`"${f.name}" has no pages`);
           added.push(...makeJobsFromReadFiles(pages));
         } else {
@@ -247,6 +253,7 @@
   <Toolbar
     {opts}
     {languages}
+    bind:pdfMode
     {running}
     {pending}
     {doneCount}
