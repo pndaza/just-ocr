@@ -87,6 +87,20 @@ export async function readFiles(paths: string[]): Promise<ReadFile[]> {
   return invoke<ReadFile[]>("read_files", { paths });
 }
 
+/** True if the file name has a .pdf extension (case-insensitive). */
+export function isPdf(name: string): boolean {
+  return /\.pdf$/i.test(name);
+}
+
+/** Rasterize every page of a PDF to a PNG via the Rust `render_pdf` command.
+ * Returns one ReadFile per page, named `<stem> · p<n>`. */
+export async function renderPdf(name: string, bytes: Uint8Array): Promise<ReadFile[]> {
+  return invoke<ReadFile[]>("render_pdf", {
+    pdfName: name,
+    bytes: Array.from(bytes),
+  });
+}
+
 export async function ocrFromBytes(
   bytes: Uint8Array,
   opts: OcrOpts
