@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { save, open } from "@tauri-apps/plugin-dialog";
+import { save, open, message } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
 
 /** How the OCR engine returns its result. hOCR is structured XML with
@@ -95,6 +95,34 @@ export async function readFiles(paths: string[]): Promise<ReadFile[]> {
 /** True if the file name has a .pdf extension (case-insensitive). */
 export function isPdf(name: string): boolean {
   return /\.pdf$/i.test(name);
+}
+
+/**
+ * Ask how a PDF should be turned into per-page images. Returns the chosen
+ * mode, or null if the user cancels (the caller should skip the file).
+ *
+ * - Extract: pull the embedded raster scan (fast, native resolution).
+ * - Render:  rasterize each page at 1500px height (vector/mixed content).
+ *
+ * Uses three buttons: yes="Extract", no="Render", cancel="Cancel". The dialog
+ * API exposes only those four named slots, so we relabel them to our options.
+ */
+export async function choosePdfMode(pdfName: string): Promise<PdfMode | null> {
+  const choice = await message(
+    `“${pdfName}”\n\nHow should this PDF be processed?\n\nExtract — fast, pulls the embedded scan at native resolution.\nRender — rasterizes each page at 1500px height (for vector or mixed content).`,
+    {
+      title: "PDF mode",
+      buttons: { yes: "Extract", no: "Render", cancel: "Cancel" },
+    },
+  );
+  switch (choice) {
+    case "Extract":
+      return "extract";
+    case "Render":
+      return "render";
+    default:
+      return null; // Cancel or closed
+  }
 }
 
 /** Extract or render each page of a PDF to a PNG via the Rust `render_pdf`
