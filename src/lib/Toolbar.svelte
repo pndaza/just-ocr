@@ -11,6 +11,9 @@
     canRunCurrent: boolean;
     hasSelection: boolean;
     theme: Theme;
+    showStop: boolean;
+    stopping: boolean;
+    onstop: () => void;
     onruncurrent: () => void;
     onrunall: () => void;
     onexport: () => void;
@@ -26,6 +29,9 @@
     canRunCurrent,
     hasSelection,
     theme,
+    showStop,
+    stopping,
+    onstop,
     onruncurrent,
     onrunall,
     onexport,
@@ -118,6 +124,17 @@
 
   {#if running}
     <span class="progress"><span class="spin" aria-hidden="true"></span> Processing</span>
+  {/if}
+
+  {#if showStop}
+    <button
+      class="btn danger"
+      onclick={onstop}
+      disabled={stopping}
+      title="Stop processing the remaining images"
+    >
+      {stopping ? "Stopping…" : "Stop"}
+    </button>
   {/if}
 
   {#if doneCount > 0}
@@ -273,6 +290,15 @@
     background: var(--accent);
   }
   .btn.primary:hover:not(:disabled) { opacity: 0.9; }
+  .btn.danger {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
+  .btn.danger:hover:not(:disabled) {
+    color: var(--bg);
+    background: var(--danger);
+  }
   .btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;

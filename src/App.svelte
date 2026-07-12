@@ -53,6 +53,13 @@
   let dropping = $state(false);
   let showLangManager = $state(false);
 
+  // True while a batch ("Run All") is in flight. Single "Run Current" runs and
+  // PDF dialogs don't set this, so the Stop button only appears for batches.
+  let batchRun = $state(false);
+  // Set when the user clicks Stop; checked between jobs so the queue halts
+  // after the currently-running OCR finishes.
+  let cancelRequested = $state(false);
+
   // ── PDF processing (in-app dialog with progress) ───────────────────────────
   // promptPdf() parks a promise that resolves to the per-page images (or null
   // if the user cancels). After a mode is chosen, runPdfRendering() drives the
@@ -340,18 +347,31 @@
   async function runCurrent() {
     if (running || !selected) return;
     running = true;
+    batchRun = false;
+    cancelRequested = false;
     await processJob(selected);
     running = false;
+    cancelRequested = false;
   }
 
   async function runAll() {
     if (running) return;
     running = true;
+    batchRun = true;
+    cancelRequested = false;
     for (const job of jobs) {
+      if (cancelRequested) break;
       if (job.status === "running") continue;
       await processJob(job);
     }
+    batchRun = false;
     running = false;
+    cancelRequested = false;
+  }
+
+  /** Request the batch stop. The in-flight OCR finishes; queued jobs are skipped. */
+  function stopAll() {
+    cancelRequested = true;
   }
 
   async function exportAll() {
@@ -370,6 +390,9 @@
     {doneCount}
     canRunCurrent={canRunCurrent}
     hasSelection={!!selected}
+    showStop={running && batchRun}
+    stopping={cancelRequested}
+    onstop={stopAll}
     onruncurrent={runCurrent}
     onrunall={runAll}
     onexport={exportAll}
