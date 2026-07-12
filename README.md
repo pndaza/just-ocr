@@ -9,7 +9,7 @@ resulting app is fully standalone — no system tesseract install required.
 
 ## Requirements
 
-- Rust 1.88+, Node 18+
+- Rust 1.92+, Node 18+
 - C++17 compiler (clang/gcc/MSVC) and **CMake** — needed for the one-time
   Tesseract + Leptonica build (cached under `~/Library/Application Support/tesseract-rs` on macOS)
 - Internet access on first build (the crate downloads tesseract/leptonica sources)
@@ -32,7 +32,9 @@ cargo tauri build
 
 ## Usage
 
-1. Drag an image (PNG/JPG/BMP/WebP) onto the dropzone, or click to browse.
+1. Drag an image (PNG/JPG/BMP/WebP) or a PDF onto the dropzone, or click to
+   browse. Multi-page PDFs are rasterized at 300 DPI and added as one job per
+   page.
 2. Pick a language and page-segmentation mode (and optionally a char whitelist).
 3. Click **Run OCR** — recognized text, mean confidence, and elapsed time appear
    in the result panel. Use **Copy** to copy the text.
