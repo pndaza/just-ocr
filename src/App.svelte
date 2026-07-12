@@ -115,12 +115,17 @@
   async function addFiles(files: FileList) {
     const added: Job[] = [];
     for (const file of Array.from(files)) {
-      if (isPdf(file.name)) {
-        const buf = new Uint8Array(await file.arrayBuffer());
-        const pages = await renderPdf(file.name, buf);
-        added.push(...makeJobsFromReadFiles(pages));
-      } else {
-        added.push(await makeJob(file));
+      try {
+        if (isPdf(file.name)) {
+          const buf = new Uint8Array(await file.arrayBuffer());
+          const pages = await renderPdf(file.name, buf);
+          if (!pages.length) console.warn(`"${file.name}" has no pages`);
+          added.push(...makeJobsFromReadFiles(pages));
+        } else {
+          added.push(await makeJob(file));
+        }
+      } catch (e) {
+        console.warn(`Could not add "${file.name}":`, e);
       }
     }
     jobs = [...jobs, ...added];
@@ -134,11 +139,16 @@
     if (!read.length) return;
     const added: Job[] = [];
     for (const f of read) {
-      if (isPdf(f.name)) {
-        const pages = await renderPdf(f.name, new Uint8Array(f.bytes));
-        added.push(...makeJobsFromReadFiles(pages));
-      } else {
-        added.push(...makeJobsFromReadFiles([f]));
+      try {
+        if (isPdf(f.name)) {
+          const pages = await renderPdf(f.name, new Uint8Array(f.bytes));
+          if (!pages.length) console.warn(`"${f.name}" has no pages`);
+          added.push(...makeJobsFromReadFiles(pages));
+        } else {
+          added.push(...makeJobsFromReadFiles([f]));
+        }
+      } catch (e) {
+        console.warn(`Could not add "${f.name}":`, e);
       }
     }
     jobs = [...jobs, ...added];

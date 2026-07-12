@@ -66,13 +66,15 @@ fn render_pages_into(
         pages: None, // render all pages
     };
     // pdq's output pattern uses a literal `%d` placeholder (not Rust format
-    // syntax) for the 1-based, zero-padded page index.
+    // syntax) for the 1-based page index, zero-padded to the width of the
+    // total page count. That padding is what makes the lexicographic sort
+    // below match true page order — don't switch to an unpadded pattern.
     let pattern = out_dir.join("page_%d.png");
     let pattern_str = pattern.to_string_lossy().into_owned();
     pdq::render::render_pages(&pdf_path, &pattern_str, &opts)
         .map_err(|e| format!("PDF render failed: {e}"))?;
 
-    // Collect rendered PNGs in ascending filename order (= page order).
+    // Ascending filename order == page order (relies on pdq's zero-padding).
     let mut files: Vec<_> = fs::read_dir(out_dir)
         .map_err(|e| format!("Failed to read temp dir: {e}"))?
         .filter_map(|e| e.ok())
@@ -126,6 +128,12 @@ mod render_tests {
     #[test]
     fn rejects_garbage_bytes() {
         let err = render_pages(b"not a pdf", 150.0).unwrap_err();
-        assert!(err.contains("render failed") || err.to_lowercase().contains("pdf"));
+        // The wrap prefix from render_pages_into; the trailing detail comes
+        // from pdq. Match case-insensitively so a capitalization tweak in the
+        // prefix doesn't silently break this test.
+        assert!(
+            err.to_lowercase().contains("render failed"),
+            "expected an error mentioning render failure, got: {err}"
+        );
     }
 }
