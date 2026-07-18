@@ -2864,6 +2864,7 @@ dependencies = [
  "log",
  "lopdf",
  "ndarray",
+ "once_cell",
  "rayon",
  "reqwest 0.12.28",
  "serde",
