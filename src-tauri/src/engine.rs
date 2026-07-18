@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use image::GenericImageView;
 use once_cell::sync::OnceCell;
+use rayon::prelude::*;
 use serde::Serialize;
 use tauri::Manager;
 
@@ -120,63 +121,104 @@ pub fn run_ocr(
         lines.len()
     );
 
-    let mut boxes: Vec<LineBox> = Vec::with_capacity(lines.len());
-    let mut conf_sum: i64 = 0;
-    let mut conf_n: i32 = 0;
-
+    // Recognize each detected line. The Kraken recognizer (pure candle
+    // tensors under `Arc<RwLock<Storage>>`) is `Send + Sync` and runs on the
+    // rayon pool — one shared model across worker threads, no weight
+    // duplication. Tesseract wraps libtesseract (a C library that is NOT
+    // thread-safe across concurrent calls), so the tesseract engine stays
+    // serial: each call constructs a fresh `TesseractAPI`, but they must not
+    // overlap.
     let recog_start = Instant::now();
-    let mut recog_n = 0i32;
-    for line in &lines {
+    let engine_kind = opts.engine.as_str();
+
+    // Build the (LineBox, conf) pairs from each non-degenerate line. The
+    // closure captures shared refs to img + engine + (for tesseract) the app
+    // handle and opts — all Send + Sync.
+    let recognize = |line: &kraken_engine::BaselineLine| -> Result<Option<(LineBox, i32)>, String> {
         if line.boundary.len() < 3 {
-            continue;
+            return Ok(None);
         }
         let (min_x, min_y, lw, lh) = match polygon_bbox((w, h), &line.boundary) {
             Some(b) => b,
-            None => continue,
+            None => return Ok(None),
         };
-        let crop = img.crop_imm(min_x, min_y, lw, lh);
+        let crop_img =
+            image::DynamicImage::ImageRgb8(img.crop_imm(min_x, min_y, lw, lh).to_rgb8());
 
-        let (text, conf) = match opts.engine.as_str() {
+        let (text, conf) = match engine_kind {
             "tesseract" => crate::tesseract_line::recognize(
-                &image::DynamicImage::ImageRgb8(crop.to_rgb8()),
+                &crop_img,
                 app,
                 &opts.language,
                 &opts.whitelist,
             )?,
             "kraken" => {
                 let t = engine
-                    .recognize_line(&image::DynamicImage::ImageRgb8(crop.to_rgb8()))
+                    .recognize_line(&crop_img)
                     .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
             }
             other => return Err(format!("Unknown engine: {other}")),
         };
 
-        recog_n += 1;
+        Ok(Some((
+            LineBox {
+                x0: min_x,
+                y0: min_y,
+                x1: min_x + lw,
+                y1: min_y + lh,
+                text,
+            },
+            conf,
+        )))
+    };
 
-        if conf >= 0 {
-            conf_sum += conf as i64;
-            conf_n += 1;
-        }
+    // Dispatch: parallel for kraken, serial for tesseract.
+    let results: Vec<(LineBox, i32)> = match engine_kind {
+        "kraken" => lines
+            .par_iter()
+            .map(|line| recognize(line))
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        _ => lines
+            .iter()
+            .map(|line| recognize(line))
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+    };
 
-        boxes.push(LineBox {
-            x0: min_x,
-            y0: min_y,
-            x1: min_x + lw,
-            y1: min_y + lh,
-            text,
-        });
-    }
+    let recog_n = results.len();
     log::info!(
-        "[ocr] recognition: {:.0} ms ({} lines, {:.1} ms/line avg)",
+        "[ocr] recognition: {:.0} ms ({} lines, {:.1} ms/line avg, {})",
         recog_start.elapsed().as_secs_f64() * 1000.0,
         recog_n,
         if recog_n > 0 {
             recog_start.elapsed().as_secs_f64() * 1000.0 / recog_n as f64
         } else {
             0.0
+        },
+        if engine_kind == "kraken" {
+            format!("rayon {} threads", rayon::current_num_threads())
+        } else {
+            "serial".to_string()
         }
     );
+
+    // Tally confidences and split out the boxes the frontend needs.
+    let mut boxes: Vec<LineBox> = Vec::with_capacity(recog_n);
+    let mut conf_sum: i64 = 0;
+    let mut conf_n: i32 = 0;
+    for (b, conf) in results {
+        if conf >= 0 {
+            conf_sum += conf as i64;
+            conf_n += 1;
+        }
+        boxes.push(b);
+    }
 
     let confidence = if conf_n > 0 {
         (conf_sum / conf_n as i64) as i32
