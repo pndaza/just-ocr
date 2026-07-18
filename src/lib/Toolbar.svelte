@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { OcrOpts, OutputMode } from "./ocr";
+  import type { OcrOpts } from "./ocr";
   import type { Theme } from "../theme";
 
   interface Props {
@@ -39,28 +39,18 @@
     ontoggletheme,
   }: Props = $props();
 
-  const psmOptions = [
-    { value: 0, label: "0 · OSD only" },
-    { value: 1, label: "1 · Auto + OSD" },
-    { value: 2, label: "2 · Auto (no OSD)" },
-    { value: 3, label: "3 · Auto (full page)" },
-    { value: 4, label: "4 · Single column" },
-    { value: 6, label: "6 · Single block" },
-    { value: 7, label: "7 · Single line" },
-    { value: 8, label: "8 · Single word" },
-    { value: 10, label: "10 · Single char" },
-    { value: 11, label: "11 · Sparse text" },
-    { value: 13, label: "13 · Raw line" },
-  ];
-
-  const outputModes: { value: OutputMode; label: string }[] = [
-    { value: "text", label: "Text" },
-    { value: "hocr", label: "hOCR" },
-  ];
-
   let useWhitelist = $state(false);
   $effect(() => {
     opts.whitelist = useWhitelist ? (opts.whitelist ?? "") : null;
+  });
+  // Whitelist is Tesseract-only (Kraken recognition has no char whitelist).
+  // Auto-disable it when switching to the kraken engine so a stale whitelist
+  // can't be sent.
+  $effect(() => {
+    if (opts.engine !== "tesseract" && useWhitelist) {
+      useWhitelist = false;
+      opts.whitelist = null;
+    }
   });
 </script>
 
@@ -80,6 +70,14 @@
   >{theme === "dark" ? "☀" : "☾"}</button>
 
   <label class="field">
+    <span class="lbl">Engine</span>
+    <select bind:value={opts.engine}>
+      <option value="tesseract">Tesseract</option>
+      <option value="kraken">Kraken</option>
+    </select>
+  </label>
+
+  <label class="field">
     <span class="lbl">Lang</span>
     <select bind:value={opts.language}>
       {#each languages as l}<option value={l}>{l}</option>{/each}
@@ -92,25 +90,15 @@
     >+</button>
   </label>
 
-  <label class="field">
-    <span class="lbl">PSM</span>
-    <select bind:value={opts.psm}>
-      {#each psmOptions as o}<option value={o.value}>{o.label}</option>{/each}
-    </select>
-  </label>
-
-  <label class="field">
-    <span class="lbl">Output</span>
-    <select bind:value={opts.outputMode}>
-      {#each outputModes as m}<option value={m.value}>{m.label}</option>{/each}
-    </select>
-  </label>
-
-  <label class="check">
-    <input type="checkbox" bind:checked={useWhitelist} />
+  <label class="check" class:disabled={opts.engine !== "tesseract"}>
+    <input
+      type="checkbox"
+      bind:checked={useWhitelist}
+      disabled={opts.engine !== "tesseract"}
+    />
     Whitelist
   </label>
-  {#if useWhitelist}
+  {#if useWhitelist && opts.engine === "tesseract"}
     <input
       class="wl"
       type="text"
@@ -250,6 +238,10 @@
     font-size: 12px;
     color: var(--text-dim);
     cursor: pointer;
+  }
+  .check.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   .check input {
     accent-color: var(--accent-dim);
