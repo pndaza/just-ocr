@@ -93,45 +93,61 @@ behavior on first launch). Keep `language` (tesseract) and `whitelist`
 ### New module tree: `src-tauri/src/kraken/`
 
 Vendored from `/Users/pndaza/Projects/playground/kraken-rust`. Only the
-candle path is brought over — no `ort`, no ONNX, no CLI, no `inference.rs`
-(the ONNX forward), no `model.rs` (the ONNX seg model), no `alto.rs`.
+candle path is brought over — no `ort`, no ONNX forward, no CLI.
+
+**Shared types live in files that also contain ONNX code**, so those files
+are split during vendoring rather than copied wholesale:
+- `model.rs` contains `ModelMeta` + `ClassMapping` (shared, keep) **and**
+  `SegmentationModel` + ONNX loaders (drop).
+- `inference.rs` contains `sigmoid` + `nearest_upsample_2d` (shared helpers,
+  keep) **and** `run_inference` + ONNX glue (drop).
+- `preprocess.rs` contains `Preprocessed` + `preprocess()` (shared, keep).
 
 ```
 src-tauri/src/kraken/
-├── mod.rs                  ← pub segment(), recognize_line(), resolve_models()
-├── containers.rs           ← Segmentation, BaselineLine, Region (copied)
-├── config.rs               ← SegmentationConfig (copied)
-├── heatmap.rs              ← Heatmap (copied)
-├── preprocess.rs           ← page preprocess (copied)
-├── inference_candle.rs     ← candle forward (copied)
-├── detect.rs               ← detect_candle() + postprocess() (copied, ONNX fns removed)
-├── vectorize.rs            ← (copied)
-├── boundaries.rs           ← (copied)
-├── reading_order.rs        ← (copied)
-├── contours.rs             ← (copied)
+├── mod.rs                  ← pub segment(), recognize_line(), resolve_models(); crate root
+├── containers.rs           ← Segmentation, BaselineLine, Region (copied verbatim)
+├── config.rs               ← SegmentationConfig (copied verbatim)
+├── heatmap.rs              ← Heatmap (copied verbatim)
+├── model_meta.rs           ← ModelMeta + ClassMapping ONLY (extracted from model.rs)
+├── preprocess.rs           ← Preprocessed + preprocess() (copied verbatim)
+├── inference_helpers.rs    ← sigmoid + nearest_upsample_2d ONLY (extracted from inference.rs)
+├── inference_candle.rs     ← run_inference_candle (copied; its `use crate::inference::...`
+│                             becomes `use crate::kraken::inference_helpers::...`)
+├── detect.rs               ← detect_candle() + postprocess() + helpers ONLY
+│                             (the ONNX `detect()` fn and its `SegmentationModel`/
+│                             `run_inference` imports are removed)
+├── vectorize.rs            ← (copied verbatim)
+├── boundaries.rs           ← (copied verbatim)
+├── reading_order.rs        ← (copied verbatim)
+├── contours.rs             ← (copied verbatim)
 ├── polygon/
-│   ├── mod.rs              ← (copied)
-│   └── boolean.rs          ← (copied)
+│   ├── mod.rs              ← (copied verbatim)
+│   └── boolean.rs          ← (copied verbatim)
 ├── ndimage/
-│   ├── mod.rs
-│   ├── filters.rs
-│   ├── morphology.rs
-│   └── mcp.rs
+│   ├── mod.rs              ← (copied verbatim)
+│   ├── filters.rs          ← (copied verbatim)
+│   ├── morphology.rs       ← (copied verbatim)
+│   └── mcp.rs              ← (copied verbatim)
 ├── segmentation_candle/
-│   └── model.rs            ← SegmentationModelCandle (copied)
+│   ├── mod.rs              ← (copied verbatim)
+│   └── model.rs            ← SegmentationModelCandle (copied; its `use crate::model::...`
+│                            becomes `use crate::kraken::model_meta::...`)
 └── recognition/
-    ├── mod.rs
-    ├── model.rs            ← RecognitionModel (copied)
-    ├── preprocess.rs       ← preprocess_line (copied)
-    ├── decode.rs           ← greedy_decode (copied)
-    ├── codec.rs            ← Codec (copied)
-    └── meta.rs             ← parse_recognition_meta (copied)
+    ├── mod.rs              ← (copied; drop the `pub mod test_harness;` line)
+    ├── model.rs            ← RecognitionModel (copied verbatim)
+    ├── preprocess.rs       ← preprocess_line (copied verbatim)
+    ├── decode.rs           ← greedy_decode (copied verbatim)
+    ├── codec.rs            ← Codec (copied verbatim)
+    └── meta.rs             ← parse_recognition_meta (copied verbatim)
 ```
 
-After copying, all `use crate::` paths in the copied files are rewritten to
-`use crate::kraken::` so they resolve inside just-ocr. No `test_harness.rs`
-(test-only). No `recognition/orchestrator.rs` — its `crop_boundary` helper
-moves to `engine.rs` since we crop + dispatch per line there.
+After copying, every `use crate::` in the vendored files is rewritten to
+`use crate::kraken::` so they resolve inside just-ocr. The original
+`recognition/orchestrator.rs` is **not** copied — its `crop_boundary` helper
+moves to `engine.rs` since we crop + dispatch per line there. The ONNX files
+(`inference.rs`'s `run_inference`, `model.rs`'s `SegmentationModel`),
+`alto.rs`, `main.rs`, and `test_harness.rs` are not brought over.
 
 The architecture-specific constants in `recognition/model.rs` (4 conv blocks,
 3 BiLSTM-200, 118 classes, hardcoded `C_0`/`L_12`/`O_18` names) are kept as-is
