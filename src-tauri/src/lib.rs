@@ -11,7 +11,7 @@ mod languages;
 mod pdf;
 mod tesseract_line;
 #[allow(unused)]
-mod kraken;
+pub mod kraken;
 
 pub use engine::{LineBox, OcrResult};
 pub use kraken::KrakenCache;
