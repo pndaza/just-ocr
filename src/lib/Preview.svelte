@@ -1,22 +1,22 @@
 <script lang="ts">
   import type { Job } from "./ocr";
   import { ensureThumb } from "./ocr";
-  import { parseHocrLines } from "./hocr";
 
   interface Props {
     job: Job | null;
   }
   let { job }: Props = $props();
 
-  // Every completed job stores hOCR XML in `job.text`, so we can overlay
-  // bounding boxes on the preview regardless of output mode. The image and the
-  // boxes live in one SVG, sharing a coordinate system that scales as a single
-  // unit — no JS measurement, ResizeObserver, or getBoundingClientRect, so
-  // nothing can drift when the panel or window is resized.
+  // Every completed job carries a structured OcrResult in `job.result`, whose
+  // `lines` give the overlay boxes and whose `width`/`height` are the source
+  // image's natural pixel size. The image and the boxes live in one SVG,
+  // sharing a coordinate system that scales as a single unit — no JS
+  // measurement, ResizeObserver, or getBoundingClientRect, so nothing can
+  // drift when the panel or window is resized.
   let parsed = $derived(
-    job?.status === "done" && job.text ? parseHocrLines(job.text) : null
+    job?.status === "done" && job.result ? job.result : null,
   );
-  let showBoxes = $derived(!!parsed && parsed.boxes.length > 0);
+  let showBoxes = $derived(!!parsed && parsed.lines.length > 0);
 
   // ── Zoom ──────────────────────────────────────────────────────────────────
   // null = "fit" (CSS caps the image to the stage). A number is an explicit
@@ -24,8 +24,8 @@
   const ZOOM_STEPS = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4];
   let zoom = $state<number | null>(null);
 
-  // Natural pixel dimensions of the current image. For hOCR they come from the
-  // parsed page bbox; for plain images we read them on load.
+  // Natural pixel dimensions of the current image. The structured result
+  // carries the page bbox directly; for plain images we read them on load.
   let natW = $state(0);
   let natH = $state(0);
 
@@ -39,7 +39,7 @@
   $effect(() => {
     if (job?.path && !job.url) ensureThumb(job);
   });
-  // hOCR mode: dimensions are known immediately from the page bbox.
+  // Structured result carries the page dimensions directly.
   $effect(() => {
     if (parsed) {
       natW = parsed.width;
@@ -137,7 +137,7 @@
           width={parsed.width}
           height={parsed.height}
         />
-        {#each parsed.boxes as b}
+        {#each parsed.lines as b}
           <rect
             x={b.x0}
             y={b.y0}
