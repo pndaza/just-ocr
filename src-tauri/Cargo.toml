@@ -40,6 +40,17 @@ fax = "0.2"
 # page height regardless of MediaBox size, so oversized pages render at a sane
 # resolution for OCR.
 hayro = "0.7"
+# Kraken engine (candle-only). candle-core/candle-nn are pure-Rust NN inference
+# (no libtorch/CUDA). ndarray powers the heatmap + post-processing; geo +
+# imageproc support polygon geometry and polygon masking during line cropping.
+# anyhow is the error type used throughout the vendored kraken tree.
+candle-core = "0.11"
+candle-nn = "0.11"
+ndarray = "0.16"
+geo = "0.29"
+imageproc = { version = "0.25", default-features = false }
+anyhow = "1"
+log = "0.4"
 
 # CPU rasterization (hayro/vello_cpu) is 30-50× slower unoptimized; in
 # `cargo tauri dev` (debug) that makes PDF render mode unusably slow. Optimize
