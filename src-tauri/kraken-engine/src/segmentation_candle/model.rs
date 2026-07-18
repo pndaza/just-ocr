@@ -20,7 +20,7 @@ use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, Module};
 use candle_nn::rnn::{LSTM, RNN};
 use std::collections::HashMap;
 
-use crate::kraken::model_meta::{ClassMapping, ModelMeta};
+use crate::model_meta::{ClassMapping, ModelMeta};
 
 /// A segmentation model loaded from safetensors, running via candle-core.
 pub struct SegmentationModelCandle {
@@ -272,7 +272,7 @@ struct SegMeta {
 }
 
 fn parse_seg_meta(path: &str) -> Result<SegMeta> {
-    let metadata = crate::kraken::recognition::meta::read_safetensors_metadata(path)?;
+    let metadata = crate::recognition::meta::read_safetensors_metadata(path)?;
     let kraken_meta_str = metadata
         .get("kraken_meta")
         .ok_or_else(|| anyhow::anyhow!("No 'kraken_meta' in safetensors metadata"))?;

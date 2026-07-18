@@ -2,8 +2,8 @@
 //! Source: kraken/lib/segmentation.py:85-174 (_reading_order, topsort)
 //!                              845-903 (polygonal_reading_order)
 
-use crate::kraken::containers::{BaselineLine, Region};
-use crate::kraken::polygon::{point_in_polygon, Point, Polygon};
+use crate::containers::{BaselineLine, Region};
+use crate::polygon::{point_in_polygon, Point, Polygon};
 
 /// A bounding box: (min_x, min_y, max_x, max_y).
 type BBox = (f64, f64, f64, f64);

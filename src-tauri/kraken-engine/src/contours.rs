@@ -1,7 +1,7 @@
 //! Moore-neighborhood boundary tracing.
 //! Source: kraken/lib/segmentation.py:189-247
 
-use crate::kraken::polygon::Point;
+use crate::polygon::Point;
 
 const MOORE_OFFSETS: [(i64, i64); 8] = [
     (0, -1), (-1, -1), (-1, 0), (-1, 1),

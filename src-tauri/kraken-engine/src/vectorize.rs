@@ -1,12 +1,12 @@
 //! Vectorization: heatmap channels → region polygons and baseline polylines.
 //! Source: kraken/lib/segmentation.py (vectorize_regions, vectorize_lines)
 
-use crate::kraken::ndimage::morphology::label;
-use crate::kraken::ndimage::filters::{sato, maximum_filter, convolve2d_same};
-use crate::kraken::ndimage::morphology::skeletonize;
-use crate::kraken::ndimage::mcp::mcp_connect;
-use crate::kraken::contours::boundary_trace;
-use crate::kraken::polygon::{Point, Polygon, boolean::unary_union, simplify};
+use crate::ndimage::morphology::label;
+use crate::ndimage::filters::{sato, maximum_filter, convolve2d_same};
+use crate::ndimage::morphology::skeletonize;
+use crate::ndimage::mcp::mcp_connect;
+use crate::contours::boundary_trace;
+use crate::polygon::{Point, Polygon, boolean::unary_union, simplify};
 use ndarray::{Array2, Array3, s};
 use std::collections::HashMap;
 

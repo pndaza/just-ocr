@@ -6,16 +6,16 @@
 use anyhow::Result;
 use image::{DynamicImage, GenericImageView};
 
-use crate::kraken::config::SegmentationConfig;
-use crate::kraken::containers::{BaselineLine, Region, Segmentation};
-use crate::kraken::heatmap::Heatmap;
-use crate::kraken::preprocess::preprocess;
-use crate::kraken::segmentation_candle::SegmentationModelCandle;
-use crate::kraken::vectorize::{vectorize_regions, vectorize_lines};
-use crate::kraken::boundaries::calculate_polygonal_environment;
-use crate::kraken::reading_order::polygonal_reading_order;
-use crate::kraken::ndimage::filters::{gaussian_filter, sobel};
-use crate::kraken::polygon::{Point, Polygon, point_in_polygon};
+use crate::config::SegmentationConfig;
+use crate::containers::{BaselineLine, Region, Segmentation};
+use crate::heatmap::Heatmap;
+use crate::preprocess::preprocess;
+use crate::segmentation_candle::SegmentationModelCandle;
+use crate::vectorize::{vectorize_regions, vectorize_lines};
+use crate::boundaries::calculate_polygonal_environment;
+use crate::reading_order::polygonal_reading_order;
+use crate::ndimage::filters::{gaussian_filter, sobel};
+use crate::polygon::{Point, Polygon, point_in_polygon};
 
 /// Run detection using the candle-core backend (native Rust, no ONNX).
 pub fn detect_candle(
@@ -23,7 +23,7 @@ pub fn detect_candle(
     model: &SegmentationModelCandle,
     config: &SegmentationConfig,
 ) -> Result<Segmentation> {
-    use crate::kraken::inference_candle::run_inference_candle;
+    use crate::inference_candle::run_inference_candle;
 
     let padding = match model.meta.padding.len() {
         0 => [0i64, 0, 0, 0],

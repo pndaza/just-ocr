@@ -2,8 +2,8 @@
 //! Source: kraken/lib/segmentation.py:747-842 (calculate_polygonal_environment),
 //!         560-635 (_calc_seam), 683-744 (_calc_roi)
 
-use crate::kraken::ndimage::morphology::{distance_transform_cdt, binary_erosion};
-use crate::kraken::polygon::{Polygon, Point, simplify};
+use crate::ndimage::morphology::{distance_transform_cdt, binary_erosion};
+use crate::polygon::{Polygon, Point, simplify};
 use ndarray::Array2;
 
 const MASK_VAL: f32 = 99999.0;
@@ -772,7 +772,7 @@ fn ray_segment_intersection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kraken::ndimage::filters::{gaussian_filter, sobel};
+    use crate::ndimage::filters::{gaussian_filter, sobel};
 
     #[test]
     fn test_calc_seam_simple() {

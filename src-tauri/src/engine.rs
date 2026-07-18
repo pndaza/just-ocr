@@ -4,13 +4,14 @@
 //! crops produced by the shared Kraken segmentation model and return text.
 //! The result is a structured `OcrResult` carrying one `LineBox` per line.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use image::GenericImageView;
+use once_cell::sync::OnceCell;
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::kraken::{self, KrakenCache};
 use crate::OcrOpts;
 
 /// One recognized line: an axis-aligned bbox (in source-image pixel space) and
@@ -37,6 +38,51 @@ pub struct OcrResult {
     pub elapsed_ms: u64,
 }
 
+/// Process-wide lazily-loaded kraken engine. The first OCR call pays the
+/// (fast, ~1-3 ms) model-load cost; subsequent calls reuse the instance.
+/// `kraken_engine::Engine` is `Send + Sync`, so a `&Engine` is safe to share
+/// across the blocking-thread calls Tauri spawns per OCR request.
+static KRAKEN: OnceCell<kraken_engine::Engine> = OnceCell::new();
+
+/// Borrow the shared kraken engine, loading it on first call.
+fn kraken_engine(app: &tauri::AppHandle) -> Result<&kraken_engine::Engine, String> {
+    KRAKEN.get_or_try_init(|| {
+        let (seg, rec) = resolve_kraken_models(app)?;
+        let t = Instant::now();
+        let engine = kraken_engine::Engine::load(&seg, &rec)
+            .map_err(|e| format!("Kraken model load failed: {e}"))?;
+        log::info!("[kraken] models loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        Ok(engine)
+    })
+}
+
+/// Resolve `(seg_path, rec_path)`. Looks in the app local data dir first, then
+/// falls back to `kraken-models/` relative to the current working dir (the dev
+/// workflow — the repo keeps these models at its root).
+pub fn resolve_kraken_models(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let candidates: Vec<PathBuf> = match app.path().app_local_data_dir() {
+        Ok(d) => vec![d.join("kraken-models"), PathBuf::from("kraken-models")],
+        Err(_) => vec![PathBuf::from("kraken-models")],
+    };
+
+    for dir in &candidates {
+        let seg = dir.join("bur_segment.safetensors");
+        let rec = dir.join("bur_recog.safetensors");
+        if seg.exists() && rec.exists() {
+            return Ok((seg, rec));
+        }
+    }
+    Err(format!(
+        "Kraken models not found. Place bur_segment.safetensors and \
+         bur_recog.safetensors in one of: {}",
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Entry point invoked by the `ocr_from_bytes` Tauri command.
 pub fn run_ocr(
     app: &tauri::AppHandle,
@@ -55,12 +101,18 @@ pub fn run_ocr(
     let img = image::load_from_memory(image_bytes)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     let (w, h) = img.dimensions();
-    log::info!("[ocr] decode image {}x{}: {:.1} ms", w, h, t.elapsed().as_secs_f64() * 1000.0);
+    log::info!(
+        "[ocr] decode image {}x{}: {:.1} ms",
+        w,
+        h,
+        t.elapsed().as_secs_f64() * 1000.0
+    );
 
-    let cache = app.state::<KrakenCache>();
+    let engine = kraken_engine(app)?;
 
     let t = Instant::now();
-    let lines = kraken::segment(app, &cache, &img)
+    let lines = engine
+        .segment(&img)
         .map_err(|e| format!("Segmentation failed: {e}"))?;
     log::info!(
         "[ocr] segmentation: {:.0} ms ({} lines)",
@@ -92,12 +144,9 @@ pub fn run_ocr(
                 &opts.whitelist,
             )?,
             "kraken" => {
-                let t = kraken::recognize_line(
-                    app,
-                    &cache,
-                    &image::DynamicImage::ImageRgb8(crop.to_rgb8()),
-                )
-                .map_err(|e| format!("Recognition failed: {e}"))?;
+                let t = engine
+                    .recognize_line(&image::DynamicImage::ImageRgb8(crop.to_rgb8()))
+                    .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
             }
             other => return Err(format!("Unknown engine: {other}")),

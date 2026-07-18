@@ -1,5 +1,5 @@
-//! Smoke test for the vendored kraken engine: load both models, segment a
-//! page image, recognize each line, and print the results. Run with:
+//! Smoke test for the kraken engine: load both models, segment a page image,
+//! recognize each line, and print the results. Run with:
 //!
 //!   cargo run --release --example smoke_kraken -- <image.png> <models_dir>
 //!
@@ -9,11 +9,7 @@
 use std::time::Instant;
 
 use image::GenericImageView;
-
-use just_ocr_lib::kraken::{
-    self, config::SegmentationConfig, detect::detect_candle,
-    recognition::preprocess::preprocess_line, segmentation_candle::SegmentationModelCandle,
-};
+use kraken_engine::Engine;
 
 fn main() -> anyhow::Result<()> {
     let img_path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/scan2_p1.png".to_string());
@@ -29,24 +25,20 @@ fn main() -> anyhow::Result<()> {
     println!("Image dimensions: {w}x{h}");
 
     let t = Instant::now();
-    println!("Loading segmentation model: {seg_path}");
-    let seg = SegmentationModelCandle::load(&seg_path)?;
+    println!("Loading kraken engine (seg + rec):");
+    println!("  seg: {seg_path}");
+    println!("  rec: {rec_path}");
+    let engine = Engine::load(std::path::Path::new(&seg_path), std::path::Path::new(&rec_path))?;
     println!("  loaded in {:?}", t.elapsed());
 
     let t = Instant::now();
-    println!("Loading recognition model: {rec_path}");
-    let rec = just_ocr_lib::kraken::recognition::RecognitionModel::load(&rec_path)?;
-    println!("  loaded in {:?}", t.elapsed());
-
-    let t = Instant::now();
-    let config = SegmentationConfig { text_direction: "horizontal-lr".to_string() };
-    let segmentation = detect_candle(&img, &seg, &config)?;
-    println!("\nSegmentation in {:?}: {} lines", t.elapsed(), segmentation.lines.len());
+    let lines = engine.segment(&img)?;
+    println!("\nSegmentation in {:?}: {} lines", t.elapsed(), lines.len());
 
     let t = Instant::now();
     let mut recognized = 0;
     let mut total_text = String::new();
-    for (i, line) in segmentation.lines.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         if line.boundary.len() < 3 {
             continue;
         }
@@ -59,15 +51,8 @@ fn main() -> anyhow::Result<()> {
         if cw < 2 || ch < 2 {
             continue;
         }
-        let crop = img.crop_imm(min_x, min_y, cw, ch);
-        let tensor = match preprocess_line(&image::DynamicImage::ImageRgb8(crop.to_rgb8()), rec.height, rec.padding) {
-            Ok(t) => t,
-            Err(e) => {
-                println!("  line {i}: preprocess failed: {e}");
-                continue;
-            }
-        };
-        let text = match rec.recognize(&tensor) {
+        let crop = image::DynamicImage::ImageRgb8(img.crop_imm(min_x, min_y, cw, ch).to_rgb8());
+        let text = match engine.recognize_line(&crop) {
             Ok(t) => t,
             Err(e) => {
                 println!("  line {i}: recognize failed: {e}");
@@ -79,13 +64,11 @@ fn main() -> anyhow::Result<()> {
         total_text.push_str(&text);
         total_text.push('\n');
     }
-    println!("\nRecognized {recognized}/{} lines in {:?}", segmentation.lines.len(), t.elapsed());
-
-    // Smoke-test the public API path too (resolve_models via the cache wrapper).
-    // We can't easily build a tauri::AppHandle here, so just confirm the
-    // free functions are callable; the line above already proved segment+recognize.
-    let _ = kraken::KrakenCache::new();
-    println!("\nKrakenCache::new() OK");
+    println!(
+        "\nRecognized {recognized}/{} lines in {:?}",
+        lines.len(),
+        t.elapsed()
+    );
 
     print!("\n=== Full text ===\n{total_text}");
     Ok(())
