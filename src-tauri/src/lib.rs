@@ -1,38 +1,34 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime;
 use tauri::Emitter;
+use tauri::Manager;
 use tesseract_rs::TesseractAPI;
 
+mod engine;
 mod languages;
 mod pdf;
+mod tesseract_line;
 #[allow(unused)]
 mod kraken;
+
+pub use engine::{LineBox, OcrResult};
+pub use kraken::KrakenCache;
 
 /// OCR options sent from the frontend.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrOpts {
+    /// Recognizer choice: "tesseract" (per-line, after Kraken segmentation) or
+    /// "kraken" (Kraken recognition). Any other value returns an error.
+    pub engine: String,
+    /// Tesseract language code (resolved via `languages::resolve_tessdata`).
+    /// Ignored by the kraken recognizer.
     pub language: String,
-    pub psm: i32,
-    /// When non-null, restricts recognition to these characters.
+    /// Tesseract-only. When non-null + non-empty, restricts recognition to
+    /// these characters. Ignored by the kraken recognizer.
     pub whitelist: Option<String>,
-    /// Selects how the frontend *displays* the result: "hocr" shows the raw
-    /// hOCR XML, anything else shows plain text. The engine always recognizes
-    /// as hOCR (so bounding boxes are available for the preview in both modes);
-    /// this flag only steers rendering/export on the frontend.
-    pub output_mode: Option<String>,
-}
-
-/// OCR result returned to the frontend.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OcrResult {
-    pub text: String,
-    pub confidence: i32,
-    pub elapsed_ms: u64,
 }
 
 /// Return the list of languages available for OCR: embedded + user-installed.
@@ -113,60 +109,7 @@ fn run_ocr(
     image_bytes: &[u8],
     opts: OcrOpts,
 ) -> Result<OcrResult, String> {
-    let started = Instant::now();
-
-    // Decode the image into raw RGB8 pixels for tesseract.
-    let img = image::load_from_memory(image_bytes)
-        .map_err(|e| format!("Failed to decode image: {e}"))?
-        .to_rgb8();
-    let (w, h) = img.dimensions();
-    let bytes_per_pixel = 3;
-    let bytes_per_line = (w as i32) * bytes_per_pixel;
-
-    // A fresh engine per call: init is cheap relative to recognition and
-    // avoids cross-call state from a shared handle. Resolve the traineddata
-    // from embedded bytes first, then user-installed files on disk.
-    let api = TesseractAPI::new();
-    let (tessdata, _embedded) = languages::resolve_tessdata(app, &opts.language)?;
-    api.init_5(&tessdata, tessdata.len() as i32, &opts.language, 3, &[])
-        .map_err(|e| format!("Tesseract init failed: {e}"))?;
-
-    if let Some(ref whitelist) = opts.whitelist {
-        if !whitelist.is_empty() {
-            api.set_variable("tessedit_char_whitelist", whitelist)
-                .map_err(|e| format!("Failed to set whitelist: {e}"))?;
-        }
-    }
-
-    // Map our PSM int to the engine enum.
-    api.set_page_seg_mode(tesseract_rs::TessPageSegMode::from_int(opts.psm))
-        .map_err(|e| format!("Failed to set PSM: {e}"))?;
-
-    api.set_image(
-        img.as_raw(),
-        w as i32,
-        h as i32,
-        bytes_per_pixel,
-        bytes_per_line,
-    )
-    .map_err(|e| format!("Failed to set image: {e}"))?;
-
-    // Always run recognition as hOCR. The hOCR XML carries per-word bounding
-    // boxes (overlaid on the preview for both output modes) and is parsed on
-    // the frontend into either raw hOCR (hOCR mode) or plain text (text mode).
-    // A single pass thus serves both outputs instead of running two getters.
-    let text = api
-        .get_hocr_text(0)
-        .map_err(|e| format!("OCR failed: {e}"))?;
-
-    let confidence = api.mean_text_conf().unwrap_or(-1);
-    let _ = api.end(); // best-effort cleanup
-
-    Ok(OcrResult {
-        text,
-        confidence,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-    })
+    engine::run_ocr(app, image_bytes, &opts)
 }
 
 /// How to turn a PDF page into an image. "extract" pulls the embedded raster
@@ -311,6 +254,10 @@ pub fn run() {
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("just-ocr starting — tesseract {version}, languages: {langs}");
+            // Kraken models are loaded lazily on first OCR call and then cached
+            // for the lifetime of the process (segmentation + recognition models
+            // are Send+Sync, so a single shared instance is reused across calls).
+            app.manage(KrakenCache::new());
             // Reclaim temp dirs left by crashes / previous runs.
             sweep_stale_temp_dirs();
             Ok(())
@@ -335,19 +282,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use crate::just_ocr_temp_pid;
-    use tesseract_rs::TessPageSegMode;
-
-    /// Validates that PSM integers from the frontend map onto every enum
-    /// variant without panicking. The real OCR pipeline is exercised manually
-    /// via `cargo tauri dev` (see README).
-    #[test]
-    fn psm_mapping_covers_all_options() {
-        for v in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] {
-            let _ = TessPageSegMode::from_int(v);
-        }
-        // Unknown values fall back to PSM_AUTO.
-        assert_eq!(TessPageSegMode::from_int(999), TessPageSegMode::PSM_AUTO);
-    }
 
     #[test]
     fn temp_dir_pid_parsing() {
