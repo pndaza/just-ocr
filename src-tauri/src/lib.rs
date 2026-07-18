@@ -3,18 +3,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime;
 use tauri::Emitter;
-use tauri::Manager;
 use tesseract_rs::TesseractAPI;
 
 mod engine;
 mod languages;
 mod pdf;
 mod tesseract_line;
-#[allow(unused)]
-pub mod kraken;
 
 pub use engine::{LineBox, OcrResult};
-pub use kraken::KrakenCache;
+pub use kraken_engine::Engine as KrakenEngine;
 
 /// OCR options sent from the frontend.
 #[derive(Debug, Clone, Deserialize)]
@@ -264,10 +261,9 @@ pub fn run() {
                 .collect::<Vec<_>>()
                 .join(", ");
             log::info!("just-ocr starting — tesseract {version}, languages: {langs}");
-            // Kraken models are loaded lazily on first OCR call and then cached
-            // for the lifetime of the process (segmentation + recognition models
-            // are Send+Sync, so a single shared instance is reused across calls).
-            app.manage(KrakenCache::new());
+            // Kraken models are loaded lazily on the first OCR call (see
+            // engine::kraken_engine) so a missing-models error only surfaces
+            // when OCR is actually attempted, not at startup.
             // Reclaim temp dirs left by crashes / previous runs.
             sweep_stale_temp_dirs();
             Ok(())

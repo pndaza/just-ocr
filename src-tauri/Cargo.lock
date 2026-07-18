@@ -2993,19 +2993,15 @@ name = "just-ocr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "env_logger",
  "fax",
  "flate2",
  "futures-util",
- "geo",
  "hayro",
  "image",
- "imageproc",
+ "kraken-engine",
  "log",
  "lopdf",
- "ndarray",
  "once_cell",
  "rayon",
  "reqwest 0.12.28",
@@ -3028,6 +3024,23 @@ dependencies = [
  "bitflags 2.13.0",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "kraken-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "geo",
+ "image",
+ "imageproc",
+ "log",
+ "ndarray",
+ "once_cell",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 use image::GenericImageView;
 use rayon::prelude::*;
 
-use just_ocr_lib::kraken::{
-    self,
+use kraken_engine::{
     config::SegmentationConfig,
     containers::Segmentation,
     detect::postprocess,
@@ -280,7 +279,5 @@ fn main() -> anyhow::Result<()> {
     println!("  If PARALLEL TOTAL is materially faster, switching to rayon in");
     println!("  engine.rs is a drop-in optimization.");
 
-    // Silence unused-import warning for `kraken` re-export path.
-    let _ = kraken::KrakenCache::new();
     Ok(())
 }

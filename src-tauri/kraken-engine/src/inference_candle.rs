@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use ndarray::{s, Array3, Array4};
 
-use crate::kraken::heatmap::Heatmap;
-use crate::kraken::inference_helpers::{nearest_upsample_2d, sigmoid};
-use crate::kraken::preprocess::Preprocessed;
-use crate::kraken::segmentation_candle::SegmentationModelCandle;
+use crate::heatmap::Heatmap;
+use crate::inference_helpers::{nearest_upsample_2d, sigmoid};
+use crate::preprocess::Preprocessed;
+use crate::segmentation_candle::SegmentationModelCandle;
 
 /// Run inference using the candle-core backend.
 ///
