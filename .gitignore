@@ -9,3 +9,8 @@ src-tauri/gen/
 # misc
 .DS_Store
 *.log
+
+# Vendored kraken models (safetensors) — supplied locally, not committed.
+# Segmentation + recognition models for the Kraken engine.
+kraken-models/
+sample_pdf/
