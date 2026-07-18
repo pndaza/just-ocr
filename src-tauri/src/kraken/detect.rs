@@ -52,7 +52,10 @@ pub fn detect_candle(
 }
 
 /// Shared post-processing: vectorize heatmap → baselines/regions → boundaries → reading order.
-fn postprocess(
+///
+/// Public so the benchmark example can time it independently of preprocess +
+/// inference. Normal callers use [`detect_candle`], which wraps all three.
+pub fn postprocess(
     heatmap: &Heatmap,
     config: &SegmentationConfig,
     topline: bool,
