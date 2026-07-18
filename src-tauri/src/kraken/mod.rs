@@ -107,12 +107,29 @@ pub fn segment(
     cache: &KrakenCache,
     img: &DynamicImage,
 ) -> Result<Vec<BaselineLine>> {
+    use std::time::Instant;
+
     let (seg_path, _rec_path) = resolve_models(app)?;
+
+    let t = Instant::now();
     let model = cache.segmenter(&seg_path.to_string_lossy())?;
+    let model_load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    if model_load_ms > 1.0 {
+        // Only log when the model actually had to load (cold start). Cached
+        // calls return in microseconds and would just spam the log.
+        log::info!("[kraken] loaded segmentation model in {:.0} ms", model_load_ms);
+    }
+
     let config = SegmentationConfig {
         text_direction: "horizontal-lr".to_string(),
     };
+    let t = Instant::now();
     let result = detect_candle(img, model, &config).context("Kraken segmentation failed")?;
+    log::debug!(
+        "[kraken] segment: {:.0} ms ({} lines)",
+        t.elapsed().as_secs_f64() * 1000.0,
+        result.lines.len()
+    );
     Ok(result.lines)
 }
 
@@ -122,8 +139,26 @@ pub fn recognize_line(
     cache: &KrakenCache,
     crop: &DynamicImage,
 ) -> Result<String> {
+    use std::time::Instant;
+
     let (_seg_path, rec_path) = resolve_models(app)?;
+
+    let t = Instant::now();
     let model = cache.recognizer(&rec_path.to_string_lossy())?;
+    let model_load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    if model_load_ms > 1.0 {
+        log::info!("[kraken] loaded recognition model in {:.0} ms", model_load_ms);
+    }
+
+    let t = Instant::now();
     let tensor = preprocess_line(crop, model.height, model.padding)?;
-    model.recognize(&tensor).context("Kraken recognition failed")
+    let text = model.recognize(&tensor).context("Kraken recognition failed")?;
+    log::debug!(
+        "[kraken] recognize_line: {:.1} ms ({}x{}px → {} chars)",
+        t.elapsed().as_secs_f64() * 1000.0,
+        crop.width(),
+        crop.height(),
+        text.chars().count()
+    );
+    Ok(text)
 }

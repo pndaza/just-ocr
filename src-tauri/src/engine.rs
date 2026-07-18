@@ -44,19 +44,36 @@ pub fn run_ocr(
     opts: &OcrOpts,
 ) -> Result<OcrResult, String> {
     let started = Instant::now();
+    log::info!(
+        "[ocr] engine={} language={} image={} bytes",
+        opts.engine,
+        opts.language,
+        image_bytes.len()
+    );
 
+    let t = Instant::now();
     let img = image::load_from_memory(image_bytes)
         .map_err(|e| format!("Failed to decode image: {e}"))?;
     let (w, h) = img.dimensions();
+    log::info!("[ocr] decode image {}x{}: {:.1} ms", w, h, t.elapsed().as_secs_f64() * 1000.0);
 
     let cache = app.state::<KrakenCache>();
+
+    let t = Instant::now();
     let lines = kraken::segment(app, &cache, &img)
         .map_err(|e| format!("Segmentation failed: {e}"))?;
+    log::info!(
+        "[ocr] segmentation: {:.0} ms ({} lines)",
+        t.elapsed().as_secs_f64() * 1000.0,
+        lines.len()
+    );
 
     let mut boxes: Vec<LineBox> = Vec::with_capacity(lines.len());
     let mut conf_sum: i64 = 0;
     let mut conf_n: i32 = 0;
 
+    let recog_start = Instant::now();
+    let mut recog_n = 0i32;
     for line in &lines {
         if line.boundary.len() < 3 {
             continue;
@@ -86,6 +103,8 @@ pub fn run_ocr(
             other => return Err(format!("Unknown engine: {other}")),
         };
 
+        recog_n += 1;
+
         if conf >= 0 {
             conf_sum += conf as i64;
             conf_n += 1;
@@ -99,12 +118,29 @@ pub fn run_ocr(
             text,
         });
     }
+    log::info!(
+        "[ocr] recognition: {:.0} ms ({} lines, {:.1} ms/line avg)",
+        recog_start.elapsed().as_secs_f64() * 1000.0,
+        recog_n,
+        if recog_n > 0 {
+            recog_start.elapsed().as_secs_f64() * 1000.0 / recog_n as f64
+        } else {
+            0.0
+        }
+    );
 
     let confidence = if conf_n > 0 {
         (conf_sum / conf_n as i64) as i32
     } else {
         -1
     };
+
+    log::info!(
+        "[ocr] TOTAL: {:.0} ms (engine={}, {} boxes)",
+        started.elapsed().as_secs_f64() * 1000.0,
+        opts.engine,
+        boxes.len()
+    );
 
     Ok(OcrResult {
         width: w,

@@ -247,13 +247,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            // Initialize env_logger. Default to `info` for our crates so the
+            // per-stage OCR timing logs print without setting RUST_LOG; set
+            // RUST_LOG=debug for per-line recognition logs, RUST_LOG=trace for
+            // kraken-rust's internal stage logs.
+            let _ = env_logger::Builder::from_env(
+                env_logger::Env::default().default_filter_or("info"),
+            )
+            .format_timestamp_millis()
+            .try_init();
+
             let version = TesseractAPI::version();
             let langs = languages::list_languages(app.handle().clone())
                 .into_iter()
                 .map(|l| l.code)
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!("just-ocr starting — tesseract {version}, languages: {langs}");
+            log::info!("just-ocr starting — tesseract {version}, languages: {langs}");
             // Kraken models are loaded lazily on first OCR call and then cached
             // for the lifetime of the process (segmentation + recognition models
             // are Send+Sync, so a single shared instance is reused across calls).
