@@ -2,11 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
-import { parseHocrLines } from "./hocr";
+import { plainText, type OcrResult } from "./result";
 
-/** How the OCR engine returns its result. hOCR is structured XML with
- * per-word bounding boxes; text is plain UTF-8. */
-export type OutputMode = "text" | "hocr";
+export type { OcrResult, LineBox } from "./result";
 
 /** How a PDF is turned into per-page images before OCR.
  * - "extract": pull the embedded raster scan (fast, native resolution)
@@ -18,17 +16,15 @@ export type PdfMode = "extract" | "render";
  * B&W is Otsu-thresholded for pristine scans; Color keeps the source as-is. */
 export type ImageMode = "color" | "gray" | "bw";
 
-export interface OcrOpts {
-  language: string;
-  psm: number;
-  whitelist: string | null;
-  outputMode: OutputMode;
-}
+/** Recognizer choice. Layout segmentation is always Kraken; this selects the
+ * recognizer applied to each line crop. */
+export type Engine = "tesseract" | "kraken";
 
-export interface OcrResult {
-  text: string;
-  confidence: number;
-  elapsed_ms: number;
+export interface OcrOpts {
+  engine: Engine;
+  language: string;
+  /** Tesseract-only; ignored by the kraken recognizer. */
+  whitelist: string | null;
 }
 
 /** A single file in the batch queue. */
@@ -44,9 +40,8 @@ export interface Job {
   path: string | null;
   url: string; // object URL for thumbnail (created lazily for path-based jobs)
   status: JobStatus;
-  text: string;
-  /** The mode this job's `text` was produced in (drives display/export). */
-  outputMode: OutputMode;
+  /** Structured OCR result from the backend; null until the job is `done`. */
+  result: OcrResult | null;
   confidence: number;
   elapsedMs: number;
   error: string | null;
@@ -61,8 +56,7 @@ export function makeJob(file: File): Promise<Job> {
     path: null,
     url: URL.createObjectURL(file),
     status: "queued",
-    text: "",
-    outputMode: "text",
+    result: null,
     confidence: -1,
     elapsedMs: 0,
     error: null,
@@ -84,8 +78,7 @@ export function makeJobsFromReadFiles(
         path: f.path,
         url: "", // filled in by ensureThumb() when the row becomes visible
         status: "queued" as const,
-        text: "",
-        outputMode: "text" as const,
+        result: null,
         confidence: -1,
         elapsedMs: 0,
         error: null,
@@ -101,8 +94,7 @@ export function makeJobsFromReadFiles(
       path: null,
       url: URL.createObjectURL(blob),
       status: "queued" as const,
-      text: "",
-      outputMode: "text" as const,
+      result: null,
       confidence: -1,
       elapsedMs: 0,
       error: null,
@@ -208,7 +200,7 @@ export async function renderPdf(
 
 export async function ocrFromBytes(
   bytes: Uint8Array,
-  opts: OcrOpts
+  opts: OcrOpts,
 ): Promise<OcrResult> {
   // Tauri serdes: pass a plain number array for Vec<u8>.
   return invoke<OcrResult>("ocr_from_bytes", {
@@ -227,10 +219,10 @@ function csvField(s: string): string {
 
 /**
  * Write all completed jobs to a combined file via a native save dialog.
- * Format is chosen by the dialog's default extension.
+ * Format is chosen by the dialog's default extension (CSV or TXT).
  */
 export async function exportResults(jobs: Job[]): Promise<void> {
-  const done = jobs.filter((j) => j.status === "done");
+  const done = jobs.filter((j) => j.status === "done" && j.result);
   if (!done.length) return;
 
   const dest = await save({
@@ -239,19 +231,12 @@ export async function exportResults(jobs: Job[]): Promise<void> {
     filters: [
       { name: "CSV", extensions: ["csv"] },
       { name: "Text", extensions: ["txt"] },
-      { name: "hOCR", extensions: ["hocr", "html"] },
     ],
   });
   if (!dest) return; // user cancelled
 
-  // `text`-mode jobs store hOCR XML; reconstruct plain text for those exports.
-  // `hocr`-mode jobs keep the XML verbatim.
-  const plainText = (j: Job) =>
-    j.outputMode === "hocr" ? j.text : parseHocrLines(j.text).text;
-
   const lower = dest.toLowerCase();
   const isCsv = lower.endsWith(".csv");
-  const isHocr = lower.endsWith(".hocr") || lower.endsWith(".html");
   let content: string;
   if (isCsv) {
     const rows = ["filename,confidence,elapsed_ms,text"];
@@ -261,30 +246,16 @@ export async function exportResults(jobs: Job[]): Promise<void> {
           csvField(j.name),
           j.confidence,
           j.elapsedMs,
-          // hOCR XML is kept verbatim; plain text gets a trailing trim.
-          csvField(
-            j.outputMode === "hocr" ? j.text : plainText(j).replace(/\s+$/, "")
-          ),
-        ].join(",")
+          csvField(plainText(j.result!).replace(/\s+$/, "")),
+        ].join(","),
       );
     }
     content = rows.join("\n") + "\n";
-  } else if (isHocr) {
-    // Each job's hOCR is a standalone document; separate them with XML
-    // comments so the file remains parseable per-block.
-    const blocks = done.map((j) => {
-      if (j.outputMode === "hocr") {
-        return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) -->\n${j.text}`;
-      }
-      // A text-mode job has no hOCR; record its reconstructed text as a comment.
-      const body = plainText(j).replace(/\s+$/, "");
-      return `<!-- ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) — plain text -->\n<!-- ${body.replace(/-->/g, "-")} -->`;
-    });
-    content = blocks.join("\n\n") + "\n";
   } else {
     const blocks = done.map(
       (j) =>
-        `=== ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) ===\n${plainText(j).replace(/\s+$/, "")}`
+        `=== ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) ===\n` +
+        plainText(j.result!).replace(/\s+$/, ""),
     );
     content = blocks.join("\n\n") + "\n";
   }
@@ -317,7 +288,7 @@ export async function downloadableLanguages(): Promise<LanguageInfo[]> {
 
 export async function downloadLanguage(
   code: string,
-  variant: string
+  variant: string,
 ): Promise<void> {
   await invoke("download_language", { language: code, variant });
 }
@@ -338,13 +309,14 @@ export async function deleteLanguage(code: string): Promise<void> {
   await invoke("delete_language", { code });
 }
 
-// ── Last-used OCR language (persisted) ───────────────────────────────────────
-// Mirrors the theme persistence in theme.ts: the chosen language is stored in
-// localStorage and pre-selected on the next launch. loadLanguages() still
-// validates the value against the available models and falls back if it was
-// removed in the meantime.
+// ── Last-used OCR settings (persisted) ───────────────────────────────────────
+// Mirrors the theme persistence in theme.ts: the chosen engine + language are
+// stored in localStorage and pre-selected on the next launch. loadLanguages()
+// still validates the language value against the available models and falls
+// back if it was removed in the meantime.
 
 const LAST_LANG_KEY = "just-ocr:language";
+const LAST_ENGINE_KEY = "just-ocr:engine";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
 export function lastLanguage(): string | null {
@@ -365,3 +337,22 @@ export function saveLanguage(lang: string): void {
   }
 }
 
+/** Read the last-used engine from localStorage; defaults to "tesseract". */
+export function lastEngine(): Engine {
+  try {
+    return localStorage.getItem(LAST_ENGINE_KEY) === "kraken"
+      ? "kraken"
+      : "tesseract";
+  } catch {
+    return "tesseract";
+  }
+}
+
+/** Persist the chosen engine so it is pre-selected on next launch. */
+export function saveEngine(engine: Engine): void {
+  try {
+    localStorage.setItem(LAST_ENGINE_KEY, engine);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
