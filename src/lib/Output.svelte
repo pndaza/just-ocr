@@ -1,18 +1,17 @@
 <script lang="ts">
   import type { Job } from "./ocr";
-  import { parseHocrLines } from "./hocr";
+  import { plainText } from "./result";
 
   interface Props {
     job: Job | null;
   }
   let { job }: Props = $props();
 
-  // `text`-mode jobs store hOCR XML in `job.text`; show the reconstructed plain
-  // text. `hocr`-mode jobs show the raw XML. Both fall back to "" until done.
+  // The recognized text is a projection of the structured `OcrResult` (lines
+  // joined with "\n"). Falls back to "" until the job is done.
   let displayText = $derived.by(() => {
-    if (!job || job.status !== "done" || !job.text) return "";
-    if (job.outputMode === "hocr") return job.text;
-    return parseHocrLines(job.text).text.replace(/\s+$/, "");
+    if (!job || job.status !== "done" || !job.result) return "";
+    return plainText(job.result).replace(/\s+$/, "");
   });
 
   let copied = $state(false);
@@ -27,7 +26,7 @@
 
 <div class="panel" role="region" aria-label="Recognized text">
   <div class="head">
-    <span class="title">{job?.outputMode === "hocr" ? "hOCR" : "Text"}</span>
+    <span class="title">Text</span>
     {#if job?.status === "done"}
       <span class="meta">{job.elapsedMs} ms</span>
       <button class="copy" onclick={copy} disabled={!displayText.trim()}>
@@ -49,9 +48,9 @@
     {:else if job.status === "queued"}
       <div class="placeholder">Queued — run OCR to extract text.</div>
     {:else if displayText.trim()}
-      <pre class="text" class:hocr={job.outputMode === "hocr"}>{displayText}</pre>
+      <pre class="text">{displayText}</pre>
     {:else}
-      <div class="placeholder">No text recognized. Try a different PSM or image.</div>
+      <div class="placeholder">No text recognized. Try a different engine or image.</div>
     {/if}
   </div>
 </div>
@@ -105,11 +104,6 @@
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
-  }
-  .text.hocr {
-    font-size: 11px;
-    line-height: 1.5;
-    color: var(--text-dim);
   }
   .placeholder {
     color: var(--text-faint);
