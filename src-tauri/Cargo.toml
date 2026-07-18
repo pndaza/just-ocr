@@ -54,6 +54,9 @@ log = "0.4"
 # once_cell provides stable OnceCell::get_or_try_init (std OnceLock's equivalent
 # is still unstable on the toolchain we target).
 once_cell = "1"
+# env_logger backs the log macros in dev. Default level info so the per-stage
+# OCR timing logs print without setting RUST_LOG; bump with RUST_LOG=debug.
+env_logger = "0.11"
 
 # CPU rasterization (hayro/vello_cpu) is 30-50× slower unoptimized; in
 # `cargo tauri dev` (debug) that makes PDF render mode unusably slow. Optimize
