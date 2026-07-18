@@ -18,6 +18,8 @@
     disposeJobFile,
     lastLanguage,
     saveLanguage,
+    lastEngine,
+    saveEngine,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -34,15 +36,17 @@
     theme = toggleTheme();
   }
   let opts = $state<OcrOpts>({
+    engine: lastEngine(),
     language: lastLanguage() ?? "eng",
-    psm: 3,
     whitelist: null,
-    outputMode: "text",
   });
 
-  // Remember the chosen language so it is pre-selected on the next launch.
-  // loadLanguages() validates the value against available models, so a language
-  // that was removed in the meantime is corrected automatically.
+  // Remember the chosen engine + language so they are pre-selected on the next
+  // launch. loadLanguages() validates the language against available models,
+  // so a value removed in the meantime is corrected automatically.
+  $effect(() => {
+    saveEngine(opts.engine);
+  });
   $effect(() => {
     saveLanguage(opts.language);
   });
@@ -326,17 +330,14 @@
 
   async function processJob(job: Job) {
     job.status = "running";
-    // Record the output mode used so display/export follow the job, not the
-    // live setting (which the user may change between runs).
-    job.outputMode = opts.outputMode;
     try {
       // Path-based (PDF page) jobs read their pixels from the temp file; others
       // use the in-memory bytes.
       const bytes = await readJobBytes(job);
       const res = await ocrFromBytes(bytes, opts);
-      job.text = res.text;
+      job.result = res;
       job.confidence = res.confidence;
-      job.elapsedMs = res.elapsed_ms;
+      job.elapsedMs = res.elapsedMs;
       job.status = "done";
     } catch (e: any) {
       job.error = typeof e === "string" ? e : e?.message ?? String(e);
