@@ -1,0 +1,15 @@
+# Git LFS tracking for the bundled kraken model weights.
+#
+# These are large binary files (5MB + 16MB) that are embedded into the app
+# binary at compile time via `include_bytes!`. LFS keeps them out of the regular
+# git history (which stays small + fast to clone) while still making them
+# available to CI and anyone who clones the repo.
+#
+# One-time local setup (run after `brew install git-lfs`):
+#   git lfs install
+#   git lfs track "kraken-models/*.safetensors"
+#   # (the line above is what this file records — re-running it is a no-op)
+#   git add .gitattributes
+#   git add kraken-models/bur_segment.safetensors kraken-models/bur_recog.safetensors
+#   git commit -m "Track kraken models via Git LFS"
+kraken-models/*.safetensors filter=lfs diff=lfs merge=lfs -text
