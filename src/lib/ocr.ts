@@ -16,13 +16,16 @@ export type PdfMode = "extract" | "render";
  * B&W is Otsu-thresholded for pristine scans; Color keeps the source as-is. */
 export type ImageMode = "color" | "gray" | "bw";
 
-/** Recognizer choice. Layout segmentation is always Kraken; this selects the
- * recognizer applied to each line crop. */
+/** Recognizer choice (Myanmar path only). Ignored for other languages, where
+ * Tesseract handles both segmentation and recognition. */
 export type Engine = "tesseract" | "kraken";
 
 export interface OcrOpts {
   engine: Engine;
   language: string;
+  /** Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path
+   * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
+  psm: number;
   /** Tesseract-only; ignored by the kraken recognizer. */
   whitelist: string | null;
 }

@@ -9,22 +9,34 @@ mod engine;
 mod languages;
 mod pdf;
 mod tesseract_line;
+mod tesseract_page;
 
 pub use engine::{LineBox, OcrResult};
 pub use kraken_engine::Engine as KrakenEngine;
 
 /// OCR options sent from the frontend.
+///
+/// The pipeline shape is **language-driven**:
+///   - `language == "mya"` → Kraken does layout (hidden from the user); the
+///     recognizer is chosen by `engine` ("kraken" | "tesseract"). `psm` is
+///     ignored — Kraken has already segmented.
+///   - any other language → full-page Tesseract with `psm` (Tesseract does its
+///     own layout). `engine` is ignored.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrOpts {
-    /// Recognizer choice: "tesseract" (per-line, after Kraken segmentation) or
-    /// "kraken" (Kraken recognition). Any other value returns an error.
+    /// Recognizer for the Myanmar path: "kraken" (default) or "tesseract".
+    /// Ignored for non-Myanmar languages.
     pub engine: String,
-    /// Tesseract language code (resolved via `languages::resolve_tessdata`).
-    /// Ignored by the kraken recognizer.
+    /// Tesseract language code. Also drives the pipeline dispatch: "mya"
+    /// routes through Kraken segmentation; anything else routes through
+    /// full-page Tesseract.
     pub language: String,
+    /// Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path;
+    /// ignored by the Myanmar path (Kraken does layout there).
+    pub psm: i32,
     /// Tesseract-only. When non-null + non-empty, restricts recognition to
-    /// these characters. Ignored by the kraken recognizer.
+    /// these characters.
     pub whitelist: Option<String>,
 }
 

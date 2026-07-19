@@ -38,6 +38,7 @@
   let opts = $state<OcrOpts>({
     engine: lastEngine(),
     language: lastLanguage() ?? "eng",
+    psm: 3,
     whitelist: null,
   });
 
