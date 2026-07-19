@@ -92,6 +92,16 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tesseract 5.x uses std::filesystem (introduced in macOS 10.15).
+          # The patched tesseract-rs fork adds -mmacosx-version-min=10.15 to
+          # CMAKE_CXX_FLAGS directly, but the `cc` crate independently derives
+          # the deployment target for CMAKE_C_FLAGS — and defaults it to the
+          # SDK's value (10.13 on the runner) when this env var is unset. Two
+          # conflicting version-min flags on the same compile line make clang
+          # pick the *last* (lower) one, defeating the CXX fix. Setting this
+          # env var makes `cc` derive 10.15 too, so C and CXX agree.
+          # Linux/Windows are unaffected (env var is macOS-only).
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-latest' && '10.15' || '' }}
         with:
           # `app-v0.1.0` style tag. tauri-action substitutes __VERSION__ with
           # the version from src-tauri/tauri.conf.json.
