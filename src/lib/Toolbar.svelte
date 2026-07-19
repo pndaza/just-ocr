@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
   import type { Theme } from "../theme";
+  import logo from "../assets/logo.png";
 
   interface Props {
     opts: OcrOpts;
@@ -89,10 +90,7 @@
 </script>
 
 <div class="toolbar">
-  <div class="brand">
-    <span class="logo">◎</span>
-    just<span class="accent">-ocr</span>
-  </div>
+  <img class="brand-logo" src={logo} alt="Just OCR" />
 
   <div class="divider"></div>
 
@@ -200,20 +198,13 @@
     background: var(--bg-elev);
     flex-shrink: 0;
   }
-  .brand {
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: -0.01em;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-  .logo {
-    color: var(--accent);
-    font-size: 17px;
-  }
-  .accent {
-    color: var(--accent);
+  .brand-logo {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    /* macOS-style squircle hint; harmless where unsupported. */
+    object-fit: contain;
+    flex-shrink: 0;
   }
   .divider {
     width: 1px;
