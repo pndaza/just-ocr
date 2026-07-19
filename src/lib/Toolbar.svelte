@@ -66,15 +66,15 @@
   let whitelistDisabled = $derived(isMyanmar && opts.engine === "kraken");
 
   // Picking Myanmar defaults the recognizer to Kraken (the whole point —
-  // Tesseract is bad at Myanmar script). Switching away leaves the engine
-  // state as-is; it just becomes irrelevant.
+  // Tesseract is bad at Myanmar script). This must fire ONLY on the language
+  // transition (not-my → mya), not whenever engine happens to be tesseract —
+  // otherwise the user can never select tesseract for myanmar after the
+  // default fires. We track the previous language to detect the transition.
+  let prevLang = $state(opts.language);
   $effect(() => {
-    if (isMyanmar && opts.engine === "tesseract") {
-      // Only auto-switch on the language change, not on every engine toggle.
-      // We detect "just became Myanmar" by tracking the previous language.
-      // Simpler: if user is on Myanmar and somehow landed on tesseract without
-      // having explicitly chosen it, prefer kraken. Practically this fires
-      // once when the select flips to mya.
+    const becameMyanmar = opts.language === "mya" && prevLang !== "mya";
+    prevLang = opts.language;
+    if (becameMyanmar) {
       opts.engine = "kraken";
     }
   });
