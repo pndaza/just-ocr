@@ -9,6 +9,12 @@ binding) and complex scripts — currently Burmese — via a vendored
 Both engines' models are embedded in the binary, so the resulting app is fully
 standalone — no system installs required.
 
+![Just OCR recognizing Burmese with Kraken](screenshots/just-ocr-app-ss.png)
+
+*Three-panel layout: image list, preview with per-line bounding-box overlay,
+and recognized text + timing. Shown here on a Burmese scan with Kraken
+segmentation + recognition.*
+
 ## OCR pipeline
 
 The pipeline is **language-driven**:
