@@ -92,6 +92,13 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tesseract 5.x uses std::filesystem::recursive_directory_iterator
+          # (introduced in macOS 10.15). GitHub's macos-latest ships Xcode 26.5,
+          # whose SDK enforces availability annotations; without an explicit
+          # deployment target the SDK defaults below 10.15 and rejects the API
+          # during the cmake build of libtesseract. Setting this tells clang the
+          # floor is 10.15, where the API is available. Harmless on Linux/Windows.
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-latest' && '10.15' || '' }}
         with:
           # `app-v0.1.0` style tag. tauri-action substitutes __VERSION__ with
           # the version from src-tauri/tauri.conf.json.
