@@ -55,9 +55,12 @@ pub struct Engine {
 
 impl Engine {
     /// Load both models from disk.
+    ///
+    /// Used when the user has supplied override models in the app data dir;
+    /// for the default bundled-models path see [`Engine::load_from_buffers`].
     pub fn load(seg_path: &Path, rec_path: &Path) -> Result<Self> {
         log::info!(
-            "Loading kraken models: seg={}, rec={}",
+            "Loading kraken models from disk: seg={}, rec={}",
             seg_path.display(),
             rec_path.display()
         );
@@ -65,6 +68,24 @@ impl Engine {
             .with_context(|| format!("Failed to load seg model: {}", seg_path.display()))?;
         let rec = RecognitionModel::load(&rec_path.to_string_lossy())
             .with_context(|| format!("Failed to load rec model: {}", rec_path.display()))?;
+        Ok(Engine {
+            seg: Arc::new(seg),
+            rec: Arc::new(rec),
+        })
+    }
+
+    /// Load both models from in-memory safetensors buffers.
+    ///
+    /// Used to bundle the models into the binary via `include_bytes!` so a
+    /// fresh install works with zero setup. The bytes must remain valid for
+    /// the lifetime of the engine — `&'static [u8]` from `include_bytes!`
+    /// satisfies this naturally.
+    pub fn load_from_buffers(seg_bytes: &[u8], rec_bytes: &[u8]) -> Result<Self> {
+        log::info!("Loading bundled kraken models from binary");
+        let seg = SegmentationModelCandle::load_from_buffer(seg_bytes)
+            .context("Failed to load bundled seg model")?;
+        let rec = RecognitionModel::load_from_buffer(rec_bytes)
+            .context("Failed to load bundled rec model")?;
         Ok(Engine {
             seg: Arc::new(seg),
             rec: Arc::new(rec),

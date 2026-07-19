@@ -100,13 +100,37 @@ impl RecognitionModel {
         Self::load_with_meta(path, &meta)
     }
 
+    /// Load a recognition model from an in-memory safetensors buffer.
+    ///
+    /// Used when the model bytes are embedded in the binary via
+    /// `include_bytes!` — avoids any filesystem access.
+    pub fn load_from_buffer(data: &[u8]) -> Result<Self> {
+        let meta = super::meta::parse_recognition_meta_from_buffer(data)?;
+        Self::load_with_meta_buffer(data, &meta)
+    }
+
     /// Build the model from a safetensors file using pre-parsed metadata.
     pub fn load_with_meta(path: &str, meta: &RecogMeta) -> Result<Self> {
         let device = Device::Cpu;
-
-        // Load all tensors and strip the `<uuid>.nn.` prefix.
         let raw_tensors = candle_core::safetensors::load(path, &device)
             .with_context(|| format!("Failed to load safetensors: {path}"))?;
+        Self::build(raw_tensors, meta)
+    }
+
+    /// Build the model from an in-memory safetensors buffer + pre-parsed metadata.
+    pub fn load_with_meta_buffer(data: &[u8], meta: &RecogMeta) -> Result<Self> {
+        let device = Device::Cpu;
+        let raw_tensors = candle_core::safetensors::load_buffer(data, &device)
+            .context("Failed to load safetensors from buffer")?;
+        Self::build(raw_tensors, meta)
+    }
+
+    /// Construct the network layers from a tensor map + metadata. Shared by
+    /// the file- and buffer-based loaders.
+    fn build(raw_tensors: HashMap<String, Tensor>, meta: &RecogMeta) -> Result<Self> {
+        let device = Device::Cpu;
+
+        // Strip the `<uuid>.nn.` prefix from tensor names.
         let prefix = format!("{}.nn.", meta.uuid);
         let mut tensors: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in raw_tensors {
@@ -129,8 +153,10 @@ impl RecognitionModel {
         let lstm1 = build_bilstm(&vb, "L_14", 400, 200)?;
         let lstm2 = build_bilstm(&vb, "L_16", 400, 200)?;
 
-        // O_18: Linear(400→118)
-        let num_classes = 118;
+        // O_18: Linear(400 → num_classes). The class count is model-specific
+        // (bur_recog=119, myanmar=118) and is parsed from the VGSL `O1c<N>`
+        // clause by the metadata loader rather than hardcoded.
+        let num_classes = meta.num_classes;
         let linear = build_linear(&vb, "O_18", 400, num_classes)?;
 
         let codec = Codec::from_c2l(&meta.codec);

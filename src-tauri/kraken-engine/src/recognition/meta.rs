@@ -52,28 +52,36 @@ pub struct RecogMeta {
     pub one_channel_mode: String,
     /// The UUID prefix used in tensor names (e.g. "937bdeb5-...").
     pub uuid: String,
+    /// Number of output classes, parsed from the VGSL `O1c<N>` clause.
+    /// Used to size the final linear layer instead of hardcoding it (different
+    /// models have different class counts — bur_recog has 119, myanmar has 118).
+    pub num_classes: usize,
 }
 
-/// Read the safetensors header (metadata only) without loading all tensors.
+/// Read the safetensors header (metadata only) without loading all tensors,
+/// from an in-memory buffer.
 ///
 /// Safetensors format: 8-byte little-endian header length, then JSON header,
 /// then tensor data. We only need the header's `__metadata__` field.
-pub fn read_safetensors_metadata(path: &str) -> Result<HashMap<String, String>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open safetensors file: {path}"))?;
-    let mut header_len_buf = [0u8; 8];
-    file.read_exact(&mut header_len_buf)?;
-    let header_len = u64::from_le_bytes(header_len_buf) as usize;
+pub fn read_safetensors_metadata_from_buffer(data: &[u8]) -> Result<HashMap<String, String>> {
+    if data.len() < 8 {
+        return Err(anyhow!("Safetensors buffer too short for header length"));
+    }
+    let header_len = u64::from_le_bytes(data[..8].try_into()?) as usize;
     // Sanity check: headers are typically < 1MB.
     if header_len > 100 * 1024 * 1024 {
         return Err(anyhow!("Safetensors header too large: {header_len} bytes"));
     }
-    let mut header_buf = vec![0u8; header_len];
-    file.read_exact(&mut header_buf)?;
-    file.seek(SeekFrom::Start(0)).ok();
+    if data.len() < 8 + header_len {
+        return Err(anyhow!(
+            "Safetensors buffer truncated: need {} bytes for header, have {}",
+            8 + header_len,
+            data.len()
+        ));
+    }
+    let header_buf = &data[8..8 + header_len];
 
-    let header: serde_json::Value = serde_json::from_slice(&header_buf)
+    let header: serde_json::Value = serde_json::from_slice(header_buf)
         .context("Failed to parse safetensors header JSON")?;
 
     let mut metadata = HashMap::new();
@@ -87,12 +95,36 @@ pub fn read_safetensors_metadata(path: &str) -> Result<HashMap<String, String>> 
     Ok(metadata)
 }
 
-/// Parse recognition metadata from a safetensors file.
+/// Read the safetensors header (metadata only) from a file path.
+///
+/// Convenience wrapper around [`read_safetensors_metadata_from_buffer`] that
+/// reads the whole file first. Prefer the buffer variant when the bytes are
+/// already in memory (e.g. from `include_bytes!`) to avoid a redundant copy.
+pub fn read_safetensors_metadata(path: &str) -> Result<HashMap<String, String>> {
+    let data = std::fs::read(path)
+        .with_context(|| format!("Failed to open safetensors file: {path}"))?;
+    read_safetensors_metadata_from_buffer(&data)
+}
+
+/// Parse recognition metadata from an in-memory safetensors buffer.
+///
+/// Reads the `kraken_meta` header, finds the first recognition model entry,
+/// and extracts VGSL spec, codec, input shape, and UUID prefix.
+pub fn parse_recognition_meta_from_buffer(data: &[u8]) -> Result<RecogMeta> {
+    let metadata = read_safetensors_metadata_from_buffer(data)?;
+    parse_recognition_meta_impl(metadata)
+}
+
+/// Parse recognition metadata from a safetensors file path.
 ///
 /// Reads the `kraken_meta` header, finds the first recognition model entry,
 /// and extracts VGSL spec, codec, input shape, and UUID prefix.
 pub fn parse_recognition_meta(path: &str) -> Result<RecogMeta> {
     let metadata = read_safetensors_metadata(path)?;
+    parse_recognition_meta_impl(metadata)
+}
+
+fn parse_recognition_meta_impl(metadata: HashMap<String, String>) -> Result<RecogMeta> {
     let kraken_meta_str = metadata
         .get("kraken_meta")
         .ok_or_else(|| anyhow!("No 'kraken_meta' in safetensors metadata"))?;
@@ -123,13 +155,68 @@ pub fn parse_recognition_meta(path: &str) -> Result<RecogMeta> {
     // Parse input shape from VGSL spec: "[batch,height,width,channels ...]"
     let input_nhwc = parse_vgsl_input(&vgsl)?;
 
+    // Parse class count from the trailing `O1c<N>` output clause. Different
+    // models have different class counts (bur_recog=119, myanmar=118), so we
+    // read it rather than hardcoding.
+    let num_classes = parse_vgsl_num_classes(&vgsl)?;
+
     Ok(RecogMeta {
         vgsl,
         codec,
         input_nhwc,
         one_channel_mode,
         uuid: uuid.clone(),
+        num_classes,
     })
+}
+
+/// Parse the class count from a VGSL spec's trailing output clause.
+///
+/// The output block looks like `O1c118` (1 output, 118 classes) or, with the
+/// layer-name annotation kraken writes, `O{O_18}1c119`. We strip any `{...}`
+/// annotation, find the trailing `c<digits>`, and parse the count.
+///
+/// Returns the class count, or an error if no `O...cN` clause is present.
+fn parse_vgsl_num_classes(vgsl: &str) -> Result<usize> {
+    // Strip layer-name annotations like `{O_18}` throughout the spec so the
+    // output clause reduces to its canonical form (`O1c119`).
+    let stripped = strip_brace_annotations(vgsl);
+
+    // Find the last 'c' that begins the class-count clause. It follows an
+    // output marker `O` — search for the last "Oc" or "O1c" pattern.
+    let o_idx = stripped
+        .rfind('O')
+        .ok_or_else(|| anyhow!("VGSL spec missing output clause 'O...cN': {vgsl}"))?;
+    let tail = &stripped[o_idx..];
+    let c_idx = tail
+        .find('c')
+        .ok_or_else(|| anyhow!("VGSL output clause missing 'c' class count: {vgsl}"))?;
+    let digits: String = tail[c_idx + 1..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return Err(anyhow!("VGSL output class count is empty: {vgsl}"));
+    }
+    digits
+        .parse::<usize>()
+        .with_context(|| format!("VGSL class count not a number: {digits}"))
+}
+
+/// Remove every `{...}` substring from a VGSL spec, collapsing layer-name
+/// annotations: `O{O_18}1c119` → `O1c119`. Returns an owned String.
+fn strip_brace_annotations(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Parse the input block `[b,h,w,c]` from a VGSL spec string.

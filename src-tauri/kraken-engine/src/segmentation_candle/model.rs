@@ -202,12 +202,31 @@ impl SegmentationModelCandle {
 
         // Parse metadata from the safetensors header.
         let seg_meta = parse_seg_meta(path)?;
+        let raw_tensors = candle_core::safetensors::load(path, &device)
+            .with_context(|| format!("Failed to load safetensors: {path}"))?;
+        Self::build(raw_tensors, &seg_meta)
+    }
+
+    /// Load from an in-memory safetensors buffer (e.g. `include_bytes!`).
+    ///
+    /// Avoids all filesystem access — useful for bundling models into the
+    /// binary so a fresh install works with zero setup.
+    pub fn load_from_buffer(data: &[u8]) -> Result<Self> {
+        let device = Device::Cpu;
+        let seg_meta = parse_seg_meta_from_buffer(data)?;
+        let raw_tensors = candle_core::safetensors::load_buffer(data, &device)
+            .context("Failed to load safetensors from buffer")?;
+        Self::build(raw_tensors, &seg_meta)
+    }
+
+    /// Construct the network layers from a tensor map + parsed seg metadata.
+    /// Shared by the file- and buffer-based loaders.
+    fn build(raw_tensors: HashMap<String, Tensor>, seg_meta: &SegMeta) -> Result<Self> {
+        let device = Device::Cpu;
         let uuid = &seg_meta.uuid;
         let vgsl = &seg_meta.vgsl;
 
-        // Load tensors and strip the UUID prefix.
-        let raw_tensors = candle_core::safetensors::load(path, &device)
-            .with_context(|| format!("Failed to load safetensors: {path}"))?;
+        // Strip the UUID prefix from tensor names.
         let prefix = format!("{uuid}.nn.");
         let mut tensors: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in raw_tensors {
@@ -222,10 +241,10 @@ impl SegmentationModelCandle {
 
         // Build ModelMeta for compatibility with existing detect() pipeline.
         let meta = ModelMeta {
-            class_mapping: seg_meta.class_mapping,
-            one_channel_mode: seg_meta.one_channel_mode,
+            class_mapping: seg_meta.class_mapping.clone(),
+            one_channel_mode: seg_meta.one_channel_mode.clone(),
             topline: seg_meta.topline,
-            padding: seg_meta.padding,
+            padding: seg_meta.padding.clone(),
             bounding_regions: None,
             input: vec![1, 3, 1800, 0],
         };
@@ -273,6 +292,17 @@ struct SegMeta {
 
 fn parse_seg_meta(path: &str) -> Result<SegMeta> {
     let metadata = crate::recognition::meta::read_safetensors_metadata(path)?;
+    parse_seg_meta_impl(metadata)
+}
+
+fn parse_seg_meta_from_buffer(data: &[u8]) -> Result<SegMeta> {
+    let metadata = crate::recognition::meta::read_safetensors_metadata_from_buffer(data)?;
+    parse_seg_meta_impl(metadata)
+}
+
+fn parse_seg_meta_impl(
+    metadata: HashMap<String, String>,
+) -> Result<SegMeta> {
     let kraken_meta_str = metadata
         .get("kraken_meta")
         .ok_or_else(|| anyhow::anyhow!("No 'kraken_meta' in safetensors metadata"))?;
