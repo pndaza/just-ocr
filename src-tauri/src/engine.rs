@@ -85,6 +85,14 @@ pub fn resolve_kraken_models(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf
 }
 
 /// Entry point invoked by the `ocr_from_bytes` Tauri command.
+///
+/// Dispatches on language:
+///   - `"mya"` → Kraken segmentation (hidden from the user) + per-line
+///     recognition by the chosen engine ("kraken" | "tesseract"). Kraken's
+///     layout is far better than Tesseract's for Myanmar script, so we always
+///     use it regardless of which recognizer the user picked.
+///   - any other language → full-page Tesseract with the user's PSM. Tesseract
+///     does its own layout + recognition here; Kraken is not involved.
 pub fn run_ocr(
     app: &tauri::AppHandle,
     image_bytes: &[u8],
@@ -92,9 +100,10 @@ pub fn run_ocr(
 ) -> Result<OcrResult, String> {
     let started = Instant::now();
     log::info!(
-        "[ocr] engine={} language={} image={} bytes",
-        opts.engine,
+        "[ocr] language={} engine={} psm={} image={} bytes",
         opts.language,
+        opts.engine,
+        opts.psm,
         image_bytes.len()
     );
 
@@ -109,14 +118,32 @@ pub fn run_ocr(
         t.elapsed().as_secs_f64() * 1000.0
     );
 
+    // Myanmar: Kraken-driven pipeline.
+    if opts.language == "mya" {
+        return run_myanmar(app, &img, opts, w, h, started);
+    }
+
+    // Everything else: full-page Tesseract with the user's PSM.
+    run_tesseract_page(app, &img, opts, w, h, started)
+}
+
+/// Myanmar pipeline: Kraken segmentation → per-line recognition.
+fn run_myanmar(
+    app: &tauri::AppHandle,
+    img: &image::DynamicImage,
+    opts: &OcrOpts,
+    w: u32,
+    h: u32,
+    started: Instant,
+) -> Result<OcrResult, String> {
     let engine = kraken_engine(app)?;
 
     let t = Instant::now();
     let lines = engine
-        .segment(&img)
+        .segment(img)
         .map_err(|e| format!("Segmentation failed: {e}"))?;
     log::info!(
-        "[ocr] segmentation: {:.0} ms ({} lines)",
+        "[ocr] segmentation (kraken): {:.0} ms ({} lines)",
         t.elapsed().as_secs_f64() * 1000.0,
         lines.len()
     );
@@ -227,9 +254,49 @@ pub fn run_ocr(
     };
 
     log::info!(
-        "[ocr] TOTAL: {:.0} ms (engine={}, {} boxes)",
+        "[ocr] TOTAL: {:.0} ms (myanmar/{} recognizer, {} boxes)",
         started.elapsed().as_secs_f64() * 1000.0,
         opts.engine,
+        boxes.len()
+    );
+
+    Ok(OcrResult {
+        width: w,
+        height: h,
+        lines: boxes,
+        confidence,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Non-Myanmar pipeline: full-page Tesseract with the user's PSM.
+fn run_tesseract_page(
+    app: &tauri::AppHandle,
+    img: &image::DynamicImage,
+    opts: &OcrOpts,
+    w: u32,
+    h: u32,
+    started: Instant,
+) -> Result<OcrResult, String> {
+    let t = Instant::now();
+    let (boxes, confidence) = crate::tesseract_page::recognize(
+        img,
+        app,
+        &opts.language,
+        opts.psm,
+        &opts.whitelist,
+    )?;
+    log::info!(
+        "[ocr] tesseract full-page (psm={}): {:.0} ms ({} lines, {}% conf)",
+        opts.psm,
+        t.elapsed().as_secs_f64() * 1000.0,
+        boxes.len(),
+        confidence
+    );
+
+    log::info!(
+        "[ocr] TOTAL: {:.0} ms (tesseract, {} boxes)",
+        started.elapsed().as_secs_f64() * 1000.0,
         boxes.len()
     );
 
