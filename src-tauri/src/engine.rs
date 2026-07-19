@@ -39,6 +39,16 @@ pub struct OcrResult {
     pub elapsed_ms: u64,
 }
 
+/// Bundled Kraken models, embedded in the binary at compile time via
+/// `include_bytes!`. A fresh install works with zero setup — the user does
+/// not need to place any model files. Bytes are `&'static`, so they outlive
+/// any `Engine` that loads them.
+///
+/// Path is relative to `src-tauri/src/` (this file's directory). The
+/// `kraken-models/` directory sits at the repo root, two levels up.
+static BUNDLED_SEG: &[u8] = include_bytes!("../../kraken-models/bur_segment.safetensors");
+static BUNDLED_REC: &[u8] = include_bytes!("../../kraken-models/bur_recog.safetensors");
+
 /// Process-wide lazily-loaded kraken engine. The first OCR call pays the
 /// (fast, ~1-3 ms) model-load cost; subsequent calls reuse the instance.
 /// `kraken_engine::Engine` is `Send + Sync`, so a `&Engine` is safe to share
@@ -46,42 +56,48 @@ pub struct OcrResult {
 static KRAKEN: OnceCell<kraken_engine::Engine> = OnceCell::new();
 
 /// Borrow the shared kraken engine, loading it on first call.
+///
+/// Resolution order:
+///   1. **Override** — if the user has placed `bur_segment.safetensors` +
+///      `bur_recog.safetensors` in the platform app-data dir, load those.
+///      Lets power users swap models without an app rebuild.
+///   2. **Bundled** — fall back to the models embedded in the binary via
+///      `include_bytes!`. The default for fresh installs.
 fn kraken_engine(app: &tauri::AppHandle) -> Result<&kraken_engine::Engine, String> {
     KRAKEN.get_or_try_init(|| {
-        let (seg, rec) = resolve_kraken_models(app)?;
         let t = Instant::now();
-        let engine = kraken_engine::Engine::load(&seg, &rec)
-            .map_err(|e| format!("Kraken model load failed: {e}"))?;
-        log::info!("[kraken] models loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+        let engine = match resolve_override_models(app) {
+            Some((seg_path, rec_path)) => {
+                log::info!(
+                    "[kraken] using override models from {}",
+                    seg_path.parent().unwrap_or(std::path::Path::new(".")).display()
+                );
+                kraken_engine::Engine::load(&seg_path, &rec_path)
+                    .map_err(|e| format!("Kraken override load failed: {e}"))?
+            }
+            None => kraken_engine::Engine::load_from_buffers(BUNDLED_SEG, BUNDLED_REC)
+                .map_err(|e| format!("Kraken bundled load failed: {e}"))?,
+        };
+        log::info!(
+            "[kraken] models loaded in {:.0} ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
         Ok(engine)
     })
 }
 
-/// Resolve `(seg_path, rec_path)`. Looks in the app local data dir first, then
-/// falls back to `kraken-models/` relative to the current working dir (the dev
-/// workflow — the repo keeps these models at its root).
-pub fn resolve_kraken_models(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
-    let candidates: Vec<PathBuf> = match app.path().app_local_data_dir() {
-        Ok(d) => vec![d.join("kraken-models"), PathBuf::from("kraken-models")],
-        Err(_) => vec![PathBuf::from("kraken-models")],
-    };
-
-    for dir in &candidates {
-        let seg = dir.join("bur_segment.safetensors");
-        let rec = dir.join("bur_recog.safetensors");
-        if seg.exists() && rec.exists() {
-            return Ok((seg, rec));
-        }
+/// Look for user-supplied override models in the platform app-data dir.
+/// Returns `Some((seg_path, rec_path))` only if BOTH files exist there —
+/// partial overrides are ignored to avoid mixing model versions.
+fn resolve_override_models(app: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)> {
+    let dir = app.path().app_local_data_dir().ok()?.join("kraken-models");
+    let seg = dir.join("bur_segment.safetensors");
+    let rec = dir.join("bur_recog.safetensors");
+    if seg.exists() && rec.exists() {
+        Some((seg, rec))
+    } else {
+        None
     }
-    Err(format!(
-        "Kraken models not found. Place bur_segment.safetensors and \
-         bur_recog.safetensors in one of: {}",
-        candidates
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
 }
 
 /// Entry point invoked by the `ocr_from_bytes` Tauri command.
@@ -349,7 +365,7 @@ pub fn polygon_bbox(
 
 #[cfg(test)]
 mod tests {
-    use super::polygon_bbox;
+    use super::{polygon_bbox, BUNDLED_REC, BUNDLED_SEG};
 
     #[test]
     fn polygon_bbox_basic() {
@@ -367,5 +383,20 @@ mod tests {
     #[test]
     fn polygon_bbox_empty_returns_none() {
         assert_eq!(polygon_bbox((100, 100), &[]), None);
+    }
+
+    /// Confirm the bundled bytes were actually embedded (non-empty) and are
+    /// valid safetensors by loading both models from them. This is the test
+    /// that proves `include_bytes!` bundling works end-to-end.
+    #[test]
+    fn bundled_models_load_from_buffers() {
+        // Sanity: bytes are present.
+        assert!(BUNDLED_SEG.len() > 1_000_000, "seg model too small: {}", BUNDLED_SEG.len());
+        assert!(BUNDLED_REC.len() > 1_000_000, "rec model too small: {}", BUNDLED_REC.len());
+
+        let engine = kraken_engine::Engine::load_from_buffers(BUNDLED_SEG, BUNDLED_REC)
+            .expect("bundled models should load from buffers");
+        // Smoke: recognizer exposes the expected input height (120 for bur_recog).
+        assert_eq!(engine.recognizer().height, 120);
     }
 }
