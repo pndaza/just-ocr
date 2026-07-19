@@ -70,3 +70,13 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Forked tesseract-rs with a one-line macOS build fix: the upstream build
+# script sets CMAKE_CXX_FLAGS without -mmacosx-version-min, so Xcode 26+ SDKs
+# reject tesseract 5.x's use of std::filesystem (introduced in macOS 10.15)
+# during the libtesseract compile. The cmake Rust crate auto-injects the flag
+# for CMAKE_C_FLAGS but skips CXX when the build script sets it explicitly.
+# Patch pinned to tag v0.3.0-macos-fix on pndaza/tesseract-rs.
+# Upstream PR: TODO (track once filed against cafercangundogdu/tesseract-rs).
+[patch.crates-io]
+tesseract-rs = { git = "https://github.com/pndaza/tesseract-rs.git", tag = "v0.3.0-macos-fix" }
