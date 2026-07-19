@@ -10,7 +10,7 @@ src-tauri/gen/
 .DS_Store
 *.log
 
-# Vendored kraken models (safetensors) — supplied locally, not committed.
-# Segmentation + recognition models for the Kraken engine.
-kraken-models/
+# Kraken models are now tracked via Git LFS (see .gitattributes) so they're
+# available to CI. Keep sample scans out of the repo.
 sample_pdf/
+sample_images/

@@ -1,0 +1,105 @@
+# Release workflow: build native bundles for macOS (Apple Silicon + Intel),
+# Linux, and Windows, then attach them to a draft GitHub Release.
+#
+# Triggered by pushing a tag matching `v*` (e.g. `v0.1.0`). The tag name
+# becomes the release name; the app version in src-tauri/tauri.conf.json is
+# the source of truth for the bundle version.
+#
+# The kraken model weights (kraken-models/*.safetensors) are tracked via Git
+# LFS — see .gitattributes. The LFS step below ensures CI pulls the actual
+# file contents, not the LFS pointer files, before the Rust build runs
+# `include_bytes!` over them.
+#
+# Reference: https://github.com/tauri-apps/tauri-action
+
+name: release
+
+"on":
+  push:
+    tags:
+      - 'v*'
+
+# Cancel any in-flight run for the same tag when a new commit is pushed to it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      # Don't abort other platforms if one fails — surface every failure.
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (M1+). Cross-compiled from an x86_64 macOS runner
+          # because GitHub's macos-latest image is Intel; the arm64 target
+          # produces a native .dmg/.app for Apple Silicon Macs.
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          # Intel Macs. Native build on macos-latest.
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+          # Linux. Needs the webkit/gtk system libs Tauri links against.
+          - platform: 'ubuntu-22.04'
+            args: ''
+          # Windows. No special system deps.
+          - platform: 'windows-latest'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so tauri-action can derive a sensible release body
+          # if generateReleaseNotes is ever turned on.
+          fetch-depth: 0
+
+      - name: install node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Both macOS targets are needed on the macOS runner so cargo can
+          # build for whichever arch this matrix lane targets.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # Kraken models are tracked via Git LFS. actions/checkout leaves LFS
+      # files as pointer stubs by default; this step pulls the real bytes so
+      # the Rust `include_bytes!` calls resolve at compile time. Without it
+      # the build fails with "couldn't read kraken-models/...safetensors".
+      - name: pull Git LFS model files
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          command: git lfs pull
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # `app-v0.1.0` style tag. tauri-action substitutes __VERSION__ with
+          # the version from src-tauri/tauri.conf.json.
+          tagName: app-v__VERSION__
+          releaseName: 'just-ocr v__VERSION__'
+          releaseBody: 'See the assets below to download and install this version.'
+          # Draft so we can review + publish manually after CI passes —
+          # avoids shipping a broken bundle if a platform-specific issue slips in.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
