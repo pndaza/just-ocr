@@ -93,15 +93,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # tesseract 5.x uses std::filesystem (introduced in macOS 10.15).
-          # The patched tesseract-rs fork adds -mmacosx-version-min=10.15 to
-          # CMAKE_CXX_FLAGS directly, but the `cc` crate independently derives
-          # the deployment target for CMAKE_C_FLAGS — and defaults it to the
-          # SDK's value (10.13 on the runner) when this env var is unset. Two
-          # conflicting version-min flags on the same compile line make clang
-          # pick the *last* (lower) one, defeating the CXX fix. Setting this
-          # env var makes `cc` derive 10.15 too, so C and CXX agree.
-          # Linux/Windows are unaffected (env var is macOS-only).
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'macos-latest' && '10.15' || '' }}
+          # Xcode 26+ SDKs enforce availability annotations, so without an
+          # explicit 10.15 floor the libtesseract compile fails. The patched
+          # tesseract-rs fork adds -mmacosx-version-min=10.15 to CMAKE_CXX_FLAGS,
+          # but the `cc` crate independently derives the deployment target for
+          # CMAKE_C_FLAGS and defaults to 10.13 on the runner.
+          #
+          # Why CXXFLAGS/CFLAGS and not MACOSX_DEPLOYMENT_TARGET: cargo forwards
+          # arbitrary env vars to build scripts only for a curated set.
+          # MACOSX_DEPLOYMENT_TARGET reaches the build script only when
+          # cross-compiling and only with cargo's *own* computed value — the
+          # parent env value is not reliably passed through (verified locally
+          # with a probe build script). CFLAGS/CXXFLAGS, by contrast, are
+          # standard forwarded vars, and the `cc` crate appends them AFTER its
+          # derived flags — so clang's "last flag wins" rule makes 10.15
+          # override the cc crate's 10.13. Harmless on Linux/Windows (empty).
+          CFLAGS: ${{ matrix.platform == 'macos-latest' && '-mmacosx-version-min=10.15' || '' }}
+          CXXFLAGS: ${{ matrix.platform == 'macos-latest' && '-mmacosx-version-min=10.15' || '' }}
         with:
           # `app-v0.1.0` style tag. tauri-action substitutes __VERSION__ with
           # the version from src-tauri/tauri.conf.json.
