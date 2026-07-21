@@ -155,10 +155,13 @@ fn parse_recognition_meta_impl(metadata: HashMap<String, String>) -> Result<Reco
     // Parse input shape from VGSL spec: "[batch,height,width,channels ...]"
     let input_nhwc = parse_vgsl_input(&vgsl)?;
 
-    // Parse class count from the trailing `O1c<N>` output clause. Different
-    // models have different class counts (bur_recog=119, myanmar=118), so we
-    // read it rather than hardcoding.
-    let num_classes = parse_vgsl_num_classes(&vgsl)?;
+    // Parse output class count from trailing `O...c<N>` block. Falls back to
+    // `len(codec) + 1` (codec + CTC blank) if parsing fails — matches the
+    // kraken convention where the O-block size equals the codec size + 1.
+    // Different models have different class counts (bur_recog=119,
+    // myanmar=118), so we read it rather than hardcoding.
+    let num_classes = parse_vgsl_output_classes(&vgsl)
+        .unwrap_or_else(|| codec.len().checked_add(1).unwrap_or(118));
 
     Ok(RecogMeta {
         vgsl,
@@ -170,53 +173,27 @@ fn parse_recognition_meta_impl(metadata: HashMap<String, String>) -> Result<Reco
     })
 }
 
-/// Parse the class count from a VGSL spec's trailing output clause.
+/// Parse the output class count from a VGSL spec's trailing `O` block.
 ///
-/// The output block looks like `O1c118` (1 output, 118 classes) or, with the
-/// layer-name annotation kraken writes, `O{O_18}1c119`. We strip any `{...}`
-/// annotation, find the trailing `c<digits>`, and parse the count.
-///
-/// Returns the class count, or an error if no `O...cN` clause is present.
-fn parse_vgsl_num_classes(vgsl: &str) -> Result<usize> {
-    // Strip layer-name annotations like `{O_18}` throughout the spec so the
-    // output clause reduces to its canonical form (`O1c119`).
-    let stripped = strip_brace_annotations(vgsl);
-
-    // Find the last 'c' that begins the class-count clause. It follows an
-    // output marker `O` — search for the last "Oc" or "O1c" pattern.
-    let o_idx = stripped
-        .rfind('O')
-        .ok_or_else(|| anyhow!("VGSL spec missing output clause 'O...cN': {vgsl}"))?;
-    let tail = &stripped[o_idx..];
-    let c_idx = tail
-        .find('c')
-        .ok_or_else(|| anyhow!("VGSL output clause missing 'c' class count: {vgsl}"))?;
-    let digits: String = tail[c_idx + 1..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+/// Kraken writes the output layer as `O{O_18}1c120` (or `O1c120` without the
+/// layer-name annotations), where the trailing `c<N>` gives the number of
+/// classes (codec size + 1 for the CTC blank). Returns `None` if no `c<N>` is
+/// found — caller should fall back to `codec.len() + 1`.
+fn parse_vgsl_output_classes(vgsl: &str) -> Option<usize> {
+    // Find the last `c<digits>` in the spec — it belongs to the O block.
+    // Match `c` followed by one or more digits, anywhere after an `O`.
+    // Brace-stripping isn't needed: after `O{O_18}1c120`, `find('c')` skips
+    // past the braces directly to the class-count `c`.
+    let o_idx = vgsl.rfind('O')?;
+    let tail = &vgsl[o_idx..];
+    let c_idx = tail.find('c')?;
+    let after_c = &tail[c_idx + 1..];
+    let digits: String = after_c.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
-        return Err(anyhow!("VGSL output class count is empty: {vgsl}"));
+        None
+    } else {
+        digits.parse::<usize>().ok()
     }
-    digits
-        .parse::<usize>()
-        .with_context(|| format!("VGSL class count not a number: {digits}"))
-}
-
-/// Remove every `{...}` substring from a VGSL spec, collapsing layer-name
-/// annotations: `O{O_18}1c119` → `O1c119`. Returns an owned String.
-fn strip_brace_annotations(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut depth = 0usize;
-    for ch in s.chars() {
-        match ch {
-            '{' => depth += 1,
-            '}' if depth > 0 => depth -= 1,
-            c if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// Parse the input block `[b,h,w,c]` from a VGSL spec string.
@@ -257,10 +234,26 @@ mod tests {
         assert!(meta.vgsl.contains("3,13,32"), "VGSL: {}", meta.vgsl);
         assert!(meta.vgsl.contains("1c118"), "VGSL: {}", meta.vgsl);
         assert_eq!(meta.one_channel_mode, "L");
-        assert!(!meta.uuid.is_empty());
+        assert_eq!(meta.uuid.is_empty(), false);
         // The codec should have 117 entries (labels 1..117, blank=0).
         assert_eq!(meta.codec.len(), 117);
+        // num_classes parsed from O1c118 should be 118.
+        assert_eq!(meta.num_classes, 118);
         // Check a known entry: space → [1]
         assert_eq!(meta.codec.get(" "), Some(&vec![1]));
+    }
+
+    #[test]
+    fn test_parse_output_classes_from_vgsl() {
+        // Plain spec (no layer annotations).
+        assert_eq!(parse_vgsl_output_classes("[1,120,0,1 Cr3,13,32 O1c118]"), Some(118));
+        // Layer-annotated spec (kraken's actual output format).
+        assert_eq!(parse_vgsl_output_classes("[1,120,0,1 O{O_18}1c120]"), Some(120));
+        // Larger class count.
+        assert_eq!(parse_vgsl_output_classes("[1,120,0,1 O{O_18}1c5000]"), Some(5000));
+        // No O block at all → None, caller falls back.
+        assert_eq!(parse_vgsl_output_classes("[1,120,0,1 Cr3,13,32]"), None);
+        // O block without c<N> → None.
+        assert_eq!(parse_vgsl_output_classes("[1,120,0,1 O2]"), None);
     }
 }
