@@ -48,6 +48,13 @@ pub fn crop_polygon_white_bg(image: &DynamicImage, boundary: &[(f64, f64)]) -> D
     draw_polygon_mut(&mut mask, &pts, image::Rgba([255, 255, 255, 255]));
 
     // Composite: start from white, copy source pixels where the mask is set.
+    //
+    // SAFETY (get_pixel index bounds): `min_x + x` and `min_y + y` stay in
+    // range only because `polygon_bbox` clamps `max_x`/`max_y` to
+    // `img_w - 1`/`img_h - 1` and computes `w`/`h` from the clamped max, so
+    // `min_x + w <= img_w` and `min_y + h <= img_h`. Keep that clamp if you
+    // touch `polygon_bbox`.
+    debug_assert!(min_x + w <= image.width() && min_y + h <= image.height());
     let mut out = image::ImageBuffer::new(w, h);
     for y in 0..h {
         for x in 0..w {
@@ -153,6 +160,24 @@ mod tests {
         let dyn_img = DynamicImage::ImageRgba8(img);
         let crop = crop_polygon_white_bg(&dyn_img, &[(0.0, 0.0), (9.0, 9.0)]);
         assert_eq!(crop.get_pixel(0, 0), Rgba([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn boundary_points_outside_image_do_not_panic() {
+        // Kraken boundaries can extend slightly beyond the image edges. A
+        // vertex past the right/bottom edge must not panic and must still
+        // preserve in-bounds ink inside the polygon.
+        let mut img = ImageBuffer::from_pixel(40, 40, Rgba([255, 255, 255, 255]));
+        // Dark pixel at the center — inside the polygon, must survive.
+        img.put_pixel(20, 20, Rgba([0, 0, 0, 255]));
+        let dyn_img = DynamicImage::ImageRgba8(img);
+        // Polygon spans past the image edges (60 > 40, 50 > 40). Should be
+        // clamped by polygon_bbox; no out-of-bounds access in the composite.
+        let crop = crop_polygon_white_bg(
+            &dyn_img,
+            &[(20.0, -5.0), (60.0, 20.0), (20.0, 50.0), (-5.0, 20.0)],
+        );
+        assert_eq!(crop.get_pixel(20, 20), Rgba([0, 0, 0, 255]));
     }
 
     #[test]
