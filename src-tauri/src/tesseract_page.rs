@@ -160,6 +160,7 @@ fn parse_hocr_lines(hocr: &str) -> Vec<LineBox> {
                 x1: bbox.2,
                 y1: bbox.3,
                 text,
+                polygon: None,
             });
         }
 

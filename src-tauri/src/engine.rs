@@ -15,8 +15,10 @@ use tauri::Manager;
 
 use crate::OcrOpts;
 
-/// One recognized line: an axis-aligned bbox (in source-image pixel space) and
-/// the decoded text. The frontend overlays the bbox and joins `text` for display.
+/// One recognized line: an axis-aligned bbox (in source-image pixel space),
+/// the decoded text, and — for the Kraken-segmented path — the true boundary
+/// polygon. The frontend overlays the polygon when present and falls back to
+/// the bbox otherwise.
 #[derive(Debug, Clone, Serialize)]
 pub struct LineBox {
     pub x0: u32,
@@ -24,6 +26,13 @@ pub struct LineBox {
     pub x1: u32,
     pub y1: u32,
     pub text: String,
+    /// True boundary polygon from Kraken segmentation (source-image pixel
+    /// space). Present only for the Kraken-segmented (Myanmar) path; `None`
+    /// for the Tesseract full-page path, which produces bboxes, not polygons.
+    /// Skipped on serialization when `None` so the Tesseract-path wire format
+    /// is byte-identical to pre-polygon builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub polygon: Option<Vec<[f64; 2]>>,
 }
 
 /// Structured OCR result. Text-mode and box-overlay rendering are both
@@ -193,8 +202,7 @@ fn run_myanmar(
             Some(b) => b,
             None => return Ok(None),
         };
-        let crop_img =
-            image::DynamicImage::ImageRgb8(img.crop_imm(min_x, min_y, lw, lh).to_rgb8());
+        let crop_img = kraken_engine::crop_polygon_white_bg(img, &line.boundary);
 
         let (text, conf) = match engine_kind {
             "tesseract" => crate::tesseract_line::recognize(
@@ -219,6 +227,7 @@ fn run_myanmar(
                 x1: min_x + lw,
                 y1: min_y + lh,
                 text,
+                polygon: Some(line.boundary.iter().map(|p| [p.0, p.1]).collect()),
             },
             conf,
         )))
@@ -373,7 +382,7 @@ pub fn polygon_bbox(
 
 #[cfg(test)]
 mod tests {
-    use super::{polygon_bbox, BUNDLED_REC, BUNDLED_SEG};
+    use super::{polygon_bbox, LineBox, BUNDLED_REC, BUNDLED_SEG};
 
     #[test]
     fn polygon_bbox_basic() {
@@ -406,5 +415,39 @@ mod tests {
             .expect("bundled models should load from buffers");
         // Smoke: recognizer exposes the expected input height (120 for bur_recog).
         assert_eq!(engine.recognizer().height, 120);
+    }
+
+    #[test]
+    fn linebox_without_polygon_omits_field() {
+        let lb = LineBox {
+            x0: 1,
+            y0: 2,
+            x1: 3,
+            y1: 4,
+            text: "hi".to_string(),
+            polygon: None,
+        };
+        let json = serde_json::to_string(&lb).unwrap();
+        assert!(
+            !json.contains("polygon"),
+            "polygon field must be absent when None, got: {json}"
+        );
+    }
+
+    #[test]
+    fn linebox_with_polygon_includes_field() {
+        let lb = LineBox {
+            x0: 1,
+            y0: 2,
+            x1: 3,
+            y1: 4,
+            text: "hi".to_string(),
+            polygon: Some(vec![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]),
+        };
+        let json = serde_json::to_string(&lb).unwrap();
+        assert!(
+            json.contains("\"polygon\":[[1.0,2.0],[3.0,4.0],[5.0,6.0]]"),
+            "polygon field must serialize as array-of-pairs, got: {json}"
+        );
     }
 }
