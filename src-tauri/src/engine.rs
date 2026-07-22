@@ -174,6 +174,14 @@ fn run_myanmar(
     let recog_start = Instant::now();
     let engine_kind = opts.engine.as_str();
 
+    // Parse the binarize option once (Myanmar/Kraken path only). Tesseract
+    // does its own internal binarization and ignores this.
+    let binarize = opts.binarize.as_deref().and_then(|s| match s {
+        "otsu" => Some(kraken_engine::recognition::Binarization::Otsu),
+        "sauvola" => Some(kraken_engine::recognition::Binarization::Sauvola),
+        _ => None,
+    });
+
     // Build the (LineBox, conf) pairs from each non-degenerate line. The
     // closure captures shared refs to img + engine + (for tesseract) the app
     // handle and opts — all Send + Sync.
@@ -197,7 +205,7 @@ fn run_myanmar(
             )?,
             "kraken" => {
                 let t = engine
-                    .recognize_line(&crop_img)
+                    .recognize_line(&crop_img, binarize)
                     .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
             }

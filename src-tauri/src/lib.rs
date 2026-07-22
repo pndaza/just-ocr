@@ -38,6 +38,11 @@ pub struct OcrOpts {
     /// Tesseract-only. When non-null + non-empty, restricts recognition to
     /// these characters.
     pub whitelist: Option<String>,
+    /// Binarize line crops before recognition (Myanmar/Kraken path only):
+    /// `"otsu"` (global threshold) or `"sauvola"` (local adaptive). `None`
+    /// disables binarization. Ignored by the Tesseract path. Use when the
+    /// recognition model was trained on 1-bit (binarized) images.
+    pub binarize: Option<String>,
 }
 
 /// Return the list of languages available for OCR: embedded + user-installed.
