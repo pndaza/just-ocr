@@ -29,8 +29,3 @@ export function setTheme(t: Theme): Theme {
   document.documentElement.dataset.theme = t;
   return t;
 }
-
-/** Flip between light and dark, persist, and return the new theme. */
-export function toggleTheme(): Theme {
-  return setTheme(currentTheme() === "light" ? "dark" : "light");
-}

@@ -5,6 +5,7 @@
   import Preview from "./lib/Preview.svelte";
   import Output from "./lib/Output.svelte";
   import LanguageManager from "./lib/LanguageManager.svelte";
+  import Settings from "./lib/Settings.svelte";
   import {
     availableLanguages,
     isPdf,
@@ -20,6 +21,8 @@
     saveLanguage,
     lastEngine,
     saveEngine,
+    lastBinarize,
+    saveBinarize,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -27,19 +30,23 @@
     type ReadFile,
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
-  import { currentTheme, toggleTheme, type Theme } from "./theme";
+  import { currentTheme, setTheme, type Theme } from "./theme";
 
   let languages = $state<string[]>(["eng"]);
   let theme = $state<Theme>(currentTheme());
+  let showSettings = $state(false);
 
-  function cycleTheme() {
-    theme = toggleTheme();
+  // Theme is now changed from the Settings modal (not a toolbar toggle).
+  function changeTheme(t: Theme) {
+    theme = setTheme(t);
   }
+
   let opts = $state<OcrOpts>({
     engine: lastEngine(),
     language: lastLanguage() ?? "eng",
     psm: 3,
     whitelist: null,
+    binarize: lastBinarize(),
   });
 
   // Remember the chosen engine + language so they are pre-selected on the next
@@ -50,6 +57,10 @@
   });
   $effect(() => {
     saveLanguage(opts.language);
+  });
+  // Binarize is a persisted global preference (chosen in Settings).
+  $effect(() => {
+    saveBinarize(opts.binarize);
   });
 
   let jobs = $state<Job[]>([]);
@@ -169,7 +180,7 @@
   // Reads happen inside the handler, so this effect registers exactly once.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (pdfDialog || showLangManager) return;
+      if (pdfDialog || showLangManager || showSettings) return;
       const t = e.target as HTMLElement | null;
       if (
         t &&
@@ -399,8 +410,7 @@
     onrunall={runAll}
     onexport={exportAll}
     onmanagelanguages={openLangManager}
-    {theme}
-    ontoggletheme={cycleTheme}
+    onsettings={() => (showSettings = true)}
   />
   <main id="main-area">
     <section class="col left" style="width:{leftW}px">
@@ -450,6 +460,15 @@
   <LanguageManager
     onclose={() => (showLangManager = false)}
     onchanged={onLanguagesChanged}
+  />
+{/if}
+
+{#if showSettings}
+  <Settings
+    {opts}
+    {theme}
+    onchangetheme={changeTheme}
+    onclose={() => (showSettings = false)}
   />
 {/if}
 

@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
-  import type { Theme } from "../theme";
   import logo from "../assets/logo.png";
 
   interface Props {
@@ -11,7 +10,6 @@
     doneCount: number;
     canRunCurrent: boolean;
     hasSelection: boolean;
-    theme: Theme;
     showStop: boolean;
     stopping: boolean;
     onstop: () => void;
@@ -19,7 +17,7 @@
     onrunall: () => void;
     onexport: () => void;
     onmanagelanguages: () => void;
-    ontoggletheme: () => void;
+    onsettings: () => void;
   }
   let {
     opts,
@@ -29,7 +27,6 @@
     doneCount,
     canRunCurrent,
     hasSelection,
-    theme,
     showStop,
     stopping,
     onstop,
@@ -37,7 +34,7 @@
     onrunall,
     onexport,
     onmanagelanguages,
-    ontoggletheme,
+    onsettings,
   }: Props = $props();
 
   const psmOptions = [
@@ -95,11 +92,11 @@
   <div class="divider"></div>
 
   <button
-    class="theme-toggle"
-    onclick={ontoggletheme}
-    title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-    aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-  >{theme === "dark" ? "☀" : "☾"}</button>
+    class="icon-btn"
+    onclick={onsettings}
+    title="Settings"
+    aria-label="Settings"
+  >⚙</button>
 
   <label class="field">
     <span class="lbl">Lang</span>
@@ -123,6 +120,7 @@
         <option value="tesseract">Tesseract</option>
       </select>
     </label>
+    <!-- Binarize lives in Settings now (global, persisted preference). -->
   {:else}
     <!-- Non-Myanmar: Tesseract does both segmentation + recognition. PSM exposed. -->
     <label class="field">
@@ -211,7 +209,7 @@
     height: 24px;
     background: var(--border);
   }
-  .theme-toggle {
+  .icon-btn {
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text-faint);
@@ -225,7 +223,7 @@
     padding: 0;
     line-height: 1;
   }
-  .theme-toggle:hover {
+  .icon-btn:hover {
     color: var(--accent);
     border-color: var(--accent-dim);
     background: var(--accent-soft);

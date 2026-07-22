@@ -20,6 +20,10 @@ export type ImageMode = "color" | "gray" | "bw";
  * Tesseract handles both segmentation and recognition. */
 export type Engine = "tesseract" | "kraken";
 
+/** Binarization method for the Myanmar/Kraken path. `null` disables it.
+ * Ignored by the Tesseract path (libtesseract does its own binarization). */
+export type Binarize = "otsu" | "sauvola" | null;
+
 export interface OcrOpts {
   engine: Engine;
   language: string;
@@ -28,6 +32,9 @@ export interface OcrOpts {
   psm: number;
   /** Tesseract-only; ignored by the kraken recognizer. */
   whitelist: string | null;
+  /** Myanmar/Kraken path only. Binarize line crops before recognition — use
+   * when the recognition model was trained on 1-bit (binarized) images. */
+  binarize: Binarize;
 }
 
 /** A single file in the batch queue. */
@@ -320,6 +327,7 @@ export async function deleteLanguage(code: string): Promise<void> {
 
 const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
+const BINARIZE_KEY = "just-ocr:binarize";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
 export function lastLanguage(): string | null {
@@ -355,6 +363,28 @@ export function lastEngine(): Engine {
 export function saveEngine(engine: Engine): void {
   try {
     localStorage.setItem(LAST_ENGINE_KEY, engine);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the last-used binarization mode from localStorage; null if unset. */
+export function lastBinarize(): Binarize {
+  try {
+    const v = localStorage.getItem(BINARIZE_KEY);
+    return v === "otsu" || v === "sauvola" ? v : null;
+  } catch {
+    // storage may be unavailable (private mode) — behave as unset
+    return null;
+  }
+}
+
+/** Persist the chosen binarization mode so it is pre-selected on next launch.
+ * `null` removes the key so unset round-trips cleanly (no stale "otsu"). */
+export function saveBinarize(b: Binarize): void {
+  try {
+    if (b === null) localStorage.removeItem(BINARIZE_KEY);
+    else localStorage.setItem(BINARIZE_KEY, b);
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }
