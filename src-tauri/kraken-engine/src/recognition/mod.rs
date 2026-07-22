@@ -23,4 +23,4 @@ pub mod preprocess;
 
 pub use codec::Codec;
 pub use model::RecognitionModel;
-pub use preprocess::preprocess_line;
+pub use preprocess::{preprocess_line, Binarization};

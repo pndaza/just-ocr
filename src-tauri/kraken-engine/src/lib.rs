@@ -104,8 +104,15 @@ impl Engine {
     }
 
     /// Recognize text from a single pre-cropped line image.
-    pub fn recognize_line(&self, crop: &DynamicImage) -> Result<String> {
-        let tensor = preprocess_line(crop, self.rec.height, self.rec.padding)?;
+    ///
+    /// When `binarize` is `Some(method)`, the crop is binarized before
+    /// recognition (for models trained on 1-bit images).
+    pub fn recognize_line(
+        &self,
+        crop: &DynamicImage,
+        binarize: Option<recognition::Binarization>,
+    ) -> Result<String> {
+        let tensor = preprocess_line(crop, self.rec.height, self.rec.padding, binarize)?;
         self.rec
             .recognize(&tensor)
             .context("Kraken recognition failed")

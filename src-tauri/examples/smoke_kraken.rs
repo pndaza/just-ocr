@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let crop = image::DynamicImage::ImageRgb8(img.crop_imm(min_x, min_y, cw, ch).to_rgb8());
-        let text = match engine.recognize_line(&crop) {
+        let text = match engine.recognize_line(&crop, None) {
             Ok(t) => t,
             Err(e) => {
                 println!("  line {i}: recognize failed: {e}");
