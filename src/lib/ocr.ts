@@ -368,23 +368,30 @@ export function saveEngine(engine: Engine): void {
   }
 }
 
-/** Read the last-used binarization mode from localStorage; null if unset. */
+/** Read the binarization mode, falling back to Sauvola when the user has
+ * never set it. Storage values: "otsu" | "sauvola" | "off"; key-absent =
+ * apply the default (sauvola). Storing "off" explicitly (rather than removing
+ * the key) keeps a deliberate disable sticky across launches instead of
+ * resetting to the default. */
 export function lastBinarize(): Binarize {
   try {
     const v = localStorage.getItem(BINARIZE_KEY);
-    return v === "otsu" || v === "sauvola" ? v : null;
+    if (v === "otsu") return "otsu";
+    if (v === "sauvola") return "sauvola";
+    if (v === "off") return null; // explicitly disabled
+    return "sauvola"; // never set → default
   } catch {
-    // storage may be unavailable (private mode) — behave as unset
-    return null;
+    // storage may be unavailable (private mode) — use the default
+    return "sauvola";
   }
 }
 
 /** Persist the chosen binarization mode so it is pre-selected on next launch.
- * `null` removes the key so unset round-trips cleanly (no stale "otsu"). */
+ * `null` (Off) is stored as "off" — NOT removed — so an explicit disable stays
+ * sticky and is not reset to the default on the next launch. */
 export function saveBinarize(b: Binarize): void {
   try {
-    if (b === null) localStorage.removeItem(BINARIZE_KEY);
-    else localStorage.setItem(BINARIZE_KEY, b);
+    localStorage.setItem(BINARIZE_KEY, b === null ? "off" : b);
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }
