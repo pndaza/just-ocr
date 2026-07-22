@@ -23,5 +23,6 @@ pub mod preprocess;
 #[cfg(test)]
 
 pub use codec::Codec;
+pub use crop::crop_polygon_white_bg;
 pub use model::RecognitionModel;
 pub use preprocess::{preprocess_line, Binarization};
