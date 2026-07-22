@@ -14,6 +14,7 @@
 //!   - [`meta`] — safetensors metadata parsing
 
 pub mod codec;
+pub mod crop;
 pub mod decode;
 pub mod meta;
 pub mod model;
