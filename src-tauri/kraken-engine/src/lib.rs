@@ -38,7 +38,7 @@ use image::DynamicImage;
 pub use config::SegmentationConfig;
 pub use containers::{BaselineLine, Region, Segmentation};
 pub use detect::{detect_candle, postprocess};
-pub use recognition::{preprocess::preprocess_line, RecognitionModel};
+pub use recognition::{crop::crop_polygon_white_bg, preprocess::preprocess_line, RecognitionModel};
 pub use segmentation_candle::SegmentationModelCandle;
 
 /// Loaded kraken models, reused across OCR calls. Both are `Send + Sync`
