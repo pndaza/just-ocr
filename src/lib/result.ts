@@ -10,6 +10,9 @@ export interface LineBox {
   x1: number;
   y1: number;
   text: string;
+  /** True boundary polygon (source-image pixel space). Present only for the
+   *  Kraken-segmented (Myanmar) path; absent for Tesseract full-page. */
+  polygon?: [number, number][];
 }
 
 export interface OcrResult {
