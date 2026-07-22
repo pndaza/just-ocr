@@ -5,6 +5,9 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+# kraken-engine is built standalone (not a workspace member — see
+# src-tauri/Cargo.toml), so it has its own target/ dir.
+src-tauri/kraken-engine/target/
 
 # misc
 .DS_Store
