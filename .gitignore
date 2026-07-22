@@ -14,3 +14,4 @@ src-tauri/gen/
 # available to CI. Keep sample scans out of the repo.
 sample_pdf/
 sample_images/
+.superpowers/
