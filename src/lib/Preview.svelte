@@ -138,14 +138,22 @@
           height={parsed.height}
         />
         {#each parsed.lines as b}
-          <rect
-            x={b.x0}
-            y={b.y0}
-            width={b.x1 - b.x0}
-            height={b.y1 - b.y0}
-            class="bbox"
-            vector-effect="non-scaling-stroke"
-          />
+          {#if b.polygon}
+            <polygon
+              points={b.polygon.map(([x, y]) => `${x},${y}`).join(" ")}
+              class="bbox"
+              vector-effect="non-scaling-stroke"
+            />
+          {:else}
+            <rect
+              x={b.x0}
+              y={b.y0}
+              width={b.x1 - b.x0}
+              height={b.y1 - b.y0}
+              class="bbox"
+              vector-effect="non-scaling-stroke"
+            />
+          {/if}
         {/each}
       </svg>
     {:else if job}
