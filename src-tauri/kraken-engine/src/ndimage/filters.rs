@@ -126,41 +126,42 @@ pub fn gaussian_filter(input: &Array2<f32>, sigma: f32) -> Array2<f32> {
     out
 }
 
-/// Separable uniform (box) filter with reflect boundary handling.
+/// Separable uniform (box) filter with **zero-padded ('constant')** boundary
+/// handling.
 ///
-/// Equivalent to scipy `uniform_filter` with a `(2*radius_y+1, 2*radius_x+1)`
-/// footprint. Matches the `mode='reflect'` (half-sample symmetric) default.
-/// Centered window; out-of-range samples are reflected via [`reflect_index`].
+/// Equivalent to scipy `uniform_filter(input, (2*radius_y+1, 2*radius_x+1),
+/// mode='constant')`: centered window, out-of-range samples treated as 0.
 ///
-/// Used by the `CenterNormalizer` line normalizer (`kraken/lib/lineest.py`) as
-/// a small additive bias term on top of the Gaussian-smoothed centerline map.
+/// Used by the `CenterNormalizer` line normalizer (`kraken/lib/lineest.py`),
+/// which calls `uniform_filter(smoothed, (h*0.5, w), mode='constant')` right
+/// after `gaussian_filter(..., mode='constant')` on the same array. Zero-padding
+/// (not reflect) is used for the same reason [`gaussian_filter_aniso_const`]
+/// uses it: under the heavy vertical window, a reflect boundary would pull the
+/// box-average toward the image edges and bias the per-column centerline argmax.
 pub fn uniform_filter(input: &Array2<f32>, radius_y: usize, radius_x: usize) -> Array2<f32> {
     let (h, w) = input.dim();
     if h == 0 || w == 0 || (radius_y == 0 && radius_x == 0) {
         return input.clone();
     }
 
-    // Pass 1: box along x (columns). Window half-width = radius_x.
+    // Pass 1: box along x (columns). Window half-width = radius_x, zero-padded.
     let tmp = {
         let in_slice = input.as_slice_memory_order().unwrap();
         let mut buf = vec![0.0f32; h * w];
         let klen_x = 2 * radius_x + 1;
-        let col_idx: Vec<usize> = (0..w * klen_x)
-            .map(|t| {
-                let j = t / klen_x;
-                let k = t % klen_x;
-                reflect_index(j as isize + k as isize - radius_x as isize, w)
-            })
-            .collect();
+        let inv = 1.0 / klen_x as f32;
+        let r_x = radius_x as isize;
+        let w_i = w as isize;
         for i in 0..h {
             let row = &in_slice[i * w..(i + 1) * w];
             let out_row = &mut buf[i * w..(i + 1) * w];
-            let inv = 1.0 / klen_x as f32;
             for j in 0..w {
-                let idx_base = j * klen_x;
                 let mut acc = 0.0f32;
                 for k in 0..klen_x {
-                    acc += row[col_idx[idx_base + k]];
+                    let sj = j as isize + k as isize - r_x;
+                    if sj >= 0 && sj < w_i {
+                        acc += row[sj as usize];
+                    }
                 }
                 out_row[j] = acc * inv;
             }
@@ -168,24 +169,21 @@ pub fn uniform_filter(input: &Array2<f32>, radius_y: usize, radius_x: usize) -> 
         buf
     };
 
-    // Pass 2: box along y (rows). Window half-width = radius_y.
+    // Pass 2: box along y (rows). Window half-width = radius_y, zero-padded.
     let klen_y = 2 * radius_y + 1;
-    let row_idx: Vec<usize> = (0..h * klen_y)
-        .map(|t| {
-            let i = t / klen_y;
-            let k = t % klen_y;
-            reflect_index(i as isize + k as isize - radius_y as isize, h)
-        })
-        .collect();
+    let inv = 1.0 / klen_y as f32;
+    let r_y = radius_y as isize;
+    let h_i = h as isize;
     let mut out = Array2::<f32>::zeros((h, w));
     let out_slice = out.as_slice_memory_order_mut().unwrap();
-    let inv = 1.0 / klen_y as f32;
     for i in 0..h {
-        let idx_base = i * klen_y;
         for j in 0..w {
             let mut acc = 0.0f32;
             for k in 0..klen_y {
-                acc += tmp[row_idx[idx_base + k] * w + j];
+                let si = i as isize + k as isize - r_y;
+                if si >= 0 && si < h_i {
+                    acc += tmp[si as usize * w + j];
+                }
             }
             out_slice[i * w + j] = acc * inv;
         }

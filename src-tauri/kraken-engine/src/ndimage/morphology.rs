@@ -2,6 +2,7 @@
 
 use ndarray::Array2;
 use std::collections::VecDeque;
+use std::f32::consts::SQRT_2;
 
 /// Morphological skeletonization (Zhang-Suen algorithm).
 /// Matches skimage.morphology.skeletonize for 2D binary images.
@@ -120,8 +121,8 @@ pub fn distance_transform_cdt(input: &Array2<f32>) -> Array2<f32> {
             let mut d = dist[[y, x]];
             if y > 0 { d = d.min(dist[[y - 1, x]] + 1.0); }
             if x > 0 { d = d.min(dist[[y, x - 1]] + 1.0); }
-            if y > 0 && x > 0 { d = d.min(dist[[y - 1, x - 1]] + 1.41421356); }
-            if y > 0 && x < w - 1 { d = d.min(dist[[y - 1, x + 1]] + 1.41421356); }
+            if y > 0 && x > 0 { d = d.min(dist[[y - 1, x - 1]] + SQRT_2); }
+            if y > 0 && x < w - 1 { d = d.min(dist[[y - 1, x + 1]] + SQRT_2); }
             dist[[y, x]] = d;
         }
     }
@@ -132,8 +133,8 @@ pub fn distance_transform_cdt(input: &Array2<f32>) -> Array2<f32> {
             let mut d = dist[[y, x]];
             if y < h - 1 { d = d.min(dist[[y + 1, x]] + 1.0); }
             if x < w - 1 { d = d.min(dist[[y, x + 1]] + 1.0); }
-            if y < h - 1 && x < w - 1 { d = d.min(dist[[y + 1, x + 1]] + 1.41421356); }
-            if y < h - 1 && x > 0 { d = d.min(dist[[y + 1, x - 1]] + 1.41421356); }
+            if y < h - 1 && x < w - 1 { d = d.min(dist[[y + 1, x + 1]] + SQRT_2); }
+            if y < h - 1 && x > 0 { d = d.min(dist[[y + 1, x - 1]] + SQRT_2); }
             dist[[y, x]] = d;
         }
     }

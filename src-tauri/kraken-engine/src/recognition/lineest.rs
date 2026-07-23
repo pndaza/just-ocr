@@ -86,10 +86,14 @@ impl CenterNormalizer {
         let sigma_x = h as f32 * self.smoothness;
         let mut smoothed = gaussian_filter_aniso_const(line, sigma_y, sigma_x);
 
-        // += 0.001 * uniform_filter(smoothed, (h*0.5, w)). scipy's uniform_filter
-        // takes full window *sizes* and converts to radius (size-1)//2 internally.
-        let ry = (((h as f32) * 0.5) as isize).max(1) as usize / 2;
-        let rx = w / 2;
+        // += 0.001 * uniform_filter(smoothed, (h*0.5, w), mode='constant').
+        // scipy's uniform_filter takes full window *sizes* and converts to radius
+        // via (size-1)//2 internally; mirror that here so the window width matches
+        // scipy exactly (off-by-one otherwise).
+        let size_y = (((h as f32) * 0.5) as usize).max(1);
+        let size_x = w;
+        let ry = size_y.saturating_sub(1) / 2;
+        let rx = size_x.saturating_sub(1) / 2;
         let uf = uniform_filter(&smoothed, ry.max(1), rx.max(1));
         smoothed = smoothed + &uf * 0.001;
 
