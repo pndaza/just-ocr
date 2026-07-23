@@ -202,18 +202,26 @@ fn run_myanmar(
             Some(b) => b,
             None => return Ok(None),
         };
-        let crop_img = kraken_engine::crop_polygon_white_bg(img, &line.boundary);
 
         let (text, conf) = match engine_kind {
-            "tesseract" => crate::tesseract_line::recognize(
-                &crop_img,
-                app,
-                &opts.language,
-                &opts.whitelist,
-            )?,
+            "tesseract" => {
+                // Tesseract operates on the masked bbox crop (no dewarp).
+                let crop_img = kraken_engine::crop_polygon_white_bg(img, &line.boundary);
+                crate::tesseract_line::recognize(
+                    &crop_img,
+                    app,
+                    &opts.language,
+                    &opts.whitelist,
+                )?
+            }
+            // Kraken: dewarp (polygon mask + baseline straightening) then
+            // recognize. extract_polygon_line operates on the full page image
+            // + the line's baseline + boundary, producing a flat strip that
+            // the Stage-2 centerline normalizer and LSTM consume. Falls back
+            // to a masked bbox crop inside the engine if the dewarp fails.
             "kraken" => {
                 let t = engine
-                    .recognize_line(&crop_img, binarize)
+                    .recognize_line_dewarped(img, &line.baseline, &line.boundary, binarize)
                     .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
             }
