@@ -3,12 +3,18 @@
 //! Port of kraken's `ImageInputTransforms` for the input spec `(1, 120, 0, 1)`:
 //!   1. Convert to grayscale ('L')
 //!   2. (Optional) Binarize — for models trained on 1-bit images
-//!   3. Resize to height=120 keeping aspect ratio (LANCZOS)
+//!   3. Normalize to target height:
+//!      - if `center_norm`: ocropy `CenterNormalizer` content dewarp + resize
+//!        (kraken `_create_transforms` branch B; this is the path our model
+//!        spec selects — see [`super::lineest`])
+//!      - else: plain Lanczos resize keeping aspect ratio
 //!   4. Pad 16px left + 16px right, fill=255 (white)
 //!   5. Scale to [0,1] (uint8 / 255)
 //!   6. Invert (1.0 - im) — ink becomes high values
 //!
-//! Output: `(1, 1, 120, W)` f32 tensor (NCHW).
+//! The input `image` is expected to be an already-dewarped flat strip from
+//! [`super::dewarp::extract_polygon_line`] (Stage 1 geometric warp).
+//! Output: `(1, 1, target_height, W)` f32 tensor (NCHW).
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
@@ -35,11 +41,15 @@ pub enum Binarization {
 /// Preprocess a line image for recognition.
 ///
 /// When `binarize` is `Some(...)`, the grayscale image is binarized **before**
-/// resizing. This is required for recognition models whose training data was
-/// 1-bit (binarized) PNGs: the model learned anti-aliased-binary edge profiles,
-/// so feeding continuous-tone grayscale at inference causes a train/serve
-/// distribution mismatch. Binarizing before the Lanczos resize re-introduces
-/// the anti-aliased-binary edges the model expects.
+/// the height-normalize step. This is required for recognition models whose
+/// training data was 1-bit (binarized) PNGs: the model learned anti-aliased-
+/// binary edge profiles, so feeding continuous-tone grayscale at inference
+/// causes a train/serve distribution mismatch. Binarizing before the resize
+/// re-introduces the anti-aliased-binary edges the model expects.
+///
+/// When `center_norm` is true, the height normalization uses kraken's ocropy
+/// `CenterNormalizer` (content dewarp + resize) instead of a plain Lanczos
+/// resize — see [`super::lineest`].
 ///
 /// Returns a `(1, 1, target_height, W)` f32 tensor on CPU.
 pub fn preprocess_line(
@@ -47,6 +57,7 @@ pub fn preprocess_line(
     target_height: usize,
     padding: usize,
     binarize: Option<Binarization>,
+    center_norm: bool,
 ) -> Result<Tensor> {
     // 1. Convert to grayscale.
     let gray = image.to_luma8();
@@ -59,8 +70,13 @@ pub fn preprocess_line(
         None => gray,
     };
 
-    // 3. Resize to target_height, keeping aspect ratio.
-    let resized = resize_to_height(&gray, target_height);
+    // 3. Normalize to target_height.
+    let resized = if center_norm {
+        let mut lnorm = super::lineest::CenterNormalizer::new(target_height);
+        super::lineest::dewarp_line(&mut lnorm, &gray)
+    } else {
+        resize_to_height(&gray, target_height)
+    };
 
     // 4. Pad left and right with white (255).
     let (w, h) = (resized.width() as usize, resized.height() as usize);
@@ -235,7 +251,7 @@ mod tests {
             return;
         }
         let img = image::open(path).unwrap();
-        let tensor = preprocess_line(&img, 120, 16, None).unwrap();
+        let tensor = preprocess_line(&img, 120, 16, None, false).unwrap();
         let dims = tensor.dims();
         assert_eq!(dims.len(), 4);
         assert_eq!(dims[0], 1); // batch
