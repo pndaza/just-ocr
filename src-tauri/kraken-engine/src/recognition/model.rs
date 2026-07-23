@@ -54,6 +54,10 @@ pub struct RecognitionModel {
     pub padding: usize,
     /// Number of output classes.
     pub num_classes: usize,
+    /// Whether preprocessing should apply the ocropy `CenterNormalizer`
+    /// content dewarp (kraken `_create_transforms` branch B: fixed height,
+    /// variable width, single channel). Matches kraken's `valid_norm` default.
+    pub center_norm: bool,
 }
 
 /// A bidirectional LSTM using candle's LSTM cells.
@@ -161,6 +165,16 @@ impl RecognitionModel {
 
         let codec = Codec::from_c2l(&meta.codec);
         let height = meta.input_nhwc[1] as usize;
+        // kraken `_create_transforms` branch B: CenterNormalizer is selected
+        // when the input spec is fixed-height, variable-width, single-channel.
+        // input_nhwc = [batch, height, width, channels].
+        let (_, h_spec, w_spec, c_spec) = (
+            meta.input_nhwc[0],
+            meta.input_nhwc[1],
+            meta.input_nhwc[2],
+            meta.input_nhwc[3],
+        );
+        let center_norm = h_spec > 1 && w_spec == 0 && c_spec == 1;
 
         Ok(RecognitionModel {
             convs: [conv0, conv1, conv2, conv3],
@@ -170,6 +184,7 @@ impl RecognitionModel {
             height,
             padding: 16,
             num_classes,
+            center_norm,
         })
     }
 
