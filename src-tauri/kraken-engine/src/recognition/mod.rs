@@ -16,13 +16,14 @@
 pub mod codec;
 pub mod crop;
 pub mod decode;
+pub mod dewarp;
+pub mod lineest;
 pub mod meta;
 pub mod model;
 pub mod preprocess;
 
-#[cfg(test)]
-
 pub use codec::Codec;
 pub use crop::crop_polygon_white_bg;
+pub use dewarp::extract_polygon_line;
 pub use model::RecognitionModel;
 pub use preprocess::{preprocess_line, Binarization};

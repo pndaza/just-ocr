@@ -112,10 +112,40 @@ impl Engine {
         crop: &DynamicImage,
         binarize: Option<recognition::Binarization>,
     ) -> Result<String> {
-        let tensor = preprocess_line(crop, self.rec.height, self.rec.padding, binarize)?;
+        let tensor =
+            preprocess_line(crop, self.rec.height, self.rec.padding, binarize, self.rec.center_norm)?;
         self.rec
             .recognize(&tensor)
             .context("Kraken recognition failed")
+    }
+
+    /// Recognize text from a single line, dewarping it first.
+    ///
+    /// Runs the Stage-1 geometric dewarp (`extract_polygon_line`: polygon mask
+    /// + baseline straightening) on the full page image, then preprocesses the
+    /// flat strip (Stage-2 centerline normalization when the model requests it)
+    /// and recognizes it. This is the faithful kraken path and supersedes
+    /// [`recognize_line`](Self::recognize_line) for curved/tilted lines.
+    ///
+    /// Falls back to a plain masked bbox crop if the dewarp fails (degenerate
+    /// baseline), so it never hard-errors on an unusual line.
+    pub fn recognize_line_dewarped(
+        &self,
+        image: &DynamicImage,
+        baseline: &[(f64, f64)],
+        boundary: &[(f64, f64)],
+        binarize: Option<recognition::Binarization>,
+    ) -> Result<String> {
+        let strip =
+            recognition::dewarp::extract_polygon_line(image, baseline, boundary).unwrap_or_else(
+                |_| {
+                    // Fallback: masked bbox crop (no dewarp), as a GrayImage strip.
+                    let crop = recognition::crop::crop_polygon_white_bg(image, boundary);
+                    crop.to_luma8()
+                },
+            );
+        let strip_dyn = DynamicImage::ImageLuma8(strip);
+        self.recognize_line(&strip_dyn, binarize)
     }
 
     /// Borrow the recognition model directly (e.g. for rayon-parallel batch

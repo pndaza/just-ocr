@@ -126,6 +126,130 @@ pub fn gaussian_filter(input: &Array2<f32>, sigma: f32) -> Array2<f32> {
     out
 }
 
+/// Separable uniform (box) filter with **zero-padded ('constant')** boundary
+/// handling.
+///
+/// Equivalent to scipy `uniform_filter(input, (2*radius_y+1, 2*radius_x+1),
+/// mode='constant')`: centered window, out-of-range samples treated as 0.
+///
+/// Used by the `CenterNormalizer` line normalizer (`kraken/lib/lineest.py`),
+/// which calls `uniform_filter(smoothed, (h*0.5, w), mode='constant')` right
+/// after `gaussian_filter(..., mode='constant')` on the same array. Zero-padding
+/// (not reflect) is used for the same reason [`gaussian_filter_aniso_const`]
+/// uses it: under the heavy vertical window, a reflect boundary would pull the
+/// box-average toward the image edges and bias the per-column centerline argmax.
+pub fn uniform_filter(input: &Array2<f32>, radius_y: usize, radius_x: usize) -> Array2<f32> {
+    let (h, w) = input.dim();
+    if h == 0 || w == 0 || (radius_y == 0 && radius_x == 0) {
+        return input.clone();
+    }
+
+    // Pass 1: box along x (columns). Window half-width = radius_x, zero-padded.
+    let tmp = {
+        let in_slice = input.as_slice_memory_order().unwrap();
+        let mut buf = vec![0.0f32; h * w];
+        let klen_x = 2 * radius_x + 1;
+        let inv = 1.0 / klen_x as f32;
+        let r_x = radius_x as isize;
+        let w_i = w as isize;
+        for i in 0..h {
+            let row = &in_slice[i * w..(i + 1) * w];
+            let out_row = &mut buf[i * w..(i + 1) * w];
+            for j in 0..w {
+                let mut acc = 0.0f32;
+                for k in 0..klen_x {
+                    let sj = j as isize + k as isize - r_x;
+                    if sj >= 0 && sj < w_i {
+                        acc += row[sj as usize];
+                    }
+                }
+                out_row[j] = acc * inv;
+            }
+        }
+        buf
+    };
+
+    // Pass 2: box along y (rows). Window half-width = radius_y, zero-padded.
+    let klen_y = 2 * radius_y + 1;
+    let inv = 1.0 / klen_y as f32;
+    let r_y = radius_y as isize;
+    let h_i = h as isize;
+    let mut out = Array2::<f32>::zeros((h, w));
+    let out_slice = out.as_slice_memory_order_mut().unwrap();
+    for i in 0..h {
+        for j in 0..w {
+            let mut acc = 0.0f32;
+            for k in 0..klen_y {
+                let si = i as isize + k as isize - r_y;
+                if si >= 0 && si < h_i {
+                    acc += tmp[si as usize * w + j];
+                }
+            }
+            out_slice[i * w + j] = acc * inv;
+        }
+    }
+    out
+}
+
+/// Separable Gaussian filter with **anisotropic** (per-axis) sigmas and
+/// **zero-padded ('constant')** boundary handling. Equivalent to scipy
+/// `gaussian_filter(input, (sigma_y, sigma_x), mode='constant')`.
+///
+/// Used by `CenterNormalizer::measure`, which calls the Python
+/// `gaussian_filter(line, (h*0.5, h*smoothness), mode='constant')`. Zero-padding
+/// is important there: under the heavy vertical sigma, a reflect boundary would
+/// pull the per-column argmax (the detected centerline) toward the image edges.
+pub fn gaussian_filter_aniso_const(input: &Array2<f32>, sigma_y: f32, sigma_x: f32) -> Array2<f32> {
+    let (h, w) = input.dim();
+    if h == 0 || w == 0 {
+        return input.clone();
+    }
+
+    // Pass 1: blur along x (axis 1) using sigma_x, zero-padded boundary.
+    let tmp = {
+        let radius_x = ((3.0 * sigma_x).ceil() as usize).max(1);
+        let kernel_x = gaussian_kernel_1d(sigma_x, radius_x);
+        let klen_x = kernel_x.len();
+        let r_x = radius_x as isize;
+        let in_slice = input.as_slice_memory_order().unwrap();
+        let mut buf = vec![0.0f32; h * w];
+        for i in 0..h {
+            let row = &in_slice[i * w..(i + 1) * w];
+            let out_row = &mut buf[i * w..(i + 1) * w];
+            for j in 0..w {
+                let mut acc = 0.0f32;
+                for k in 0..klen_x {
+                    let sj = j as isize + k as isize - r_x;
+                    if sj >= 0 && sj < w as isize {
+                        acc += row[sj as usize] * kernel_x[k];
+                    }
+                }
+                out_row[j] = acc;
+            }
+        }
+        buf
+    };
+
+    // Pass 2: blur along y (axis 0) using sigma_y, zero-padded boundary.
+    let radius_y = ((3.0 * sigma_y).ceil() as usize).max(1);
+    let kernel_y = gaussian_kernel_1d(sigma_y, radius_y);
+    let klen_y = kernel_y.len();
+    let mut out = Array2::<f32>::zeros((h, w));
+    for i in 0..h {
+        for j in 0..w {
+            let mut acc = 0.0f32;
+            for k in 0..klen_y {
+                let si = i as isize + k as isize - radius_y as isize;
+                if si >= 0 && si < h as isize {
+                    acc += tmp[si as usize * w + j] * kernel_y[k];
+                }
+            }
+            out[[i, j]] = acc;
+        }
+    }
+    out
+}
+
 /// Sobel gradient magnitude. Returns `sqrt(gx^2 + gy^2)` using the standard
 /// 3x3 Sobel kernels with zero-padded 'same' boundary.
 pub fn sobel(input: &Array2<f32>) -> Array2<f32> {
