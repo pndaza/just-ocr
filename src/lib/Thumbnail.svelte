@@ -108,12 +108,11 @@
   aria-label="Image queue"
 >
   <div class="head">
-    <span class="title">Images</span>
+    <button class="text-btn add" onclick={() => input.click()} title="Add images">+ Add</button>
     {#if jobs.length}
       <span class="count">{jobs.length}</span>
       <button class="text-btn clear" onclick={onclear} title="Remove all">Clear</button>
     {/if}
-    <button class="text-btn add" onclick={() => input.click()} title="Add images">+ Add</button>
   </div>
 
   <div class="scroller" bind:this={container} onscroll={handleScroll}>
@@ -183,19 +182,14 @@
   .head {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 6px;
     padding: 9px 12px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
   }
-  .title {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-faint);
-    margin-right: auto;
-  }
+  /* With the "Images" label gone, the header holds only the count + buttons
+     (or just "+ Add" when empty). Pin the whole group to the right. */
   .count {
     font-size: 11px;
     font-family: var(--mono);
@@ -204,19 +198,44 @@
     padding: 1px 6px;
     border-radius: 4px;
   }
+  /* Outlined control buttons — readable against the header. The old
+     borderless text buttons disappeared into the chrome. */
   .text-btn {
-    background: none;
-    border: none;
-    color: var(--text-faint);
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
     font-size: 11px;
-    padding: 2px 4px;
-    border-radius: 4px;
+    font-weight: 500;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 5px;
+    transition: background 0.1s, border-color 0.1s, color 0.1s;
   }
   .text-btn:hover {
+    color: var(--text);
+    background: var(--bg-elev);
+    border-color: var(--accent-dim);
+  }
+  /* "+ Add" is the primary action — the empty state points users here, so
+     accent-tint it at rest and fill solid on hover. */
+  .add {
     color: var(--accent);
     background: var(--accent-soft);
+    border-color: var(--accent-dim);
   }
-  .clear { margin-left: auto; }
+  .add:hover {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  /* "Clear" is destructive: neutral outline at rest, warns danger on hover. */
+  .clear:hover {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
 
   .scroller {
     flex: 1;
