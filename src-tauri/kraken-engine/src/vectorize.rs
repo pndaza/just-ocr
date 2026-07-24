@@ -144,27 +144,9 @@ pub fn vectorize_lines(
         let r_st = f_st_map[[r_end.y as usize, r_end.x as usize]];
         let r_end_val = f_end_map[[r_end.y as usize, r_end.x as usize]];
 
-        if l_st - l_end_val > 0.2 && r_st - r_end_val < -0.2 {
-            // correctly oriented: start sep dominant at left, end sep at right
-        } else if l_st - l_end_val < -0.2 && r_st - r_end_val > 0.2 {
-            bl.reverse();
-        } else if text_direction == "horizontal" {
-            // Insufficient separator confidence. Python checks if bl[0].y >
-            // bl[-1].y (for vertical-ish orientation), but for nearly-horizontal
-            // lines where y-ordering is ambiguous, the MCP-Connect path direction
-            // is arbitrary. Default to LTR: ensure bl[0].x < bl[-1].x.
-            // Source: segmentation.py:409-412
-            if bl[0].y > bl[bl.len() - 1].y {
-                bl.reverse();
-            } else if (bl[0].y - bl[bl.len() - 1].y).abs() < 10.0 && bl[0].x > bl[bl.len() - 1].x {
-                // Nearly horizontal and currently RTL — flip to LTR
-                bl.reverse();
-            }
-        } else {
-            if bl[0].x > bl[bl.len() - 1].x {
-                bl.reverse();
-            }
-        }
+        orient_line(
+            &mut bl, l_st, l_end_val, r_st, r_end_val, text_direction,
+        );
 
         let length: f64 = bl
             .windows(2)
@@ -365,6 +347,45 @@ fn extrapolate(
     }
 }
 
+/// Decide whether a baseline polyline needs reversing for recognition.
+///
+/// `l_st`/`l_end_val` are the start/end separator heatmap values sampled at the
+/// line's first point; `r_st`/`r_end_val` the same at the last point. Reverses
+/// `bl` in place when the separator markers disagree with the current order, or
+/// — when the markers are inconclusive — forces a reading direction:
+///
+/// - `horizontal`: force LTR (`bl[0].x < bl[-1].x`). kraken's y-only check
+///   (`bl[0].y > bl[-1].y`) is too weak here because `mcp_connect` emits
+///   polylines in an arbitrary direction, so a strongly tilted line read RTL
+///   survives un-rotated and produces a 180°-flipped recognition crop.
+/// - `vertical`: force top-to-bottom (`bl[0].y < bl[-1].y`).
+///
+/// Source: kraken/lib/segmentation.py:409-412 (deliberate divergence in the
+/// inconclusive branch).
+fn orient_line(
+    bl: &mut Vec<Point>,
+    l_st: f32,
+    l_end_val: f32,
+    r_st: f32,
+    r_end_val: f32,
+    text_direction: &str,
+) {
+    if l_st - l_end_val > 0.2 && r_st - r_end_val < -0.2 {
+        // Correctly oriented: start sep dominant at left, end sep at right.
+    } else if l_st - l_end_val < -0.2 && r_st - r_end_val > 0.2 {
+        bl.reverse();
+    } else if text_direction == "horizontal" {
+        if bl[0].x > bl[bl.len() - 1].x {
+            bl.reverse();
+        }
+    } else {
+        // Vertical: force top-to-bottom.
+        if bl[0].y > bl[bl.len() - 1].y {
+            bl.reverse();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +455,59 @@ mod tests {
         let im = ndarray::Array3::<f32>::zeros((3, 10, 10));
         let lines = vectorize_lines(&im, 0.17, 5, "horizontal", 400);
         assert!(lines.is_empty(), "empty heatmap should produce no lines");
+    }
+
+    // ── orient_line ───────────────────────────────────────────────────
+
+    fn pl(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point> {
+        vec![Point::new(x0, y0), Point::new(x1, y1)]
+    }
+
+    #[test]
+    fn orient_line_correct_markers_left_unchanged() {
+        // Start sep dominant at left, end sep dominant at right → already LTR.
+        let mut bl = pl(0.0, 5.0, 10.0, 5.0);
+        orient_line(&mut bl, 0.9, 0.1, 0.1, 0.9, "horizontal");
+        assert_eq!((bl[0].x, bl[1].x), (0.0, 10.0), "already-correct line kept");
+    }
+
+    #[test]
+    fn orient_line_flipped_markers_reversed() {
+        // End sep at left, start sep at right → reverse to LTR.
+        let mut bl = pl(10.0, 5.0, 0.0, 5.0);
+        orient_line(&mut bl, 0.1, 0.9, 0.9, 0.1, "horizontal");
+        assert_eq!((bl[0].x, bl[1].x), (0.0, 10.0), "flipped markers reverse line");
+    }
+
+    #[test]
+    fn orient_line_horizontal_rtl_forced_to_ltr() {
+        // Markers inconclusive (both low): RTL polyline must be forced to LTR
+        // regardless of any tilt. Regression for the 180°-flipped-crop bug.
+        let mut bl = pl(10.0, 5.0, 0.0, 5.0);
+        orient_line(&mut bl, 0.1, 0.1, 0.1, 0.1, "horizontal");
+        assert_eq!((bl[0].x, bl[1].x), (0.0, 10.0), "RTL forced to LTR");
+    }
+
+    #[test]
+    fn orient_line_horizontal_ltr_left_unchanged() {
+        let mut bl = pl(0.0, 5.0, 10.0, 5.0);
+        orient_line(&mut bl, 0.1, 0.1, 0.1, 0.1, "horizontal");
+        assert_eq!((bl[0].x, bl[1].x), (0.0, 10.0), "LTR left unchanged");
+    }
+
+    #[test]
+    fn orient_line_vertical_bottom_up_forced_to_top_down() {
+        // Vertical, markers inconclusive: bottom-up polyline must be forced
+        // to top-to-bottom reading order.
+        let mut bl = pl(5.0, 10.0, 5.0, 0.0);
+        orient_line(&mut bl, 0.1, 0.1, 0.1, 0.1, "vertical");
+        assert_eq!((bl[0].y, bl[1].y), (0.0, 10.0), "bottom-up forced to top-down");
+    }
+
+    #[test]
+    fn orient_line_vertical_top_down_left_unchanged() {
+        let mut bl = pl(5.0, 0.0, 5.0, 10.0);
+        orient_line(&mut bl, 0.1, 0.1, 0.1, 0.1, "vertical");
+        assert_eq!((bl[0].y, bl[1].y), (0.0, 10.0), "top-down left unchanged");
     }
 }

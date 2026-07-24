@@ -21,6 +21,7 @@ pub mod lineest;
 pub mod meta;
 pub mod model;
 pub mod preprocess;
+pub(crate) mod vgsl;
 
 pub use codec::Codec;
 pub use crop::crop_polygon_white_bg;

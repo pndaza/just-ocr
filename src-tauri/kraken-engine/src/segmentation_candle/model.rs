@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use candle_core::{Device, Tensor, DType};
 use candle_nn::{Conv2d, Conv2dConfig, VarBuilder, Module};
 use candle_nn::rnn::{LSTM, RNN};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 use crate::model_meta::{ClassMapping, ModelMeta};
@@ -36,6 +37,9 @@ pub struct SegmentationModelCandle {
     pub meta: ModelMeta,
     /// Fixed input height (1800).
     pub height: u32,
+    /// Compute dtype the weights are stored as (F32 or BF16). The input is
+    /// cast to this at the start of `forward` and the output cast back to F32.
+    compute_dtype: DType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,21 +140,26 @@ impl AxisBiLstm {
         let output_size = self.hidden_dim * 2; // bidirectional
 
         // Step 1: permute(2,0,3,1) — NCHW -> HNWC
-        let x = input.permute((2, 0, 3, 1))?.contiguous()?;
-
         // Step 2: if transpose (along_height=x-axis), swap dim 0 and 2
         // After this: (seq_dim, N, spatial_dim, C)
         //   y-axis (transpose=False): (H, N, W, C), seq=W
         //   x-axis (transpose=True):  (W, N, H, C), seq=H
+        // We defer the .contiguous() to just before the reshape (step 3),
+        // since the intermediate permutes are themselves strided views —
+        // materializing each one would copy the full tensor twice.
+        let x = input.permute((2, 0, 3, 1))?;
         let x = if self.along_height {
-            x.permute((2, 1, 0, 3))?.contiguous()? // swap dim 0<->2
+            x.permute((2, 1, 0, 3))? // swap dim 0<->2
         } else {
             x
         };
 
-        // Step 3: reshape to (batch, seq, C)
+        // Step 3: reshape to (batch, seq, C). Merging dims 0,1 requires them
+        // to be contiguous in memory, so materialize once here.
         let (dim0, dim1, dim2, dim3) = x.dims4()?;
-        let reshaped = x.reshape((dim0 * dim1, dim2, dim3))?.contiguous()?;
+        let reshaped = x
+            .contiguous()?
+            .reshape((dim0 * dim1, dim2, dim3))?;
 
         // Step 4: run bidirectional LSTM
         let lstm_out = self.run_bilstm(&reshaped)?;
@@ -161,7 +170,7 @@ impl AxisBiLstm {
 
         // Step 6: if transpose, undo the swap
         let o = if self.along_height {
-            o.permute((2, 1, 0, 3))?.contiguous()? // swap dim 0<->2 back
+            o.permute((2, 1, 0, 3))? // swap dim 0<->2 back
         } else {
             o
         };
@@ -172,39 +181,91 @@ impl AxisBiLstm {
     }
 
     fn run_bilstm(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-        let (batch, seq_len, _in_dim) = input.dims3()?;
+        let (batch, _seq_len, _in_dim) = input.dims3()?;
+        if batch == 0 {
+            return Ok(input.clone());
+        }
+
+        // Parallelize across the batch dimension. Each sequence in the batch is
+        // independent (no cross-batch interaction in an LSTM), so chunks can be
+        // scanned concurrently. This is the key optimization for this model:
+        // candle-nn's `seq_init` is a strictly sequential per-timestep loop
+        // (each step depends on the previous state), but the batch dim has
+        // hundreds of independent sequences (e.g. ~365 rows × 1 for Lbx).
+        let num_threads = rayon::current_num_threads();
+        if batch < 2 || num_threads < 2 {
+            return self.run_bilstm_serial(input);
+        }
+
+        let num_chunks = batch.min(num_threads);
+        let chunks: Vec<Tensor> = input.chunk(num_chunks, 0)?;
+
+        let chunks_out: Vec<Tensor> = chunks
+            .par_iter()
+            .map(|chunk| self.run_bilstm_serial(chunk))
+            .collect::<candle_core::Result<_>>()?;
+
+        let refs: Vec<&Tensor> = chunks_out.iter().collect();
+        Tensor::cat(&refs, 0)
+    }
+
+    fn run_bilstm_serial(&self, input: &Tensor) -> candle_core::Result<Tensor> {
+        let (batch, _seq_len, _in_dim) = input.dims3()?;
         let init_fwd = self.fwd.zero_state(batch)?;
         let fwd_states = self.fwd.seq_init(input, &init_fwd)?;
+        // Stack all forward hidden states into one (batch, seq_len, hidden) tensor.
         let fwd_outs: Vec<Tensor> = fwd_states.iter().map(|s| s.h.clone()).collect();
+        let fwd_stacked = Tensor::stack(&fwd_outs, 1)?;
 
         let reversed = input.flip(&[1])?.contiguous()?;
         let init_bwd = self.bwd.zero_state(batch)?;
         let bwd_states = self.bwd.seq_init(&reversed, &init_bwd)?;
-        let bwd_outs: Vec<Tensor> = bwd_states.iter().map(|s| s.h.clone()).collect();
+        let mut bwd_outs: Vec<Tensor> = bwd_states.iter().map(|s| s.h.clone()).collect();
 
-        let mut combined = Vec::with_capacity(seq_len);
-        for t in 0..seq_len {
-            let f = &fwd_outs[t];
-            let b = &bwd_outs[seq_len - 1 - t];
-            combined.push(Tensor::cat(&[f, b], 1)?);
-        }
-        Tensor::stack(&combined, 1)
+        // bwd_outs[t] is the hidden state after consuming the reversed input up
+        // to step t — i.e. after consuming the original sequence from the right
+        // edge down to position (seq_len - 1 - t). To align it with fwd_outs[t]
+        // (which covers positions 0..=t) we need bwd_outs[seq_len - 1 - t], so
+        // reverse the bwd axis.
+        bwd_outs.reverse();
+        let bwd_stacked = Tensor::stack(&bwd_outs, 1)?;
+
+        // Single concat along the hidden dimension: (batch, seq_len, 2*hidden).
+        // Replaces the per-timestep loop that built seq_len small tensors then
+        // stacked them — 2 cat/stack calls instead of seq_len+1.
+        Tensor::cat(&[&fwd_stacked, &bwd_stacked], 2)
     }
 }
 
 impl SegmentationModelCandle {
-    /// Load a segmentation model from a safetensors file.
+    /// Load a segmentation model from a safetensors file (F32 compute).
     ///
     /// Reads the VGSL spec, codec, and class mapping from the safetensors
     /// metadata header and constructs the network layers.
     pub fn load(path: &str) -> Result<Self> {
+        Self::load_with_dtype(path, DType::F32)
+    }
+
+    /// Load a segmentation model, quantizing weights to `dtype`.
+    ///
+    /// `DType::BF16` stores weights as brain-float16, which would double
+    /// effective SIMD throughput on the conv/GEMM kernels (8 lanes per NEON
+    /// register vs 4 for f32) at the cost of some numerical precision. The
+    /// input is cast to `dtype` at the start of [`Self::forward`] and the
+    /// output cast back to F32, so callers see the same F32 heatmap either way.
+    ///
+    /// NOTE: BF16/F16 are blocked by candle 0.11's CPU matmul dtype guard
+    /// (`cpu_backend/mod.rs` accepts only F16|F32|F64, and the Accelerate
+    /// backend bails on hgemm). This entry point is kept for forward
+    /// compatibility if an upstream candle change lifts the restriction.
+    pub fn load_with_dtype(path: &str, dtype: DType) -> Result<Self> {
         let device = Device::Cpu;
 
         // Parse metadata from the safetensors header.
         let seg_meta = parse_seg_meta(path)?;
         let raw_tensors = candle_core::safetensors::load(path, &device)
             .with_context(|| format!("Failed to load safetensors: {path}"))?;
-        Self::build(raw_tensors, &seg_meta)
+        Self::build(raw_tensors, &seg_meta, dtype)
     }
 
     /// Load from an in-memory safetensors buffer (e.g. `include_bytes!`).
@@ -212,28 +273,43 @@ impl SegmentationModelCandle {
     /// Avoids all filesystem access — useful for bundling models into the
     /// binary so a fresh install works with zero setup.
     pub fn load_from_buffer(data: &[u8]) -> Result<Self> {
+        Self::load_from_buffer_with_dtype(data, DType::F32)
+    }
+
+    /// Buffer-based loader with explicit compute dtype. See
+    /// [`load_with_dtype`] for the dtype semantics.
+    pub fn load_from_buffer_with_dtype(data: &[u8], dtype: DType) -> Result<Self> {
         let device = Device::Cpu;
         let seg_meta = parse_seg_meta_from_buffer(data)?;
         let raw_tensors = candle_core::safetensors::load_buffer(data, &device)
             .context("Failed to load safetensors from buffer")?;
-        Self::build(raw_tensors, &seg_meta)
+        Self::build(raw_tensors, &seg_meta, dtype)
     }
 
     /// Construct the network layers from a tensor map + parsed seg metadata.
     /// Shared by the file- and buffer-based loaders.
-    fn build(raw_tensors: HashMap<String, Tensor>, seg_meta: &SegMeta) -> Result<Self> {
+    fn build(
+        raw_tensors: HashMap<String, Tensor>,
+        seg_meta: &SegMeta,
+        dtype: DType,
+    ) -> Result<Self> {
         let device = Device::Cpu;
         let uuid = &seg_meta.uuid;
         let vgsl = &seg_meta.vgsl;
 
-        // Strip the UUID prefix from tensor names.
+        // Strip the UUID prefix from tensor names and cast to the target dtype.
         let prefix = format!("{uuid}.nn.");
         let mut tensors: HashMap<String, Tensor> = HashMap::new();
         for (name, tensor) in raw_tensors {
             let stripped = name.strip_prefix(&prefix).unwrap_or(&name).to_string();
+            let tensor = if dtype != DType::F32 {
+                tensor.to_dtype(dtype)?
+            } else {
+                tensor
+            };
             tensors.insert(stripped, tensor);
         }
-        let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
+        let vb = VarBuilder::from_tensors(tensors, dtype, &device);
 
         // Parse VGSL spec and build layers.
         let spec = VgslSpec::parse(vgsl)?;
@@ -258,21 +334,69 @@ impl SegmentationModelCandle {
             layer_order,
             meta,
             height,
+            compute_dtype: dtype,
         })
     }
 
     /// Run the forward pass.
     ///
     /// Input: `(1, 3, 1800, W)` float tensor (NCHW, RGB, [0,1] range).
-    /// Output: `(1, num_classes, H/4, W/4)` logits tensor.
+    /// Output: `(1, num_classes, H/4, W/4)` logits tensor (always F32).
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let mut x = input.clone();
+        let profile = std::env::var("KRAKEN_PROFILE_LAYERS").is_ok();
+        let mut t_conv = std::time::Duration::ZERO;
+        let mut t_norm = std::time::Duration::ZERO;
+        let mut t_lstm = std::time::Duration::ZERO;
+
+        // Cast input to the compute dtype (no-op for F32; bf16 for the fast path).
+        let mut x = if self.compute_dtype == DType::F32 {
+            input.clone()
+        } else {
+            input.to_dtype(self.compute_dtype)?
+        };
         for &layer in &self.layer_order {
-            x = match layer {
-                LayerKind::Conv(i) => self.convs[i].forward(&x)?,
-                LayerKind::GroupNorm(i) => self.group_norms[i].forward(&x)?,
-                LayerKind::Lstm(i) => self.lstms[i].forward(&x)?,
-            };
+            if profile {
+                let t = std::time::Instant::now();
+                x = match layer {
+                    LayerKind::Conv(i) => {
+                        let r = self.convs[i].forward(&x)?;
+                        t_conv += t.elapsed();
+                        r
+                    }
+                    LayerKind::GroupNorm(i) => {
+                        let r = self.group_norms[i].forward(&x)?;
+                        t_norm += t.elapsed();
+                        r
+                    }
+                    LayerKind::Lstm(i) => {
+                        let r = self.lstms[i].forward(&x)?;
+                        t_lstm += t.elapsed();
+                        r
+                    }
+                };
+            } else {
+                x = match layer {
+                    LayerKind::Conv(i) => self.convs[i].forward(&x)?,
+                    LayerKind::GroupNorm(i) => self.group_norms[i].forward(&x)?,
+                    LayerKind::Lstm(i) => self.lstms[i].forward(&x)?,
+                };
+            }
+        }
+        // Cast output back to F32 for the downstream sigmoid/upsample (which
+        // run in F32 in inference_candle.rs).
+        let x = if self.compute_dtype == DType::F32 {
+            x
+        } else {
+            x.to_dtype(DType::F32)?
+        };
+        if profile {
+            eprintln!(
+                "forward: conv {:.1} ms | groupnorm {:.1} ms | lstm {:.1} ms | dtype {:?}",
+                t_conv.as_secs_f64() * 1000.0,
+                t_norm.as_secs_f64() * 1000.0,
+                t_lstm.as_secs_f64() * 1000.0,
+                self.compute_dtype,
+            );
         }
         Ok(x)
     }
