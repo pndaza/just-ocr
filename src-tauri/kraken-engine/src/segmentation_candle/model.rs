@@ -136,7 +136,7 @@ impl AxisBiLstm {
     /// ```
     fn forward(&self, input: &Tensor) -> candle_core::Result<Tensor> {
         // input: (N, C, H, W)
-        let (n, _c, h, w) = input.dims4()?;
+        let (_n, _c, _h, _w) = input.dims4()?;
         let output_size = self.hidden_dim * 2; // bidirectional
 
         // Step 1: permute(2,0,3,1) — NCHW -> HNWC
