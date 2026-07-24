@@ -93,7 +93,7 @@
       <span class="status-pill {job.status}">
         {#if job.status === "queued"}Queued
         {:else if job.status === "running"}Recognizing…
-        {:else if job.status === "done"}Done · {job.confidence}% conf
+        {:else if job.status === "done"}Done{#if job.confidence >= 0} · {job.confidence}% conf{/if}
         {:else if job.status === "error"}Error{/if}
       </span>
     {/if}

@@ -254,7 +254,9 @@ export async function exportResults(jobs: Job[]): Promise<void> {
       rows.push(
         [
           csvField(j.name),
-          j.confidence,
+          // Kraken recognizer returns confidence = -1 (unknown); emit empty so
+          // the column stays structurally present without fabricating a value.
+          j.confidence >= 0 ? String(j.confidence) : "",
           j.elapsedMs,
           csvField(plainText(j.result!).replace(/\s+$/, "")),
         ].join(","),
@@ -262,11 +264,10 @@ export async function exportResults(jobs: Job[]): Promise<void> {
     }
     content = rows.join("\n") + "\n";
   } else {
-    const blocks = done.map(
-      (j) =>
-        `=== ${j.name}  (${j.confidence}% conf, ${j.elapsedMs} ms) ===\n` +
-        plainText(j.result!).replace(/\s+$/, ""),
-    );
+    const blocks = done.map((j) => {
+      const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
+      return `=== ${j.name}${conf} ===\n` + plainText(j.result!).replace(/\s+$/, "");
+    });
     content = blocks.join("\n\n") + "\n";
   }
 
