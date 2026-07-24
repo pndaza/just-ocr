@@ -138,7 +138,7 @@
           >
             <div class="thumb-wrap">
               <img src={job.url} alt={job.name} loading="lazy" decoding="async" />
-              {#if job.status === "done"}
+              {#if job.status === "done" && job.confidence >= 0}
                 <span class="badge conf">{job.confidence}%</span>
               {:else if job.status === "error"}
                 <span class="badge err">!</span>
