@@ -46,6 +46,15 @@ pub struct OcrResult {
     /// Mean recognizer confidence in [0,100]. -1 when unknown (Kraken recog).
     pub confidence: i32,
     pub elapsed_ms: u64,
+    /// Per-stage timing for the Kraken-segmented (Myanmar) path, where seg and
+    /// recog are distinct passes. `None` on the full-page Tesseract path, which
+    /// does both in one `get_hocr_text` call — there is no separate measurement
+    /// to report and we don't want to fabricate one. Skipped on serialization
+    /// when `None` so the Tesseract-path wire format stays minimal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segmentation_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recognition_ms: Option<u64>,
 }
 
 /// Bundled Kraken models, embedded in the binary at compile time via
@@ -167,9 +176,10 @@ fn run_myanmar(
     let lines = engine
         .segment(img)
         .map_err(|e| format!("Segmentation failed: {e}"))?;
+    let segmentation_ms = t.elapsed().as_millis() as u64;
     log::info!(
         "[ocr] segmentation (kraken): {:.0} ms ({} lines)",
-        t.elapsed().as_secs_f64() * 1000.0,
+        segmentation_ms as f64,
         lines.len()
     );
 
@@ -260,12 +270,13 @@ fn run_myanmar(
     };
 
     let recog_n = results.len();
+    let recognition_ms = recog_start.elapsed().as_millis() as u64;
     log::info!(
         "[ocr] recognition: {:.0} ms ({} lines, {:.1} ms/line avg, {})",
-        recog_start.elapsed().as_secs_f64() * 1000.0,
+        recognition_ms as f64,
         recog_n,
         if recog_n > 0 {
-            recog_start.elapsed().as_secs_f64() * 1000.0 / recog_n as f64
+            recognition_ms as f64 / recog_n as f64
         } else {
             0.0
         },
@@ -307,6 +318,8 @@ fn run_myanmar(
         lines: boxes,
         confidence,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        segmentation_ms: Some(segmentation_ms),
+        recognition_ms: Some(recognition_ms),
     })
 }
 
@@ -347,6 +360,10 @@ fn run_tesseract_page(
         lines: boxes,
         confidence,
         elapsed_ms: started.elapsed().as_millis() as u64,
+        // Tesseract full-page does layout + recognition in one call; there is
+        // no per-stage measurement to surface. The status bar shows total only.
+        segmentation_ms: None,
+        recognition_ms: None,
     })
 }
 
