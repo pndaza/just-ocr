@@ -27,6 +27,19 @@ Tesseract does both layout and recognition.
 Prebuilt binaries are on the [releases page](https://github.com/pndaza/just-ocr/releases):
 `.dmg` for macOS, `.msi`/`.exe` for Windows, `.deb`/`.AppImage` for Linux.
 
+### macOS: "app is damaged" or "cannot be opened"
+
+The app is not notarized, so Gatekeeper marks the download with a quarantine
+flag. If macOS refuses to launch it, run this in Terminal (adjust the path if
+you installed it elsewhere):
+
+```sh
+xattr -cr /Applications/Just\ OCR.app
+```
+
+This clears the quarantine attribute recursively. You only need to do it once
+after install (or after a fresh download).
+
 ## Develop
 
 Requires Rust 1.88+, Node 18+, a C++17 compiler, and CMake.
