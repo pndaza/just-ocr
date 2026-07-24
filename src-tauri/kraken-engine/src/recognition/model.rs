@@ -1,16 +1,20 @@
 //! Recognition model: builds the VGSL network from safetensors weights and
 //! runs the forward pass.
 //!
-//! The Myanmar model architecture (from VGSL spec):
-//! ```text
-//! [1,120,0,1 Cr3,13,32 Do Mp Cr3,13,32 Do Mp Cr3,9,64 Do Mp Cr3,9,64 Do
-//!  S1(1x0)1,3 Lbx200 Do Lbx200 Do Lbx200 Do O1c118]
-//! ```
+//! The network graph is built **dynamically from the VGSL spec** (via
+//! [`super::vgsl`]), so any kraken recognition model whose spec uses the
+//! recognition dialect (`Cr`, `Do`, `Mp`, `S`, `Lbx`, `O...c<N>`) loads without
+//! hardcoded layer names, counts, or dimensions. The LSTM input feature width
+//! falls out of the spec's conv/maxpool/reshape shape tracking rather than
+//! being a literal.
 //!
-//! Input: (1, 1, 120, W) — NCHW, grayscale, height=120, variable width.
-//! Output: (1, 118, 1, W/8) — logits over 118 classes (117 graphemes + blank).
+//! Canonical architecture (e.g. `[1,48,0,1 Cr3,13,32 Do Mp ... S1(1x0)1,3
+//! Lbx200 ... O1c119]`):
+//!
+//! Input: `(1, 1, H, W)` — NCHW, grayscale, variable width.
+//! Output: `(1, 1, W', num_classes)` — timestep-major logits.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::{Device, Tensor, DType};
 use candle_nn::{Conv2d, Conv2dConfig, Linear, VarBuilder, Module};
 use candle_nn::rnn::{LSTM, RNN};
@@ -18,6 +22,7 @@ use std::collections::HashMap;
 
 use super::codec::Codec;
 use super::meta::RecogMeta;
+use super::vgsl::{self, Axis, Direction, RecogNetwork, VgslBlock};
 
 /// A conv layer with asymmetric padding (for non-square kernels).
 struct PaddedConv2d {
@@ -36,28 +41,6 @@ impl PaddedConv2d {
             self.inner.forward(x)
         }
     }
-}
-
-/// A recognition model loaded from safetensors, ready for inference.
-pub struct RecognitionModel {
-    /// 4 conv blocks: (conv + relu). MaxPool(2,2) between the first 3.
-    convs: [PaddedConv2d; 4],
-    /// 3 bidirectional LSTM layers, each hidden=200, output=400.
-    lstms: [BiLstm; 3],
-    /// Final linear layer: 400 → num_classes.
-    linear: Linear,
-    /// The codec for decoding labels → text.
-    pub codec: Codec,
-    /// Input height from the VGSL spec (120 for this model).
-    pub height: usize,
-    /// Padding (left, right) applied during preprocessing.
-    pub padding: usize,
-    /// Number of output classes.
-    pub num_classes: usize,
-    /// Whether preprocessing should apply the ocropy `CenterNormalizer`
-    /// content dewarp (kraken `_create_transforms` branch B: fixed height,
-    /// variable width, single channel). Matches kraken's `valid_norm` default.
-    pub center_norm: bool,
 }
 
 /// A bidirectional LSTM using candle's LSTM cells.
@@ -97,6 +80,41 @@ impl BiLstm {
     }
 }
 
+/// A runtime layer built from a parsed VGSL block. Carries weights where the
+/// block has them; MaxPool/Dropout/Reshape are weightless and either fold into
+/// the forward control flow or are no-ops.
+enum BlockLayer {
+    /// Padded conv + its activation char ('r' ReLU, 'l' linear, ...).
+    Conv(PaddedConv2d, char),
+    /// MaxPool2d with explicit kernel/stride.
+    MaxPool((usize, usize), (usize, usize)),
+    /// Dropout — no-op at inference.
+    Dropout,
+    /// A bidirectional x-axis LSTM. Only Lbx blocks reach here; Ly/Ls are
+    /// rejected during build.
+    Lstm(BiLstm),
+    /// Final linear layer (the `O...c<N>` output).
+    Linear(Linear),
+}
+
+/// A recognition model loaded from safetensors, ready for inference.
+pub struct RecognitionModel {
+    /// Runtime layers in spec order (convs, maxpools, lstms, linear, ...).
+    blocks: Vec<BlockLayer>,
+    /// The codec for decoding labels → text.
+    pub codec: Codec,
+    /// Input height from the VGSL spec.
+    pub height: usize,
+    /// Padding (left, right) applied during preprocessing.
+    pub padding: usize,
+    /// Number of output classes.
+    pub num_classes: usize,
+    /// Whether preprocessing should apply the ocropy `CenterNormalizer`
+    /// content dewarp (kraken `_create_transforms` branch B: fixed height,
+    /// variable width, single channel). Matches kraken's `valid_norm` default.
+    pub center_norm: bool,
+}
+
 impl RecognitionModel {
     /// Load a recognition model from a safetensors file.
     pub fn load(path: &str) -> Result<Self> {
@@ -134,6 +152,11 @@ impl RecognitionModel {
     fn build(raw_tensors: HashMap<String, Tensor>, meta: &RecogMeta) -> Result<Self> {
         let device = Device::Cpu;
 
+        // Parse the VGSL spec into a block list and resolve dynamic dims.
+        let mut net = vgsl::parse(&meta.vgsl)
+            .with_context(|| format!("failed to parse VGSL spec: {}", meta.vgsl))?;
+        vgsl::resolve(&mut net)?;
+
         // Strip the `<uuid>.nn.` prefix from tensor names.
         let prefix = format!("{}.nn.", meta.uuid);
         let mut tensors: HashMap<String, Tensor> = HashMap::new();
@@ -144,42 +167,27 @@ impl RecognitionModel {
 
         let vb = VarBuilder::from_tensors(tensors, DType::F32, &device);
 
-        // Build layers matching the VGSL spec weight names.
-        // C_0: Conv2d(1→32, k=3x13), C_3: Conv2d(32→32, k=3x13)
-        // C_6: Conv2d(32→64, k=3x9),  C_9: Conv2d(64→64, k=3x9)
-        let conv0 = build_padded_conv(&vb, "C_0", 1, 32, (3, 13))?;
-        let conv1 = build_padded_conv(&vb, "C_3", 32, 32, (3, 13))?;
-        let conv2 = build_padded_conv(&vb, "C_6", 32, 64, (3, 9))?;
-        let conv3 = build_padded_conv(&vb, "C_9", 64, 64, (3, 9))?;
+        // Build runtime layers from the parsed blocks, threading the running
+        // channel count (for conv in_channels and the linear in_dim).
+        let blocks = build_layers(&net, &vb)?;
 
-        // L_12: BiLSTM(960→200), L_14: BiLSTM(400→200), L_16: BiLSTM(400→200)
-        let lstm0 = build_bilstm(&vb, "L_12", 960, 200)?;
-        let lstm1 = build_bilstm(&vb, "L_14", 400, 200)?;
-        let lstm2 = build_bilstm(&vb, "L_16", 400, 200)?;
-
-        // O_18: Linear(400 → num_classes). The class count is model-specific
-        // (bur_recog=119, myanmar=118) and is parsed from the VGSL `O1c<N>`
-        // clause by the metadata loader rather than hardcoded.
-        let num_classes = meta.num_classes;
-        let linear = build_linear(&vb, "O_18", 400, num_classes)?;
-
-        let codec = Codec::from_c2l(&meta.codec);
-        let height = meta.input_nhwc[1] as usize;
-        // kraken `_create_transforms` branch B: CenterNormalizer is selected
-        // when the input spec is fixed-height, variable-width, single-channel.
         // input_nhwc = [batch, height, width, channels].
         let (_, h_spec, w_spec, c_spec) = (
-            meta.input_nhwc[0],
-            meta.input_nhwc[1],
-            meta.input_nhwc[2],
-            meta.input_nhwc[3],
+            net.input_nhwc[0],
+            net.input_nhwc[1],
+            net.input_nhwc[2],
+            net.input_nhwc[3],
         );
+        let height = h_spec;
+        // kraken `_create_transforms` branch B: CenterNormalizer is selected
+        // when the input spec is fixed-height, variable-width, single-channel.
         let center_norm = h_spec > 1 && w_spec == 0 && c_spec == 1;
 
+        let num_classes = net.num_classes();
+        let codec = Codec::from_c2l(&meta.codec);
+
         Ok(RecognitionModel {
-            convs: [conv0, conv1, conv2, conv3],
-            lstms: [lstm0, lstm1, lstm2],
-            linear,
+            blocks,
             codec,
             height,
             padding: 16,
@@ -191,62 +199,57 @@ impl RecognitionModel {
     /// Run the forward pass.
     ///
     /// Input: `(1, 1, H, W)` float tensor (NCHW, grayscale, inverted).
-    /// Output: `(1, num_classes, 1, W/8)` logits tensor.
+    /// Output: `(1, 1, W', num_classes)` timestep-major logits tensor.
+    ///
+    /// Iterates the block list. The `S` reshape (collapse H into C) and the
+    /// NCHW↔(batch,seq,features) transpose happen at the conv→LSTM transition;
+    /// the linear runs on the `(W', features)` layout and is reshaped to
+    /// `(1, 1, W', num_classes)` for decoding.
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        // Conv block 0: conv + relu → maxpool(2,2)
-        let x = self.conv_block(input, 0, true)?;
-        // Conv block 1: conv + relu → maxpool(2,2)
-        let x = self.conv_block(&x, 1, true)?;
-        // Conv block 2: conv + relu → maxpool(2,2)
-        let x = self.conv_block(&x, 2, true)?;
-        // Conv block 3: conv + relu (no maxpool)
-        let x = self.conv_block(&x, 3, false)?;
+        let mut x = input.clone(); // (1, 1, H, W)
+        let mut in_lstm_phase = false; // have we crossed the S reshape yet?
 
-        // Reshape S1(1x0)1,3: (1, 64, 15, W') → (1, 960, 1, W')
-        let x = self.reshape_s11x013(&x)?;
-
-        // LSTM layers: transpose to (batch, seq, features) for candle's RNN.
-        // (1, 960, 1, W') → permute → (1, W', 1, 960) → squeeze H → (1, W', 960)
-        let x = x.permute((0, 3, 2, 1))?.contiguous()?;
-        let x = x.squeeze(2)?;
-        let x = self.lstms[0].forward(&x)?;
-        let x = self.lstms[1].forward(&x)?;
-        let x = self.lstms[2].forward(&x)?;
-        // x: (1, W', 400)
-
-        // Linear: (1, W', 400) → squeeze batch → (W', 400) → linear → (W', 118)
-        let x = x.squeeze(0)?;
-        let x = self.linear.forward(&x)?;
-        // Return as (1, 1, W', num_classes) — timestep-major layout, which is
-        // the natural memory order from the linear layer. The caller (recognize)
-        // handles the layout for decoding.
-        let x = x.unsqueeze(0)?.unsqueeze(0)?; // (1, 1, W', num_classes)
+        for block in &self.blocks {
+            match block {
+                BlockLayer::Conv(conv, act) => {
+                    x = conv.forward(&x)?;
+                    if *act == 'r' {
+                        x = x.relu()?;
+                    } else if *act == 's' {
+                        x = candle_nn::ops::sigmoid(&x)?;
+                    } else if *act == 't' {
+                        x = x.tanh()?;
+                    }
+                    // 'l' (linear) → no activation.
+                }
+                BlockLayer::MaxPool((ky, kx), _stride) => {
+                    x = x.max_pool2d((*ky, *kx))?;
+                }
+                BlockLayer::Dropout => { /* no-op at inference */ }
+                BlockLayer::Lstm(lstm) => {
+                    if !in_lstm_phase {
+                        // First LSTM: apply the S1(1x0)1,3 reshape (collapse H
+                        // into C) then transpose NCHW → (batch, seq, features).
+                        x = collapse_h_into_c(&x)?;
+                        // x is now (1, C', 1, W). Move W to the seq axis:
+                        // (N,C,H,W) → permute(0,3,2,1) → (1, W', 1, C') → squeeze H.
+                        x = x.permute((0, 3, 2, 1))?.contiguous()?;
+                        x = x.squeeze(2)?; // (1, W', C')
+                        in_lstm_phase = true;
+                    }
+                    x = lstm.forward(&x)?;
+                }
+                BlockLayer::Linear(lin) => {
+                    // x: (1, W', features) → squeeze batch → (W', features)
+                    x = x.squeeze(0)?;
+                    x = lin.forward(&x)?; // (W', num_classes)
+                    // Return as (1, 1, W', num_classes) — timestep-major.
+                    x = x.unsqueeze(0)?.unsqueeze(0)?;
+                }
+            }
+        }
 
         Ok(x)
-    }
-
-    /// Conv block: padded conv2d → ReLU → optional MaxPool(2,2).
-    fn conv_block(&self, input: &Tensor, idx: usize, maxpool: bool) -> candle_core::Result<Tensor> {
-        let x = self.convs[idx].forward(input)?;
-        let x = x.relu()?;
-        if maxpool {
-            x.max_pool2d((2, 2))
-        } else {
-            Ok(x)
-        }
-    }
-
-    /// Reshape S1(1x0)1,3: flatten the height and channel dims.
-    ///
-    /// PyTorch's Reshape layer with src_dim=H, high=H, low=C does:
-    ///   (N, C, H, W) → permute(0, 2, 1, 3) → reshape(N, H*C, 1, W)
-    ///
-    /// I.e. it swaps C and H axes, then flattens them into the channel dim.
-    /// E.g. (1, 64, 15, 107) → permute → (1, 15, 64, 107) → reshape → (1, 960, 1, 107)
-    fn reshape_s11x013(&self, input: &Tensor) -> candle_core::Result<Tensor> {
-        let (n, c, h, w) = input.dims4()?;
-        // Permute (N, C, H, W) → (N, H, C, W), then flatten H*C → channels.
-        input.permute((0, 2, 1, 3))?.contiguous()?.reshape((n, h * c, 1, w))
     }
 
     /// Run recognition on a single preprocessed line tensor.
@@ -267,6 +270,96 @@ impl RecognitionModel {
         let labels: Vec<i64> = decoded.iter().map(|(l, _, _, _)| *l).collect();
         Ok(self.codec.decode(&labels))
     }
+}
+
+// ── Build (parsed blocks → runtime layers) ──────────────────────────
+
+/// Walk a resolved [`RecogNetwork`] and build the runtime [`BlockLayer`] list,
+/// threading the running channel count so each layer's in-channels/input-dim is
+/// correct. Rejects blocks the forward pass doesn't implement (Ly/Ls LSTM,
+/// summarize, non-CTC output).
+fn build_layers(net: &RecogNetwork, vb: &VarBuilder) -> Result<Vec<BlockLayer>> {
+    let mut layers = Vec::with_capacity(net.blocks.len());
+    let mut channels = net.input_nhwc[3]; // running C
+    for block in &net.blocks {
+        match block {
+            VgslBlock::Conv {
+                name,
+                kernel,
+                out_channels,
+                ..
+            } => {
+                let conv = build_padded_conv(vb, name, channels, *out_channels, *kernel)?;
+                layers.push(BlockLayer::Conv(conv, block_activation(block)));
+                channels = *out_channels;
+            }
+            VgslBlock::Dropout { .. } => {
+                layers.push(BlockLayer::Dropout);
+            }
+            VgslBlock::MaxPool {
+                kernel, stride, ..
+            } => {
+                layers.push(BlockLayer::MaxPool(*kernel, *stride));
+            }
+            VgslBlock::Reshape { .. } => {
+                // No runtime layer — the collapse_h_into_c op runs at the first
+                // LSTM. We only validate here (resolve() already checked the
+                // supported shape).
+            }
+            VgslBlock::Lstm {
+                name,
+                hidden,
+                direction,
+                axis,
+                summarize,
+                input_dim,
+            } => {
+                if *axis == Axis::Y {
+                    bail!("LSTM y-axis (Ly) is not supported by the recognition forward pass");
+                }
+                if *summarize {
+                    bail!("summarizing LSTM (Ls) is not supported by the recognition forward pass");
+                }
+                // Only bidirectional LSTMs occur in recognition specs, but build
+                // the BiLstm either way (forward/reverse use the same weight layout).
+                let _ = direction;
+                let lstm = build_bilstm(vb, name, *input_dim, *hidden)?;
+                layers.push(BlockLayer::Lstm(lstm));
+                channels = match direction {
+                    Direction::Bidirectional => 2 * hidden,
+                    _ => *hidden,
+                };
+            }
+            VgslBlock::Output {
+                name, num_classes, ..
+            } => {
+                let lin = build_linear(vb, name, channels, *num_classes)?;
+                layers.push(BlockLayer::Linear(lin));
+            }
+        }
+    }
+    Ok(layers)
+}
+
+/// Extract the activation char from a Conv block (default 'l').
+fn block_activation(b: &VgslBlock) -> char {
+    match b {
+        VgslBlock::Conv { activation, .. } => *activation,
+        _ => 'l',
+    }
+}
+
+/// The `S1(1x0)1,3` reshape: flatten height into channels.
+///
+/// `(N, C, H, W) → permute(0, 2, 1, 3) → reshape(N, H*C, 1, W)` — swaps C and
+/// H axes, then flattens H*C into the channel dim. E.g.
+/// `(1, 64, 6, W) → (1, 6, 64, W) → (1, 384, 1, W)`.
+fn collapse_h_into_c(input: &Tensor) -> candle_core::Result<Tensor> {
+    let (n, c, h, w) = input.dims4()?;
+    input
+        .permute((0, 2, 1, 3))?
+        .contiguous()?
+        .reshape((n, h * c, 1, w))
 }
 
 // ── Builder helpers ──────────────────────────────────────────────────
@@ -322,4 +415,3 @@ fn build_linear(
     let bias = prefix.get(out_dim, "lin.bias")?;
     Ok(Linear::new(weight, Some(bias)))
 }
-
