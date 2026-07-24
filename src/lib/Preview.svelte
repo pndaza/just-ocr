@@ -172,6 +172,21 @@
       </div>
     {/if}
   </div>
+  {#if job && (job.status === "done" || job.status === "running")}
+    <div class="status-bar" role="status">
+      {#if job.status === "running"}
+        <span class="sb-pulse">Recognizing…</span>
+      {:else if parsed && parsed.segmentationMs != null && parsed.recognitionMs != null}
+        <span>Seg <span class="sb-num">{parsed.segmentationMs}</span> ms</span>
+        <span class="sb-sep">·</span>
+        <span>Recog <span class="sb-num">{parsed.recognitionMs}</span> ms</span>
+        <span class="sb-sep">·</span>
+        <span>Total <span class="sb-num">{job.elapsedMs}</span> ms</span>
+      {:else if job.status === "done"}
+        <span>Done in <span class="sb-num">{job.elapsedMs}</span> ms</span>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -268,6 +283,34 @@
     overflow: hidden;
     padding: 20px;
     background: var(--bg-inset);
+  }
+  /* ── Status bar ────────────────────────────────────────────────────────── */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .status-bar .sb-num {
+    color: var(--text-dim);
+    /* `font-variant-numeric` keeps digits the same width so the bar doesn't
+       jitter as values change across images. */
+    font-variant-numeric: tabular-nums;
+  }
+  .status-bar .sb-sep {
+    color: var(--text-faint);
+    opacity: 0.6;
+  }
+  .status-bar .sb-pulse {
+    color: var(--accent);
   }
   /* When zoomed in, allow panning and align to top-left so scroll origin is
      the image corner. */

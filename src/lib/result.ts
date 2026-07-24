@@ -22,6 +22,10 @@ export interface OcrResult {
   /** Mean recognizer confidence in [0,100]; -1 when unknown. */
   confidence: number;
   elapsedMs: number;
+  /** Per-stage timing (Myanmar/Kraken-segmented path only). Absent for
+   *  full-page Tesseract, which doesn't measure the stages separately. */
+  segmentationMs?: number;
+  recognitionMs?: number;
 }
 
 /** The line boxes for the preview overlay. */
