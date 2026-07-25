@@ -1,5 +1,7 @@
 # Just OCR
 
+> **100% vibe-coded** with [ZCode](https://z.ai) + GLM 5.2.
+
 A simple, fully offline OCR app. No internet connection needed, no system
 installs required — just download and run.
 
@@ -21,6 +23,20 @@ installs required — just download and run.
 For Burmese, Kraken handles layout segmentation (Tesseract's is poor for the
 script) and you can pick either engine for recognition. For everything else,
 Tesseract does both layout and recognition.
+
+## Accuracy
+
+Typical accuracy ranges on real-world input:
+
+- **Line segmentation:** 50–95%
+- **Text recognition:** 95–99%
+
+Recognition accuracy depends heavily on the source image and on line
+segmentation. A clean, well-lit, high-resolution page with clear line
+separations gets the high end; skewed, low-contrast, or densely packed text
+drops toward the low end. Segmentation failures feed straight into
+recognition — a missed or split line cannot be recognized correctly, no
+matter how good the recognizer is.
 
 ## Download
 
