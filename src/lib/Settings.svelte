@@ -57,6 +57,13 @@
             role="radio"
             aria-checked={theme === "dark"}
           >Dark</button>
+          <button
+            class="seg-btn"
+            class:active={theme === "system"}
+            onclick={() => onchangetheme("system")}
+            role="radio"
+            aria-checked={theme === "system"}
+          >System</button>
         </div>
       </section>
 

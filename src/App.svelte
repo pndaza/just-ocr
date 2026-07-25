@@ -30,7 +30,7 @@
     type ReadFile,
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
-  import { currentTheme, setTheme, type Theme } from "./theme";
+  import { currentTheme, setTheme, resolveTheme, type Theme } from "./theme";
 
   let languages = $state<string[]>(["eng"]);
   let theme = $state<Theme>(currentTheme());
@@ -40,6 +40,22 @@
   function changeTheme(t: Theme) {
     theme = setTheme(t);
   }
+
+  // While the preference is "system", track OS theme changes live so flipping
+  // the OS theme at runtime re-resolves the app without a reload. Registered
+  // only in system mode; switching to explicit light/dark (or unmounting)
+  // tears the listener down via the returned cleanup. The `theme === "system"`
+  // read at the top is what makes this re-run when the preference changes.
+  $effect(() => {
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      document.documentElement.dataset.theme = resolveTheme("system");
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  });
 
   let opts = $state<OcrOpts>({
     engine: lastEngine(),

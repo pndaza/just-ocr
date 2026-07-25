@@ -5,17 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>just-ocr</title>
     <script>
-      // Apply the saved (or system) theme before paint to avoid a flash.
+      // Apply the saved (or system) theme before paint to avoid a flash. The
+      // stored value may be "light" | "dark" | "system"; we resolve "system"
+      // (and a missing value, which defaults to "system") to a concrete
+      // light/dark before writing data-theme, since the CSS only knows those
+      // two. Mirrors the resolution in src/theme.ts — keep them in sync.
       (function () {
         try {
           var key = "just-ocr:theme";
           var saved = localStorage.getItem(key);
-          var theme =
-            saved ||
-            (window.matchMedia("(prefers-color-scheme: light)").matches
-              ? "light"
-              : "dark");
-          document.documentElement.dataset.theme = theme;
+          var resolved =
+            saved === "light" || saved === "dark"
+              ? saved
+              : window.matchMedia("(prefers-color-scheme: light)").matches
+                ? "light"
+                : "dark";
+          document.documentElement.dataset.theme = resolved;
         } catch (e) {
           document.documentElement.dataset.theme = "dark";
         }
