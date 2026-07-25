@@ -8,6 +8,9 @@
     running: boolean;
     pending: number;
     doneCount: number;
+    /** Current/total counter shown beside "Processing" during a batch run.
+     *  Null for single runs (Run Current) so no counter appears. */
+    batchProgress: { current: number; total: number } | null;
     canRunCurrent: boolean;
     hasSelection: boolean;
     showStop: boolean;
@@ -25,6 +28,7 @@
     running,
     pending,
     doneCount,
+    batchProgress,
     canRunCurrent,
     hasSelection,
     showStop,
@@ -152,7 +156,10 @@
   <div class="spacer"></div>
 
   {#if running}
-    <span class="progress"><span class="spin" aria-hidden="true"></span> Processing</span>
+    <span class="progress">
+      <span class="spin" aria-hidden="true"></span>
+      Processing{#if batchProgress} <span class="prog-count">{batchProgress.current}/{batchProgress.total}</span>{/if}
+    </span>
   {/if}
 
   {#if showStop}
@@ -294,6 +301,11 @@
     font-size: 12px;
     color: var(--accent);
     font-family: var(--mono);
+  }
+  /* tabular-nums keeps the current/total digits the same width so the
+     indicator doesn't shift as the counter ticks. */
+  .progress .prog-count {
+    font-variant-numeric: tabular-nums;
   }
   .btn {
     font-size: 12px;
