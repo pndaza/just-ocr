@@ -75,6 +75,9 @@
   // Set when the user clicks Stop; checked between jobs so the queue halts
   // after the currently-running OCR finishes.
   let cancelRequested = $state(false);
+  // Current/total counter shown beside "Processing" during a batch. Set only
+  // while `batchRun` is true; null otherwise (single-run shows no counter).
+  let batchProgress = $state<{ current: number; total: number } | null>(null);
 
   // ── PDF processing (in-app dialog with progress) ───────────────────────────
   // promptPdf() parks a promise that resolves to the per-page images (or null
@@ -372,14 +375,21 @@
     running = true;
     batchRun = true;
     cancelRequested = false;
+    const total = jobs.length;
+    let current = 0;
     for (const job of jobs) {
       if (cancelRequested) break;
       if (job.status === "running") continue;
+      // Tick before processJob so the user sees 1/12 the moment the first page
+      // starts — not 0/12 while work is already happening.
+      current += 1;
+      batchProgress = { current, total };
       await processJob(job);
     }
     batchRun = false;
     running = false;
     cancelRequested = false;
+    batchProgress = null;
   }
 
   /** Request the batch stop. The in-flight OCR finishes; queued jobs are skipped. */
@@ -401,6 +411,7 @@
     {running}
     {pending}
     {doneCount}
+    batchProgress={batchProgress}
     canRunCurrent={canRunCurrent}
     hasSelection={!!selected}
     showStop={running && batchRun}
