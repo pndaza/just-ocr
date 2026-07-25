@@ -63,8 +63,13 @@ pub fn preprocess_line(
     let gray = image.to_luma8();
 
     // 2. Optional binarization (before resize so Lanczos re-anti-aliases the
-    //    binary edges, matching the 1-bit training distribution).
+    //    binary edges, matching the 1-bit training distribution). Skip if the
+    //    line is already binary (e.g. a 1-bit source PNG, or a page that came
+    //    through PDF "B&W" extraction): re-running Otsu/Sauvola on {0,255}
+    //    data is a no-op at best and degenerate (Sauvola's local variance
+    //    collapses in uniform regions) at worst.
     let gray = match binarize {
+        Some(_) if is_binary(&gray) => gray,
         Some(Binarization::Otsu) => binarize_otsu(&gray),
         Some(Binarization::Sauvola) => binarize_sauvola(&gray),
         None => gray,
@@ -237,6 +242,18 @@ fn binarize_sauvola_with(image: &GrayImage, whsize: u32, factor: f32) -> GrayIma
     })
 }
 
+/// True iff every pixel is a pure binary value (0 or 255) — i.e. the image
+/// is already binarized and running Otsu/Sauvola again would be wasted work
+/// (and, for Sauvola, degenerate: local variance collapses in uniform
+/// regions). Used to short-circuit re-binarization of 1-bit source data.
+///
+/// The `image` crate has no 1-bit variant: a 1-bit source PNG is upsampled
+/// to 8-bit luma (values 0 and 255) on decode, so the original bit-depth is
+/// gone by the time we see it — only a content check like this can detect it.
+fn is_binary(image: &GrayImage) -> bool {
+    image.iter().all(|&p| p == 0 || p == 255)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +340,75 @@ mod tests {
         let out = binarize_sauvola(&img);
         // All-bright input → all background.
         assert!(out.iter().all(|&p| p == 255));
+    }
+
+    #[test]
+    fn test_is_binary_all_black() {
+        let img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([0]));
+        assert!(is_binary(&img));
+    }
+
+    #[test]
+    fn test_is_binary_all_white() {
+        let img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([255]));
+        assert!(is_binary(&img));
+    }
+
+    #[test]
+    fn test_is_binary_mixed_binary_values() {
+        // Both 0 and 255 present — still binary. (A naive "all-same-value"
+        // check would wrongly reject this; a 1-bit source typically has both.)
+        let mut img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([255]));
+        img.put_pixel(0, 0, Luma([0]));
+        img.put_pixel(3, 3, Luma([0]));
+        assert!(is_binary(&img));
+    }
+
+    #[test]
+    fn test_is_binary_rejects_gray_pixel() {
+        // Any gray value disqualifies the image — it's not in the 1-bit
+        // training distribution, so binarization should run.
+        let mut img: GrayImage = ImageBuffer::from_pixel(4, 4, Luma([255]));
+        img.put_pixel(2, 2, Luma([128]));
+        assert!(!is_binary(&img));
+    }
+
+    #[test]
+    fn test_preprocess_line_skips_binarize_on_binary_input() {
+        // Feature guard: when the input is already binary, the `binarize`
+        // option must have NO effect on the output tensor — i.e. passing
+        // `Some(Otsu)` produces the same tensor as `None`. This is the
+        // regression test for the skip-binary-input behavior.
+        //
+        // Build a small binary image (mix of ink and background), wrap as a
+        // DynamicImage, and compare the two preprocess_line outputs.
+        let (w, h) = (16u32, 4u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for x in 2..6 {
+            img.put_pixel(x, 1, Luma([0]));
+            img.put_pixel(x, 2, Luma([0]));
+        }
+        let dyn_img = DynamicImage::ImageLuma8(img);
+
+        let tensor_none =
+            preprocess_line(&dyn_img, 4, 2, None, false).expect("None path failed");
+        let tensor_otsu = preprocess_line(&dyn_img, 4, 2, Some(Binarization::Otsu), false)
+            .expect("Otsu path failed");
+
+        // Same shape (sanity) and identical values → binarize was skipped.
+        assert_eq!(tensor_none.shape(), tensor_otsu.shape(), "shapes diverged");
+        let none_vals = tensor_none.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let otsu_vals = tensor_otsu.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        assert_eq!(
+            none_vals.len(),
+            otsu_vals.len(),
+            "value counts diverged (should be identical)"
+        );
+        for (i, (a, b)) in none_vals.iter().zip(otsu_vals.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "pixel {i} differs: None={a}, Otsu={b} — binarize was NOT skipped on binary input"
+            );
+        }
     }
 }
