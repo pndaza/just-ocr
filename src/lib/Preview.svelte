@@ -73,6 +73,65 @@
     zoom = null;
   }
 
+  // ── Wheel/pinch zoom ───────────────────────────────────────────────────────
+  // Ctrl/Cmd + wheel zooms; plain wheel still pans (the existing overflow:auto
+  // behavior). Trackpad pinch works automatically: macOS synthesizes it as
+  // ctrlKey + wheel, so the one ctrlKey branch catches both pinch and the
+  // explicit Ctrl+scroll gesture from a mouse.
+  //
+  // Zoom is anchored at the cursor: the image-coordinate point under the
+  // pointer stays put as the scale changes (standard image-viewer behavior).
+  // Without anchoring, wheel-zoom always recenters to top-left and feels
+  // broken.
+  //
+  // `preventDefault` is required so the webview doesn't also do its native
+  // page-zoom (Cmd+plus/minus) on the gesture. Svelte's on:wheel may be
+  // passive, so we attach a non-passive listener via the wheelZoom action
+  // below.
+  const WHEEL_K = 0.005; // deltaY → log-scale delta; tuned for trackpad feel
+  const ZOOM_MIN = 0.1;
+  const ZOOM_MAX = 10;
+
+  function wheelZoom(node: HTMLElement) {
+    const handler = (e: WheelEvent) => {
+      if (!natW || !natH) return;
+      if (!(e.ctrlKey || e.metaKey)) return; // plain wheel = pan (overflow:auto)
+      e.preventDefault();
+      const stage = node;
+      // Hoist rect once — getBoundingClientRect is layout-flush and could
+      // return different values if called across a style change.
+      const rect = stage.getBoundingClientRect();
+      const cursorLeft = e.clientX - rect.left;
+      const cursorTop = e.clientY - rect.top;
+      // Current scale: explicit `zoom`, or fitZoom() when in fit mode (so the
+      // first wheel-zoom from fit is continuous, not a jump).
+      const startScale = zoom ?? fitZoom();
+      // Image-pixel coord under the cursor BEFORE the zoom.
+      const imgX = (stage.scrollLeft + cursorLeft) / startScale;
+      const imgY = (stage.scrollTop + cursorTop) / startScale;
+      // Multiplicative scaling: exp(-deltaY * k) gives smooth trackpad pinch.
+      // Pinch out (deltaY negative) → zoom in.
+      const factor = Math.exp(-e.deltaY * WHEEL_K);
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, startScale * factor));
+      zoom = next;
+      // Defer the scroll restore until after the DOM has applied the new
+      // width/height (Svelte updates the attributes asynchronously). Without
+      // rAF, the browser clamps scrollLeft/Top to the OLD (smaller) scrollable
+      // range and the cursor anchor drifts.
+      requestAnimationFrame(() => {
+        stage.scrollLeft = imgX * next - cursorLeft;
+        stage.scrollTop = imgY * next - cursorTop;
+      });
+    };
+    // passive:false so preventDefault works (blocks the webview's native zoom).
+    node.addEventListener("wheel", handler, { passive: false });
+    return {
+      destroy() {
+        node.removeEventListener("wheel", handler);
+      },
+    };
+  }
+
   // ── Drag-to-pan (zoomed only) ──────────────────────────────────────────────
   // The zoomed stage already pans via scroll-wheel (overflow:auto). Drag-pan
   // reuses the SAME scroll offset — adjusting scrollTop/scrollLeft on pointer
@@ -198,6 +257,7 @@
     class="stage"
     class:zoomed={zoom !== null}
     class:panning={isPanning}
+    use:wheelZoom
     onpointerdown={onPanStart}
     onpointermove={onPanMove}
     onpointerup={onPanEnd}
