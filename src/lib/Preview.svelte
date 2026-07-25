@@ -72,6 +72,77 @@
   function resetZoom() {
     zoom = null;
   }
+
+  // ── Drag-to-pan (zoomed only) ──────────────────────────────────────────────
+  // The zoomed stage already pans via scroll-wheel (overflow:auto). Drag-pan
+  // reuses the SAME scroll offset — adjusting scrollTop/scrollLeft on pointer
+  // move — so the two mechanisms share one coordinate system and can't fight
+  // each other. The SVG (image + boxes) lives inside the stage, so panning
+  // moves both together; they cannot drift apart.
+  //
+  // NOTE on Tauri native drag-drop: the app uses Tauri's onDragDropEvent
+  // (App.svelte) for OS-level file drops, which captures pointer motion at the
+  // webview boundary. We deliberately do NOT use setPointerCapture here — it
+  // conflicts with that drop handling and can leave pointerup swallowed,
+  // trapping the cursor in 'grabbing'. Instead we end the pan on pointerup,
+  // pointercancel, AND pointerleave so a hijacked gesture can't strand state.
+  let isPanning = $state(false);
+  // Pan-origin refs are NOT reactive — they don't drive render, so plain lets.
+  let panStart: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null = null;
+  // Movement below this many pixels doesn't count as a pan — prevents tiny
+  // accidental drags from engaging and lets future click targets work.
+  const PAN_THRESHOLD = 3;
+
+  function onPanStart(e: PointerEvent) {
+    // Only pan when zoomed (overflow:auto is what makes scroll offset meaningful).
+    if (zoom === null) return;
+    // Only the primary mouse button initiates a pan. Without this check, a
+    // right-click (context menu) or middle-click could leave panStart set
+    // without a matching release.
+    if (e.button !== 0) return;
+    // If a pan is already in flight (e.g. a second finger touched mid-drag),
+    // ignore the new pointer — the originating pointer owns the pan until it
+    // lifts. Without this, panStart would be overwritten and the original
+    // pointer's pointerup would end the pan prematurely.
+    if (panStart !== null) return;
+    const stage = e.currentTarget as HTMLElement;
+    panStart = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: stage.scrollLeft,
+      scrollTop: stage.scrollTop,
+    };
+  }
+
+  function onPanMove(e: PointerEvent) {
+    if (!panStart) return;
+    const stage = e.currentTarget as HTMLElement;
+    const dx = e.clientX - panStart.startX;
+    const dy = e.clientY - panStart.startY;
+    // Don't flip to "panning" until the cursor moves past the threshold, so a
+    // pure click (no drag) leaves isPanning false.
+    if (!isPanning && Math.hypot(dx, dy) > PAN_THRESHOLD) isPanning = true;
+    if (!isPanning) return;
+    stage.scrollLeft = panStart.scrollLeft - dx;
+    stage.scrollTop = panStart.scrollTop - dy;
+  }
+
+  function onPanEnd(e: PointerEvent) {
+    if (!panStart) return;
+    // Only the originating pointer ends the pan; a stray pointerup from a
+    // second finger must not abort an in-flight drag.
+    if (panStart.pointerId !== e.pointerId) return;
+    panStart = null;
+    isPanning = false;
+  }
+
   // Rough estimate of the fit zoom so the in/out buttons step sensibly from
   // the current view. Good enough for picking the next step; exact fit is
   // handled by CSS when zoom is null.
@@ -119,7 +190,20 @@
       </div>
     {/if}
   </div>
-  <div id="preview-stage" class="stage" class:zoomed={zoom !== null}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -- the stage is a
+       canvas-like region; pointer handlers implement drag-to-pan when zoomed,
+       not an interactive widget. Role=application would hurt screen-reader UX. -->
+  <div
+    id="preview-stage"
+    class="stage"
+    class:zoomed={zoom !== null}
+    class:panning={isPanning}
+    onpointerdown={onPanStart}
+    onpointermove={onPanMove}
+    onpointerup={onPanEnd}
+    onpointercancel={onPanEnd}
+    onpointerleave={onPanEnd}
+  >
     {#if showBoxes && parsed}
       <!-- Image + boxes in one SVG: they cannot drift apart. -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -164,6 +248,7 @@
         width={renderW ?? undefined}
         height={renderH ?? undefined}
         onload={onImgLoad}
+        draggable="false"
       />
     {:else}
       <div class="placeholder">
@@ -313,17 +398,35 @@
     color: var(--accent);
   }
   /* When zoomed in, allow panning and align to top-left so scroll origin is
-     the image corner. */
+     the image corner. Cursor is 'grab' here (and 'grabbing' while a drag is
+     active — see the .panning rule) to signal that the image can be dragged.
+     touch-action: none stops the browser from hijacking touch drags as a
+     page-scroll/zoom gesture that would fight our pointer handlers. */
   .stage.zoomed {
     overflow: auto;
     align-items: flex-start;
     justify-content: flex-start;
+    cursor: grab;
+    touch-action: none;
+  }
+  .stage.zoomed.panning {
+    cursor: grabbing;
+    /* Prevent text/box selection while dragging. */
+    user-select: none;
   }
   .stage img,
   .ocr-canvas {
     border-radius: 4px;
     display: block;
     flex-shrink: 0;
+    /* Images are draggable=true by default in HTML — a press-and-drag on the
+       preview image starts a native ghost-image drag that preempts pointer
+       events (so pan never engages) in BOTH fit and zoomed modes. Disable it
+       via attribute (draggable=false) on the <img> and via CSS here for the
+       SVG <image>. -webkit-user-drag covers WebKit/Chromium; the standard
+       alias user-drag is included for forward-compat. */
+    -webkit-user-drag: none;
+    user-drag: none;
   }
   /* "fit" mode: CSS caps the element to the stage, preserving aspect ratio. */
   .stage img.fit {
