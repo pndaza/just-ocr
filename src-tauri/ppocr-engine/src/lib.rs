@@ -16,9 +16,41 @@ mod kernels;
 mod model;
 mod ops;
 mod postprocess;
+mod preprocess;
 mod tensor;
 mod weights;
 
 pub use model::{CpuOptions, Detector};
 pub use postprocess::{Detection, DetectorTransform, Point};
 pub use tensor::Tensor;
+
+/// Interleaved row-major RGB8 image view, built from the host's `DynamicImage`.
+/// Confines the `image` crate to this type so the preprocess kernels operate
+/// on a plain byte slice.
+pub struct RgbImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl RgbImage {
+    /// Build from the host's `image::DynamicImage` (converts to RGB8).
+    pub fn from_dynamic(img: &image::DynamicImage) -> Self {
+        let rgb = img.to_rgb8();
+        Self {
+            width: rgb.width(),
+            height: rgb.height(),
+            pixels: rgb.into_raw(),
+        }
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+}
