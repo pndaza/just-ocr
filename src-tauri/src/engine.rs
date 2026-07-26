@@ -483,7 +483,7 @@ pub fn polygon_bbox(
 
 #[cfg(test)]
 mod tests {
-    use super::{polygon_bbox, LineBox, BUNDLED_REC, BUNDLED_SEG};
+    use super::{polygon_bbox, LineBox, BUNDLED_PPOCR_DET, BUNDLED_REC, BUNDLED_SEG};
 
     #[test]
     fn polygon_bbox_basic() {
@@ -523,6 +523,20 @@ mod tests {
             engine.recognizer().height > 0,
             "recognizer height should be parsed from the VGSL spec"
         );
+    }
+
+    /// Confirm the bundled PP-OCR tiny-det bytes are non-empty and load into
+    /// a `Detector`. Mirrors `bundled_models_load_from_buffers` for kraken.
+    #[test]
+    fn bundled_ppocr_det_loads_from_buffer() {
+        assert!(
+            super::BUNDLED_PPOCR_DET.len() > 1_000_000,
+            "ppocr det too small: {}",
+            super::BUNDLED_PPOCR_DET.len()
+        );
+        let det = ppocr_engine::Detector::load_from_buffer(super::BUNDLED_PPOCR_DET)
+            .expect("bundled ppocr det loads from buffer");
+        let _ = det;
     }
 
     #[test]
