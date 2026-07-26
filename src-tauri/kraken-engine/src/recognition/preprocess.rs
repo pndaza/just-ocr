@@ -1,6 +1,6 @@
 //! Line image preprocessing for recognition.
 //!
-//! Port of kraken's `ImageInputTransforms` for the input spec `(1, 120, 0, 1)`:
+//! Port of kraken's `ImageInputTransforms` for the input spec `(1, 48, 0, 1)`:
 //!   1. Convert to grayscale ('L')
 //!   2. (Optional) Binarize — for models trained on 1-bit images
 //!   3. Normalize to target height:
@@ -268,14 +268,23 @@ mod tests {
             return;
         }
         let img = image::open(path).unwrap();
-        let tensor = preprocess_line(&img, 120, 16, None, false).unwrap();
+        // `preprocess_line` is generic over target height/padding — we pass
+        // arbitrary values and assert the output shape tracks them. The
+        // bundled bur_recog uses height=48 (read dynamically from its VGSL
+        // spec by the loader) and padding=16 (currently hardcoded in
+        // `recognition/model.rs::build`), but tying this test to those
+        // would just make it brittle on a model swap. The invariant under
+        // test is "output height == target_height", not "height is 48".
+        let target_height = 48;
+        let padding = 16;
+        let tensor = preprocess_line(&img, target_height, padding, None, false).unwrap();
         let dims = tensor.dims();
         assert_eq!(dims.len(), 4);
         assert_eq!(dims[0], 1); // batch
         assert_eq!(dims[1], 1); // channels
-        assert_eq!(dims[2], 120); // height
+        assert_eq!(dims[2], target_height); // height tracks the argument
         // Width should be > 0
-        assert!(dims[3] > 32); // at least 2*padding
+        assert!(dims[3] > 2 * padding); // at least 2*padding
     }
 
     #[test]

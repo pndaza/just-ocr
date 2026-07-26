@@ -442,7 +442,7 @@ mod tests {
         // hardcoded — the parser is the source of truth, exercised directly in
         // recognition::meta::tests). We only assert it's populated and sane so
         // this test doesn't spuriously fail when the bundled model is swapped
-        // (e.g. bur_recog is 120, other models differ).
+        // (e.g. bur_recog is 48, other models differ).
         assert!(
             engine.recognizer().height > 0,
             "recognizer height should be parsed from the VGSL spec"
