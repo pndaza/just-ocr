@@ -16,10 +16,6 @@ impl KrakenSegmenter {
     pub fn new(engine: std::sync::Arc<kraken_engine::Engine>) -> Self {
         Self { engine }
     }
-    /// Borrow the underlying engine (for recog when seg=ppocr but recog=kraken).
-    pub fn engine(&self) -> &kraken_engine::Engine {
-        &self.engine
-    }
 }
 
 impl Segmenter for KrakenSegmenter {
@@ -57,7 +53,8 @@ fn close_polygon(poly: &[(f64, f64)]) -> Vec<(f64, f64)> {
 /// Synthesize a baseline (midline) for a 4-corner quad by averaging the top
 /// and bottom edges. Returns `n` samples along the text axis (left → right).
 ///
-/// Assumes the quad is ordered counter-clockwise from the top-left corner:
+/// Assumes the quad is ordered clockwise (in image coordinates, where y
+///   increases downward) from the top-left corner:
 ///   `[top_left, top_right, bottom_right, bottom_left]` — the order PaddleOCR's
 ///   DB postprocess produces (verified in ppocr-rs `fit_rotated_box`).
 /// If the quad is rotated, the midline tracks the rotation.
@@ -105,7 +102,7 @@ impl Segmenter for PPOcrSegmenter {
 }
 
 /// Convert a PP-OCR `Detection` (4-corner quad) to a `DetectedLine`. Returns
-/// `None` if the quad is degenerate (wrong corner count).
+/// `None` if any quad coordinate is non-finite (corrupted detection).
 fn detection_to_line(d: &Detection) -> Option<DetectedLine> {
     let quad: [(f64, f64); 4] = [
         (d.polygon[0].0 as f64, d.polygon[0].1 as f64),
@@ -113,7 +110,14 @@ fn detection_to_line(d: &Detection) -> Option<DetectedLine> {
         (d.polygon[2].0 as f64, d.polygon[2].1 as f64),
         (d.polygon[3].0 as f64, d.polygon[3].1 as f64),
     ];
+    // Reject corrupted detections with non-finite coords — they would produce
+    // garbage bboxes downstream (NaN/inf → invalid `as u32` casts in polygon_bbox).
+    if !quad.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        return None;
+    }
     let boundary = close_polygon(&quad);
+    // 8 samples: matches typical Kraken baseline polyline resolution; enough for
+    // dewarp without over-sampling.
     let baseline = synth_midline(&quad, 8);
     Some(DetectedLine { baseline, boundary })
 }
