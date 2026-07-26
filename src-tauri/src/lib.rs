@@ -9,6 +9,7 @@ mod engine;
 mod languages;
 mod pdf;
 mod segmentation;
+mod segmenter_adapters;
 mod tesseract_line;
 mod tesseract_page;
 
