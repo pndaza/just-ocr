@@ -38,7 +38,7 @@ impl Segmenter for KrakenSegmenter {
     }
 }
 
-use ppocr_engine::{Detection, Point};
+use ppocr_engine::Detection;
 
 /// Close a polygon by repeating the first point at the end (if not already
 /// closed). Matches Kraken's convention so `polygon_bbox` and point-in-polygon

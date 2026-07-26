@@ -233,18 +233,29 @@ fn run_myanmar(
     h: u32,
     started: Instant,
 ) -> Result<OcrResult, String> {
-    let engine = kraken_engine(app)?;
+    let segmenter = resolve_segmenter(app, opts)?;
+    let seg_name = segmenter.name();
 
     let t = Instant::now();
-    let lines = engine
+    let lines = segmenter
         .segment(img)
         .map_err(|e| format!("Segmentation failed: {e}"))?;
     let segmentation_ms = t.elapsed().as_millis() as u64;
     log::info!(
-        "[ocr] segmentation (kraken): {:.0} ms ({} lines)",
+        "[ocr] segmentation ({}): {:.0} ms ({} lines)",
+        seg_name,
         segmentation_ms as f64,
         lines.len()
     );
+
+    // If recog is Kraken, we need a Kraken engine handle regardless of which
+    // segmenter produced the lines. Lazy-load it (shares the OnceCell with
+    // KrakenSegmenter — no double-load).
+    let kraken_rec_engine: Option<&kraken_engine::Engine> = if opts.engine == "kraken" {
+        Some(kraken_engine(app)?.as_ref())
+    } else {
+        None
+    };
 
     // Recognize each detected line. The Kraken recognizer (pure candle
     // tensors under `Arc<RwLock<Storage>>`) is `Send + Sync` and runs on the
@@ -267,7 +278,7 @@ fn run_myanmar(
     // Build the (LineBox, conf) pairs from each non-degenerate line. The
     // closure captures shared refs to img + engine + (for tesseract) the app
     // handle and opts — all Send + Sync.
-    let recognize = |line: &kraken_engine::BaselineLine| -> Result<Option<(LineBox, i32)>, String> {
+    let recognize = |line: &crate::segmentation::DetectedLine| -> Result<Option<(LineBox, i32)>, String> {
         if line.boundary.len() < 3 {
             return Ok(None);
         }
@@ -293,7 +304,9 @@ fn run_myanmar(
             // the Stage-2 centerline normalizer and LSTM consume. Falls back
             // to a masked bbox crop inside the engine if the dewarp fails.
             "kraken" => {
-                let t = engine
+                // Safe unwrap: kraken_rec_engine is Some iff engine_kind == "kraken".
+                let eng = kraken_rec_engine.expect("kraken engine loaded for kraken recog");
+                let t = eng
                     .recognize_line_dewarped(img, &line.baseline, &line.boundary, binarize)
                     .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
