@@ -93,6 +93,17 @@ crate has zero dependency on the host or on `kraken-engine`. The
 `Segmenter` trait lives in the **host** crate so neither vendored crate knows
 about the other or about `DetectedLine`.
 
+**Note on `load_from_buffer` (new code, not vendored):** upstream ppocr-rs
+only has `Detector::load(dir_path, ModelSize, CpuOptions)` — it reads
+`model.safetensors` + config files from a directory at runtime. The vendored
+crate replaces this with `Detector::load_from_buffer(bytes) -> Result<Self>`
+that pins `ModelSize::Tiny` and constructs `Weights` directly from the byte
+buffer (a new `Weights::from_bytes(&[u8])` variant alongside the existing
+`Weights::load(path)`). This requires no config files on disk — the tiny-det
+topology (channels `[32,48,64,160]`, RepLkFpn k=5, head in=64) is hard-coded
+in the `ModelSize::Tiny` arm of `Detector::load`, so we hard-code that arm
+and drop the others.
+
 ### The `Segmenter` trait and `DetectedLine`
 
 `DetectedLine` is a new host-side type carrying only the two fields the
@@ -283,7 +294,9 @@ struct; the new field rides along.
 | `src/cpu/weights.rs` | `src/weights.rs` | SafeTensors loader + VarBuilder. |
 | `src/preprocess.rs` + `src/preprocess/kernels.rs` | `src/preprocess.rs` | Resize + BGR + normalize + 32-align. |
 | `src/pixels.rs` | `src/pixels.rs` | Minimal `RgbImage` (adapt to host's `DynamicImage` at the boundary). |
-| `src/ocr.rs` (subset) | `src/postprocess.rs` | Only `extract_detections`, `DetectorTransform`, `Detection`/`Point`, `DetectorPostprocessOptions`, and the DB helpers (`collect_component`, `fit_rotated_box`, unclip). Drop CTC decode, `OcrEngine`, `OcrRuntime`, `load_dictionary`. |
+| `src/ocr.rs` (subset) | `src/postprocess.rs` | The detector postprocess chain: `DetectorTransform` (33–75), `DetectorInputPlan` (79–126), `default_detector_ratio`/`aligned_dimension` (173–195), `Point` (222), `Detection` (225–230), `DetectorPostprocessOptions` (231–268), `extract_detections` (723–791), `detector_output_shape` (967–979), `validate_probability` (993–999), `Component`+`collect_component` (1000–1055), `fit_rotated_box` (1056–1129), `sort_detections`/`polygon_center`/`polygon_aspect_ratio` (1130–1154), `row_probability`/`argmax` (1168–1188), Point helpers (1208–1229), and the `DETECTOR_LIMIT_SIDE`/`DEFAULT_DETECTOR_MAX_SIDE`/`DETECTOR_MAX_SIDE` constants (24–26). Drop all recognizer/CTC/engine code. |
+
+**Note on the postprocess dependency chain (verified by reading source):** the vendored crate must include `DetectorInputPlan` + `prepare_detector` + `DetectorTransform` together — they're a unit. `prepare_detector` produces the model input + the transform; `extract_detections` consumes the model output + the same transform to map quads back to source coords. The detector mean/std constants (`[0.485,0.456,0.406]`/`[0.229,0.224,0.225]`) are baked into `preprocess.rs` (lines 16–18); the side limits (`736`/`4000`) live in `ocr.rs` (lines 24–26). All three move together. |
 
 **Cut entirely:**
 
