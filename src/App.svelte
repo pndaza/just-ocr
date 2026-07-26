@@ -23,6 +23,8 @@
     saveEngine,
     lastBinarize,
     saveBinarize,
+    lastSegmenter,
+    saveSegmenter,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -63,6 +65,7 @@
     psm: 3,
     whitelist: null,
     binarize: lastBinarize(),
+    segmenter: lastSegmenter(),
   });
 
   // Remember the chosen engine + language so they are pre-selected on the next
@@ -77,6 +80,11 @@
   // Binarize is a persisted global preference (chosen in Settings).
   $effect(() => {
     saveBinarize(opts.binarize);
+  });
+  // Segmenter (Myanmar line-box detector) is persisted so the chosen Seg
+  // dropdown value is sticky across launches.
+  $effect(() => {
+    saveSegmenter(opts.segmenter);
   });
 
   let jobs = $state<Job[]>([]);
