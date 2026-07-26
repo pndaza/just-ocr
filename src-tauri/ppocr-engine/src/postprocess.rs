@@ -455,3 +455,26 @@ fn point_coordinates(point: Point) -> [f32; 2] {
 fn distance(left: Point, right: Point) -> f32 {
     ((left.0 - right.0).powi(2) + (left.1 - right.1).powi(2)).sqrt()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_aligns_to_32_and_maps_back() {
+        // 1920x1080 source → resized with max_side=736.
+        let plan = DetectorInputPlan::new(1920, 1080, Some(736)).expect("plan");
+        // 1920*736/1920 = 736 (longest), 1080*736/1920 = 414 → round to 416 (32-multiple).
+        assert_eq!(plan.input_width(), 736);
+        assert_eq!(plan.input_height(), 416);
+        let t = plan.transform();
+        assert!((t.map_x_to_source(736.0) - 1920.0).abs() < 1e-3);
+        assert!((t.map_y_to_source(416.0) - 1080.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn plan_rejects_zero_dimensions() {
+        assert!(DetectorInputPlan::new(0, 100, Some(736)).is_err());
+        assert!(DetectorInputPlan::new(100, 0, Some(736)).is_err());
+    }
+}
