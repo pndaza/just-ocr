@@ -30,8 +30,14 @@ src-tauri/                Rust backend (the app crate `just_ocr_lib`)
   src/pdf.rs              PDF → PNG (extract or render mode)
   src/tesseract_page.rs   non-Myanmar full-page Tesseract path
   src/tesseract_line.rs   per-line Tesseract (Myanmar + Kraken seg)
+  src/segmentation.rs     Segmenter trait + DetectedLine (engine-agnostic)
+  src/segmenter_adapters.rs   KrakenSegmenter + PPOcrSegmenter adapters
   kraken-engine/          vendored Kraken OCR engine (separate crate)
+  ppocr-engine/           vendored PP-OCRv6 tiny detector (separate crate,
+                          NOT a workspace member — same opt-level trick as
+                          kraken-engine). Detector + DB postprocess only.
 kraken-models/            Burmese .safetensors (Git LFS — see below)
+ppocr-models/             PP-OCRv6 tiny-det .safetensors (Git LFS)
 .github/workflows/release.yml   tag-triggered multi-platform release CI
 docs/                     design notes + superpowers plans/specs
 ```
@@ -53,6 +59,7 @@ npm run test -- --watch   # vitest watch
 cargo test                # Rust unit/integration tests
 cargo test -- --nocapture # with timing/log output
 cargo run --example smoke_kraken   # kraken smoke test on a fixture
+cargo run --example smoke_ppocr    # ppocr detector smoke test on a fixture
 cargo run --example bench_kraken   # kraken benchmark
 ```
 
@@ -76,6 +83,12 @@ must be added there **and** wrapped in `src/lib/ocr.ts`. Conventions:
 **OCR pipeline dispatch** (`engine.rs::run_ocr`) is language-driven:
 - `language == "mya"` → Kraken segmentation (always, regardless of recognizer
   choice) → per-line recognition by `engine` ("kraken" | "tesseract").
+- `language == "mya"` + `segmenter == "ppocr"` → PP-OCR segmentation (tiny-det)
+  → per-line recognition by `engine` ("kraken" | "tesseract"). PP-OCR's quads
+  are converted to closed boundary polygons + a synthesized baseline; Kraken
+  recog dewarp falls back to a masked bbox crop if the synth baseline fails.
+  Both engines sit behind a `Segmenter` trait (`src/segmentation.rs`) so
+  `run_myanmar` holds either via `Arc<dyn Segmenter>`.
 - any other language → full-page Tesseract with the user's `psm`.
 
 **Threading.** Heavy OCR/PDF work runs on `spawn_blocking` (never block the UI
@@ -83,11 +96,14 @@ thread). Kraken recognition is `Send + Sync` → parallelized over rayon.
 **libtesseract is NOT thread-safe across concurrent calls** → the Tesseract
 recognizer path stays serial. Do not parallelize Tesseract calls.
 
-**Models.** Bundled Kraken models (`BUNDLED_SEG`/`BUNDLED_REC`) are embedded
-via `include_bytes!` with paths relative to `src-tauri/src/`. A user can
-override by placing both `.safetensors` in the app-local-data `kraken-models/`
-dir (partial overrides are ignored). `resolve_override_models` checks both
-files exist. Kraken engine is lazy-loaded once process-wide via `OnceCell`.
+**Models.** Bundled Kraken models (`BUNDLED_SEG`/`BUNDLED_REC`) and the
+PP-OCR tiny-det (`BUNDLED_PPOCR_DET`) are embedded via `include_bytes!` with
+paths relative to `src-tauri/src/`. A user can override by placing both Kraken
+`.safetensors` in the app-local-data `kraken-models/` dir, or the PP-OCR
+`tiny-det.safetensors` in `ppocr-models/` (single-file override). Kraken
+partial overrides are ignored; PP-OCR's single file is all-or-nothing. Both
+engines are lazy-loaded once process-wide via `OnceCell<Arc<...>>` so they can
+be shared with the `Segmenter` adapters as `'static` trait objects.
 
 **Temp files.** PDF page PNGs go to `just-ocr-<pid>-<seq>/pNNN.png` under the
 system temp dir. PID-namespacing lets `sweep_stale_temp_dirs()` (startup) and
