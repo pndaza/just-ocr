@@ -12,5 +12,6 @@
 
 mod arena;
 mod backend;
+mod kernels;
 mod ops;
 mod tensor;
