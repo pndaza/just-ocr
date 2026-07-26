@@ -9,3 +9,8 @@
 //!   - [`Detector`] — loaded detector, reused across calls.
 //!   - [`Detector::load_from_buffer`] — load the bundled tiny-det weights.
 //!   - [`Detector::detect`] — image → quads in source-image pixel coords.
+
+mod arena;
+mod backend;
+mod ops;
+mod tensor;
