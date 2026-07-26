@@ -15,8 +15,10 @@ mod backend;
 mod kernels;
 mod model;
 mod ops;
+mod postprocess;
 mod tensor;
 mod weights;
 
 pub use model::{CpuOptions, Detector};
+pub use postprocess::{Detection, DetectorTransform, Point};
 pub use tensor::Tensor;
