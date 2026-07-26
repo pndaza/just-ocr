@@ -4,7 +4,7 @@
 //! Pipeline: probability map → threshold → connected components →
 //! rotated-box fit (PCA) → PaddleOCR DB unclip → score/area gates.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::VecDeque;
 

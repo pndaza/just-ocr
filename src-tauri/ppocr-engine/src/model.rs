@@ -1574,7 +1574,12 @@ impl Detector {
 
     /// Load the bundled tiny-det weights from an in-memory safetensors buffer.
     /// Used by the host's `include_bytes!` path — no model files on disk.
-    /// Uses all available CPUs (rayon default thread count).
+    ///
+    /// Uses all available CPUs (`std::thread::available_parallelism()`), uncapped.
+    /// This is intentional: the bundled detector runs in a Tauri desktop app where
+    /// N rayon workers is fine. The upstream `Detector::load` path uses
+    /// `CpuOptions::default()` which caps at `.min(4)` — that cap is upstream's
+    /// recognizer-tuning choice and is irrelevant for the detector-only bundle.
     pub fn load_from_buffer(bytes: &[u8]) -> Result<Self> {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
