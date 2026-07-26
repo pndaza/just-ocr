@@ -8,6 +8,7 @@ use tesseract_rs::TesseractAPI;
 mod engine;
 mod languages;
 mod pdf;
+mod segmentation;
 mod tesseract_line;
 mod tesseract_page;
 
