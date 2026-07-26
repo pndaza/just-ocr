@@ -80,3 +80,20 @@ impl Detector {
         crate::postprocess::extract_detections(values, shape, plan.transform(), opts)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Loads the bundled tiny-det from the repo-root ppocr-models/ dir.
+    /// Verifies the safetensors deserializes and the detector builds.
+    #[test]
+    fn load_from_buffer_builds_detector() {
+        let bytes = std::fs::read("../../ppocr-models/tiny-det.safetensors")
+            .expect("read bundled tiny-det (relative to crate manifest dir)");
+        assert!(bytes.len() > 1_000_000, "tiny-det too small: {}", bytes.len());
+        let det = Detector::load_from_buffer(&bytes)
+            .expect("tiny-det loads from buffer");
+        let _ = det; // constructed successfully
+    }
+}
