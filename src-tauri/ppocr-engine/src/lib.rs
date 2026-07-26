@@ -54,3 +54,29 @@ impl RgbImage {
         &self.pixels
     }
 }
+
+use crate::postprocess::{DetectorInputPlan, DetectorPostprocessOptions};
+use crate::preprocess::prepare_detector;
+use anyhow::Result;
+
+impl Detector {
+    /// Run end-to-end detection: image → quads in source-image pixel coords.
+    ///
+    /// Resizes the input so its longest side is ≤ 736 (PaddleOCR default),
+    /// aligned to 32-pixel multiples. Returns one `Detection` per text region
+    /// (4-corner quad + score), with coords already mapped back to the source
+    /// image via the transform baked into the input plan.
+    pub fn detect(&self, img: &image::DynamicImage) -> Result<Vec<Detection>> {
+        let rgb = RgbImage::from_dynamic(img);
+        let plan = DetectorInputPlan::new(rgb.width(), rgb.height(), Some(736))?;
+        let prepared = prepare_detector(&rgb, plan);
+        let input = Tensor::from_f32(prepared.shape().to_vec(), prepared.data)?;
+        let output = self.forward(input)?;
+        // The output is [1, 1, H, W] — same H, W as the input (DB head preserves
+        // spatial dims). extract_detections reads `values[y * width + x]`.
+        let values: &[f32] = output.as_f32()?;
+        let shape: &[usize] = output.shape();
+        let opts = DetectorPostprocessOptions::default();
+        crate::postprocess::extract_detections(values, shape, plan.transform(), opts)
+    }
+}
