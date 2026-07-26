@@ -271,15 +271,21 @@ fn parse_input(tok: &str) -> Result<[usize; 4]> {
 /// dispatches on the leading letters.
 fn parse_block(tok: &str) -> Result<VgslBlock> {
     let (name, body) = strip_name(tok);
-    // Dispatch on leading letters (longest match first for Do/Mp).
+    // Dispatch on leading letters (longest match first for Do/Mp/C-prefixes).
+    // Note: in kraken's VGSL the letter after `C` is the activation
+    // (s/t/r/l/m); `CT` (capital T) marks a transposed conv.
     let block = if let Some(rest) = body.strip_prefix("Cr") {
         parse_conv(&name, rest, 'r')
     } else if let Some(rest) = body.strip_prefix("Cl") {
         parse_conv(&name, rest, 'l')
     } else if let Some(rest) = body.strip_prefix("Cs") {
         parse_conv(&name, rest, 's')
-    } else if body.strip_prefix("Ct").is_some() {
-        bail!("transposed conv (Ct) is not supported in the recognition dialect: {tok:?}")
+    } else if let Some(rest) = body.strip_prefix("Ct") {
+        parse_conv(&name, rest, 't') // tanh activation (NOT transposed)
+    } else if let Some(rest) = body.strip_prefix("Cm") {
+        parse_conv(&name, rest, 'm')
+    } else if body.strip_prefix("CT").is_some() {
+        bail!("transposed conv (CT) is not supported in the recognition dialect: {tok:?}")
     } else if let Some(rest) = body.strip_prefix('C') {
         parse_conv(&name, rest, 'l')
     } else if let Some(rest) = body.strip_prefix("Do") {
@@ -659,5 +665,29 @@ mod tests {
     fn test_maxpool_stride_defaults_to_kernel() {
         let b = parse_block("Mp{Mp_0}2,2").unwrap();
         assert!(matches!(b, VgslBlock::MaxPool { kernel: (2,2), stride: (2,2), .. }));
+    }
+
+    #[test]
+    fn test_conv_activation_codes() {
+        // The letter after C is the activation; lowercase 't' is tanh, NOT
+        // transposed. Capital 'T' would be transposed (rejected).
+        for (tok, expect) in [
+            ("Cr{C_0}3,13,32", 'r'),
+            ("Cl{C_0}3,13,32", 'l'),
+            ("Cs{C_0}3,13,32", 's'),
+            ("Ct{C_0}3,13,32", 't'),
+            ("Cm{C_0}3,13,32", 'm'),
+        ] {
+            match parse_block(tok) {
+                Ok(VgslBlock::Conv { activation, .. }) => assert_eq!(activation, expect, "{tok}"),
+                other => panic!("{tok} parsed as {other:?}, expected Conv"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_transposed_conv_capital_t_rejected() {
+        let err = parse_block("CT{C_0}3,13,32").unwrap_err();
+        assert!(err.to_string().contains("transposed conv"), "{err}");
     }
 }
