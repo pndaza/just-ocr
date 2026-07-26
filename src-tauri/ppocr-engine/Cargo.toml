@@ -1,0 +1,20 @@
+[package]
+name = "ppocr-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "ppocr_engine"
+path = "src/lib.rs"
+
+# Vendored PP-OCRv6 detector. Kept out of the host's [workspace] so
+# `[profile.dev.package."*"] opt-level = 3` applies to it (same trick as
+# kraken-engine — keeps dev-build detection fast).
+[dependencies]
+rayon = "1.11"
+safetensors = "=0.7.0"
+image = "0.25"
+anyhow = "1.0"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
