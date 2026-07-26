@@ -3,7 +3,7 @@
 //! The safetensors header contains a `kraken_meta` key whose value is a JSON
 //! string. That JSON is a dict keyed by a UUID prefix (one entry per model in
 //! the file). Each entry contains:
-//!   - `vgsl`: the VGSL spec string (e.g. "[1,120,0,1 Cr3,13,32 ... O1c118]")
+//!   - `vgsl`: the VGSL spec string (e.g. "[1,48,0,1 Cr3,13,32 ... O1c119]")
 //!   - `codec`: the c2l dict (grapheme → labels)
 //!   - `one_channel_mode`: "L", "1", or null
 //!   - `seg_type`: "baselines", "bbox", or null
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct KrakenMetaEntry {
-    /// The VGSL spec, e.g. "[1,120,0,1 Cr3,13,32 Do Mp ... O1c118]".
+    /// The VGSL spec, e.g. "[1,48,0,1 Cr3,13,32 Do Mp ... O1c119]".
     pub vgsl: Option<String>,
     /// The codec as a c2l dict: grapheme → label list.
     pub codec: Option<HashMap<String, Vec<i64>>>,

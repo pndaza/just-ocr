@@ -4,6 +4,16 @@
 **Status:** Approved (pending implementation)
 **Related:** `2026-07-12-pdf-support-design.md`
 
+> **Superseded in parts (2026-07-26).** This spec was written against the
+> then-current `bur_recog` variant (height 120, 118 classes, `O_18`). The
+> bundled model has since been swapped to a height-48 / 119-class / `O_17`
+> variant (commit `9c0ded6`), and the recognition VGSL parser is now
+> generalized — both loaders read dimensions, channel count, and class count
+> dynamically from each model's VGSL spec rather than hardcoding them. The
+> "hardcoded to bur_recog (118 classes)" framing in §Risk Register and the
+> "118 classes / `O_18`" architecture note below are historical, not current.
+> See `src-tauri/kraken-engine/src/{segmentation_candle,recognition}/model.rs`.
+
 ## Goal
 
 Add a Kraken OCR engine to just-ocr so Burmese and other scripts that Tesseract
@@ -153,6 +163,10 @@ The architecture-specific constants in `recognition/model.rs` (4 conv blocks,
 3 BiLSTM-200, 118 classes, hardcoded `C_0`/`L_12`/`O_18` names) are kept as-is
 for now — they match `bur_recog.safetensors`. A `// TODO: generalize VGSL
 parser` note is left for future models.
+
+> **Superseded (2026-07-26):** the parser was later generalized; the bundled
+> `bur_recog` is now the height-48 / 119-class / `O_17` variant. These
+> numbers describe the original (120/118/`O_18`) model only.
 
 ### `mod.rs` public surface
 
@@ -305,7 +319,7 @@ out of scope for this iteration.
 | Risk | Mitigation |
 |---|---|
 | Candle build issues on the Tauri toolchain | candle is pure Rust CPU; the existing `[profile.dev.package."*"] opt-level = 3` keeps recog fast. First build will be slow. |
-| Recognition model architecture is hardcoded to bur_recog (118 classes) | Documented as a TODO; out of scope for this iteration. Different models need the generalized VGSL parser from `segmentation_candle/model.rs`. |
+| Recognition model architecture is hardcoded to bur_recog (118 classes) | Documented as a TODO; out of scope for this iteration. Different models need the generalized VGSL parser from `segmentation_candle/model.rs`. **(Resolved 2026-07-26: the VGSL parser is now generalized; both loaders read dims/classes from the spec. The "118 classes" figure is historical — current bur_recog has 119.)** |
 | Tesseract per-line may be slower than full-page Tesseract | Acceptable: Kraken seg gives better line geometry; PSM_RAW_LINE skips layout. Benchmark during integration. |
 | Tesseract word-level boxes are lost | Line bbox + joined text is visually equivalent for the overlay. If word boxes are wanted later, structured `LineBox` extends to `words: [...]` cleanly. |
 | `kraken-models/` is untracked in git | Add to `.gitignore` formally (already effectively ignored); document that models must be supplied. |

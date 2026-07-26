@@ -11,7 +11,7 @@
 //! Per kraken's `ImageInputTransforms._create_transforms`, the CenterNormalizer
 //! is selected (over a plain Lanczos resize) when the model's input spec has a
 //! fixed height, variable width, and a single channel with `valid_norm` — which
-//! is exactly the `(1, 120, 0, 1)` spec of the models in this repo. So the
+//! is exactly the `(1, 48, 0, 1)` spec of the bundled bur_recog. So the
 //! current plain-Lanczos resize in [`crate::recognition::preprocess`] is itself
 //! a divergence from kraken that this module corrects.
 //!

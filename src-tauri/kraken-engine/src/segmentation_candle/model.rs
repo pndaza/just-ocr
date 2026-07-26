@@ -35,7 +35,8 @@ pub struct SegmentationModelCandle {
     layer_order: Vec<LayerKind>,
     /// Model metadata.
     pub meta: ModelMeta,
-    /// Fixed input height (1800).
+    /// Input height parsed from the model's VGSL spec (1800 for the bundled
+    /// bur_segment). Drives the resize target in `preprocess()`.
     pub height: u32,
     /// Compute dtype the weights are stored as (F32 or BF16). The input is
     /// cast to this at the start of `forward` and the output cast back to F32.
@@ -315,17 +316,38 @@ impl SegmentationModelCandle {
         let spec = VgslSpec::parse(vgsl)?;
         let (convs, group_norms, lstms, layer_order) = build_layers(&spec, &vb)?;
 
+        // Input shape is NHWC: [batch, height, width, channels]. The spec is
+        // the source of truth for the resize target — matching upstream
+        // kraken, which reads `self.input` from the model's VGSL header at
+        // load time (kraken/lib/vgsl/model.py:191-196 → spred.py:252-260).
+        // The bundled bur_segment declares [1,1800,0,3], so the values below
+        // are 1/1800/0/3 today; a model swap needs no code change here.
+        //
+        // Height 0 means "variable height" (upstream BLLA semantics). The
+        // Rust preprocess path needs a concrete resize target, so fall back
+        // to 1800 — the only height this engine has been exercised at.
+        // Channels 0 is treated as RGB (3); all known BLLA variants are 3-channel.
+        let (batch, h_spec, w_spec, c_spec) = (
+            spec.input[0] as i64,
+            spec.input[1] as i64,
+            spec.input[2] as i64,
+            spec.input[3] as i64,
+        );
+        let height = if h_spec > 0 { h_spec as u32 } else { 1800 };
+        let channels = if c_spec > 0 { c_spec as u32 } else { 3 };
+
         // Build ModelMeta for compatibility with existing detect() pipeline.
+        // `input` is NCHW (the order kraken-rust stored it in); `meta.input`
+        // is currently write-only — no consumer reads it — but kept honest
+        // with the parsed spec in case a future caller uses it.
         let meta = ModelMeta {
             class_mapping: seg_meta.class_mapping.clone(),
             one_channel_mode: seg_meta.one_channel_mode.clone(),
             topline: seg_meta.topline,
             padding: seg_meta.padding.clone(),
             bounding_regions: None,
-            input: vec![1, 3, 1800, 0],
+            input: vec![batch, channels as i64, height as i64, w_spec],
         };
-
-        let height = 1800u32;
 
         Ok(SegmentationModelCandle {
             convs,
@@ -340,7 +362,8 @@ impl SegmentationModelCandle {
 
     /// Run the forward pass.
     ///
-    /// Input: `(1, 3, 1800, W)` float tensor (NCHW, RGB, [0,1] range).
+    /// Input: `(1, C, H, W)` float tensor (NCHW, RGB, [0,1] range), where H/C
+    /// match the model's VGSL spec (1800/3 for the bundled bur_segment).
     /// Output: `(1, num_classes, H/4, W/4)` logits tensor (always F32).
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
         let profile = std::env::var("KRAKEN_PROFILE_LAYERS").is_ok();

@@ -19,7 +19,8 @@ pub struct Preprocessed {
 ///
 /// Args:
 /// - `image`: Input image (any format DynamicImage supports).
-/// - `height`: Fixed target height (e.g. 1800 for BLLA).
+/// - `height`: Fixed target height, parsed from the model's VGSL spec
+///   (1800 for the bundled bur_segment; upstream BLLA uses variable height).
 /// - `padding`: 4-tuple (left, right, top, bottom) padding in pixels.
 /// - `target_width`: If > 0, right-pad the result to exactly this width
 ///   (needed for fixed-width CoreML-optimized models). 0 = no width padding.

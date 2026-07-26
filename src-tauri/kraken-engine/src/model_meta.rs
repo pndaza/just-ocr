@@ -24,8 +24,10 @@ pub struct ModelMeta {
     #[serde(default)]
     pub padding: Vec<i64>,
     pub bounding_regions: Option<Vec<String>>,
-    /// VGSL input spec as [batch, channels, height, width]. Height is fixed
-    /// (1800 for BLLA), width is 0 (variable).
+    /// VGSL input spec as [batch, channels, height, width] (NCHW). Height is
+    /// parsed from the model's spec (1800 for the bundled bur_segment; 0 means
+    /// variable-height upstream BLLA, which the Rust loader falls back to 1800
+    /// for). Width is 0 (variable).
     #[serde(default)]
     pub input: Vec<i64>,
 }
