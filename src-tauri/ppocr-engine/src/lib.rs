@@ -13,6 +13,10 @@
 mod arena;
 mod backend;
 mod kernels;
+mod model;
 mod ops;
 mod tensor;
 mod weights;
+
+pub use model::{CpuOptions, Detector};
+pub use tensor::Tensor;
