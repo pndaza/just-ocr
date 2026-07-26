@@ -116,7 +116,14 @@
   </label>
 
   {#if isMyanmar}
-    <!-- Myanmar: Kraken does segmentation (hidden). Engine picks the recognizer. -->
+    <!-- Myanmar: Seg picks the line-box detector, Engine picks the recognizer. -->
+    <label class="field">
+      <span class="lbl">Seg</span>
+      <select bind:value={opts.segmenter}>
+        <option value="kraken">Kraken</option>
+        <option value="ppocr">PP-OCR</option>
+      </select>
+    </label>
     <label class="field">
       <span class="lbl">Engine</span>
       <select bind:value={opts.engine}>
