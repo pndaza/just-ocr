@@ -67,11 +67,20 @@ pub struct OcrResult {
 static BUNDLED_SEG: &[u8] = include_bytes!("../../kraken-models/bur_segment.safetensors");
 static BUNDLED_REC: &[u8] = include_bytes!("../../kraken-models/bur_recog.safetensors");
 
-/// Process-wide lazily-loaded kraken engine. The first OCR call pays the
-/// (fast, ~1-3 ms) model-load cost; subsequent calls reuse the instance.
+/// Bundled PP-OCRv6 tiny detector. Same `include_bytes!` pattern as the
+/// Kraken models. Path is relative to `src-tauri/src/` (this file's dir).
+static BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/tiny-det.safetensors");
+
+/// Process-wide lazily-loaded kraken engine, wrapped in `Arc` so it can be
+/// shared with `KrakenSegmenter` (which holds `Arc<Engine>` to satisfy the
+/// `'static` requirement of `Arc<dyn Segmenter>`). The first OCR call pays
+/// the (fast, ~1-3 ms) model-load cost; subsequent calls reuse the instance.
 /// `kraken_engine::Engine` is `Send + Sync`, so a `&Engine` is safe to share
 /// across the blocking-thread calls Tauri spawns per OCR request.
-static KRAKEN: OnceCell<kraken_engine::Engine> = OnceCell::new();
+static KRAKEN: OnceCell<std::sync::Arc<kraken_engine::Engine>> = OnceCell::new();
+
+/// Process-wide lazily-loaded PP-OCR detector, same Arc-wrapped shape.
+static PPOCR: OnceCell<std::sync::Arc<ppocr_engine::Detector>> = OnceCell::new();
 
 /// Borrow the shared kraken engine, loading it on first call.
 ///
@@ -81,7 +90,7 @@ static KRAKEN: OnceCell<kraken_engine::Engine> = OnceCell::new();
 ///      Lets power users swap models without an app rebuild.
 ///   2. **Bundled** — fall back to the models embedded in the binary via
 ///      `include_bytes!`. The default for fresh installs.
-fn kraken_engine(app: &tauri::AppHandle) -> Result<&kraken_engine::Engine, String> {
+fn kraken_engine(app: &tauri::AppHandle) -> Result<&std::sync::Arc<kraken_engine::Engine>, String> {
     KRAKEN.get_or_try_init(|| {
         let t = Instant::now();
         let engine = match resolve_override_models(app) {
@@ -100,7 +109,7 @@ fn kraken_engine(app: &tauri::AppHandle) -> Result<&kraken_engine::Engine, Strin
             "[kraken] models loaded in {:.0} ms",
             t.elapsed().as_secs_f64() * 1000.0
         );
-        Ok(engine)
+        Ok(std::sync::Arc::new(engine))
     })
 }
 
@@ -115,6 +124,60 @@ fn resolve_override_models(app: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)>
         Some((seg, rec))
     } else {
         None
+    }
+}
+
+/// Load the PP-OCR detector (bundled or override). Returns `Arc<Detector>`.
+fn load_ppocr(app: &tauri::AppHandle) -> Result<std::sync::Arc<ppocr_engine::Detector>, String> {
+    let t = Instant::now();
+    let det = match resolve_override_ppocr(app) {
+        Some(path) => {
+            log::info!("[ppocr] using override model from {}", path.display());
+            let bytes = std::fs::read(&path)
+                .map_err(|e| format!("PP-OCR override read failed: {e}"))?;
+            ppocr_engine::Detector::load_from_buffer(&bytes)
+                .map_err(|e| format!("PP-OCR override load failed: {e}"))?
+        }
+        None => ppocr_engine::Detector::load_from_buffer(BUNDLED_PPOCR_DET)
+            .map_err(|e| format!("PP-OCR bundled load failed: {e}"))?,
+    };
+    log::info!("[ppocr] det loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    Ok(std::sync::Arc::new(det))
+}
+
+/// User-supplied PP-OCR override: a single `tiny-det.safetensors` in the
+/// platform app-data dir's `ppocr-models/` subdir. Returns `Some(path)` only
+/// if the file exists. (Unlike kraken's two-file rule, PP-OCR is one file.)
+fn resolve_override_ppocr(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_local_data_dir().ok()?.join("ppocr-models");
+    let det = dir.join("tiny-det.safetensors");
+    if det.exists() { Some(det) } else { None }
+}
+
+/// Resolve the segmenter for this OCR call. Choices:
+///   - `opts.segmenter == Some("ppocr")` → `PPOcrSegmenter` (lazy-loads PP-OCR det)
+///   - anything else (including `None`) → `KrakenSegmenter` (lazy-loads Kraken)
+///
+/// Returns `Arc<dyn Segmenter>` so `run_myanmar` holds a uniform type.
+fn resolve_segmenter(
+    app: &tauri::AppHandle,
+    opts: &OcrOpts,
+) -> Result<std::sync::Arc<dyn crate::segmentation::Segmenter>, String> {
+    use crate::segmenter_adapters::{KrakenSegmenter, PPOcrSegmenter};
+    match opts.segmenter.as_deref() {
+        Some("ppocr") => {
+            let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
+            Ok(std::sync::Arc::new(PPOcrSegmenter::new(det)))
+        }
+        Some(other) => {
+            log::warn!("[ocr] unknown segmenter {other:?}, falling back to kraken");
+            let eng = KRAKEN.get_or_try_init(|| kraken_engine(app).cloned())?.clone();
+            Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
+        }
+        None => {
+            let eng = KRAKEN.get_or_try_init(|| kraken_engine(app).cloned())?.clone();
+            Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
+        }
     }
 }
 
