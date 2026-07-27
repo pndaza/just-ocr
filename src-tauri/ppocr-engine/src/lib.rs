@@ -10,6 +10,17 @@
 //!   - [`Detector::load_from_buffer`] — load the bundled tiny-det weights.
 //!   - [`Detector::detect`] — image → quads in source-image pixel coords.
 
+// The bulk of this crate is verbatim upstream code (tensor ops, kernels, the
+// model graph, postprocess helpers) trimmed to detector-only. Trimming leaves
+// dead code (recognizer-side helpers like `Linear`, `LayerNorm`, `argmax`) and
+// unknown cfg values (`cpu-profile`, `gpu`) that upstream gates on but we don't
+// declare as features. Both are expected from the vendor-and-trim approach and
+// are not actionable without diverging from upstream. Silence them at the crate
+// root so dev-build output stays readable; the host crate (`just-ocr`) itself
+// remains warning-clean and any new hand-written code here will still surface.
+#![allow(dead_code)]
+#![allow(unexpected_cfgs)]
+
 mod arena;
 mod backend;
 mod kernels;
