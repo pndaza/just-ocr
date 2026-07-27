@@ -5,7 +5,7 @@
 A simple, fully offline OCR app. No internet connection needed, no system
 installs required — just download and run.
 
-![Just OCR recognizing Burmese with Kraken](screenshots/just-ocr-app-ss.webp)
+![Just OCR recognizing Burmese](screenshots/just-ocr-app-ss.webp)
 
 ## What it does
 
@@ -16,13 +16,22 @@ installs required — just download and run.
 ## How it works
 
 - Latin text is recognized with [Tesseract](https://github.com/tesseract-ocr/tesseract)
-- Burmese and similar scripts are handled by a built-in [Kraken](https://kraken.re) engine
-  (vendored [candle](https://github.com/huggingface/candle) port)
 - All models are bundled inside the app — nothing extra to install
 
-For Burmese, Kraken handles layout segmentation (Tesseract's is poor for the
-script) and you can pick either engine for recognition. For everything else,
-Tesseract does both layout and recognition.
+For Burmese, Tesseract's own layout segmentation is poor, so a separate
+detector finds the text lines first — then the recognizer (Kraken or
+Tesseract) reads each one. For everything else, Tesseract does both layout
+and recognition.
+
+The **Seg** dropdown (Myanmar only) picks the line detector:
+
+| Seg | Speed | Best for |
+| --- | --- | --- |
+| **PP-OCR** (default) | Fast (~25 ms/page) | Straight, regular lines — the common case |
+| Kraken | Slower (~2.4 s/page) | Curved or rotated lines (e.g. book scans, panoramas) |
+
+Pair either with either recognizer (Kraken or Tesseract) via the **Rec**
+dropdown.
 
 ## Accuracy
 
@@ -68,8 +77,9 @@ cargo tauri dev
 The first build takes several minutes (it compiles Tesseract + the candle
 neural-network crates from source). Subsequent builds reuse the cache.
 
-The Kraken models in `kraken-models/` are tracked via Git LFS — run
-`git lfs install` once per machine, then clone normally.
+The Kraken models (`kraken-models/`) and the PP-OCR tiny-detector
+(`ppocr-models/`) are tracked via Git LFS — run `git lfs install` once per
+machine, then clone normally.
 
 ## Build a distributable app
 
