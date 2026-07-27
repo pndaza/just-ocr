@@ -10,7 +10,6 @@ pub fn recognize(
     crop: &DynamicImage,
     app: &tauri::AppHandle,
     language: &str,
-    whitelist: &Option<String>,
 ) -> Result<(String, i32), String> {
     let rgb = crop.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -21,13 +20,6 @@ pub fn recognize(
     let (tessdata, _embedded) = crate::languages::resolve_tessdata(app, language)?;
     api.init_5(&tessdata, tessdata.len() as i32, language, 3, &[])
         .map_err(|e| format!("Tesseract init failed: {e}"))?;
-
-    if let Some(ref wl) = whitelist {
-        if !wl.is_empty() {
-            api.set_variable("tessedit_char_whitelist", wl)
-                .map_err(|e| format!("Failed to set whitelist: {e}"))?;
-        }
-    }
 
     // PSM_RAW_LINE (13): the image is a single text line; no page layout.
     api.set_page_seg_mode(tesseract_rs::TessPageSegMode::PSM_RAW_LINE)

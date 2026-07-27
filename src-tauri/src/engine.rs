@@ -296,12 +296,7 @@ fn run_myanmar(
             "tesseract" => {
                 // Tesseract operates on the masked bbox crop (no dewarp).
                 let crop_img = kraken_engine::crop_polygon_white_bg(img, &line.boundary);
-                crate::tesseract_line::recognize(
-                    &crop_img,
-                    app,
-                    &opts.language,
-                    &opts.whitelist,
-                )?
+                crate::tesseract_line::recognize(&crop_img, app, &opts.language)?
             }
             // Kraken: dewarp (polygon mask + baseline straightening) then
             // recognize. extract_polygon_line operates on the full page image
@@ -414,13 +409,8 @@ fn run_tesseract_page(
     started: Instant,
 ) -> Result<OcrResult, String> {
     let t = Instant::now();
-    let (boxes, confidence) = crate::tesseract_page::recognize(
-        img,
-        app,
-        &opts.language,
-        opts.psm,
-        &opts.whitelist,
-    )?;
+    let (boxes, confidence) =
+        crate::tesseract_page::recognize(img, app, &opts.language, opts.psm)?;
     log::info!(
         "[ocr] tesseract full-page (psm={}): {:.0} ms ({} lines, {}% conf)",
         opts.psm,

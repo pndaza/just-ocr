@@ -35,8 +35,6 @@ export interface OcrOpts {
   /** Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path
    * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
   psm: number;
-  /** Tesseract-only; ignored by the kraken recognizer. */
-  whitelist: string | null;
   /** Myanmar/Kraken path only. Binarize line crops before recognition — use
    * when the recognition model was trained on 1-bit (binarized) images. */
   binarize: Binarize;
@@ -238,8 +236,16 @@ function csvField(s: string): string {
 /**
  * Write all completed jobs to a combined file via a native save dialog.
  * Format is chosen by the dialog's default extension (CSV or TXT).
+ *
+ * `mergeParagraphs` (default false) is the same display projection used by
+ * the Output panel: when true, lines are grouped into paragraphs by the
+ * geometry heuristic in result.ts and joined "\n\n". Honoured for both CSV
+ * and TXT so the exported file matches what the user sees on screen.
  */
-export async function exportResults(jobs: Job[]): Promise<void> {
+export async function exportResults(
+  jobs: Job[],
+  opts?: { mergeParagraphs?: boolean },
+): Promise<void> {
   const done = jobs.filter((j) => j.status === "done" && j.result);
   if (!done.length) return;
 
@@ -253,6 +259,7 @@ export async function exportResults(jobs: Job[]): Promise<void> {
   });
   if (!dest) return; // user cancelled
 
+  const textOpts = opts?.mergeParagraphs ? { mergeParagraphs: true } : undefined;
   const lower = dest.toLowerCase();
   const isCsv = lower.endsWith(".csv");
   let content: string;
@@ -266,7 +273,7 @@ export async function exportResults(jobs: Job[]): Promise<void> {
           // the column stays structurally present without fabricating a value.
           j.confidence >= 0 ? String(j.confidence) : "",
           j.elapsedMs,
-          csvField(plainText(j.result!).replace(/\s+$/, "")),
+          csvField(plainText(j.result!, textOpts).replace(/\s+$/, "")),
         ].join(","),
       );
     }
@@ -274,7 +281,7 @@ export async function exportResults(jobs: Job[]): Promise<void> {
   } else {
     const blocks = done.map((j) => {
       const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
-      return `=== ${j.name}${conf} ===\n` + plainText(j.result!).replace(/\s+$/, "");
+      return `=== ${j.name}${conf} ===\n` + plainText(j.result!, textOpts).replace(/\s+$/, "");
     });
     content = blocks.join("\n\n") + "\n";
   }
@@ -338,6 +345,7 @@ const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
 const BINARIZE_KEY = "just-ocr:binarize";
 const LAST_SEGMENTER_KEY = "just-ocr:segmenter";
+const MERGE_PARAGRAPHS_KEY = "just-ocr:merge-paragraphs";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
 export function lastLanguage(): string | null {
@@ -425,6 +433,29 @@ export function lastBinarize(): Binarize {
 export function saveBinarize(b: Binarize): void {
   try {
     localStorage.setItem(BINARIZE_KEY, b === null ? "off" : b);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the merge-paragraphs view preference; defaults to false (line-by-line
+ * output, the legacy behaviour). True → recognized lines are grouped into
+ * paragraphs by the geometry heuristic in result.ts, for both the on-screen
+ * text panel and TXT/CSV export. Does NOT affect what the OCR engine returns,
+ * only how the result lines are projected for display. */
+export function lastMergeParagraphs(): boolean {
+  try {
+    return localStorage.getItem(MERGE_PARAGRAPHS_KEY) === "true";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return false;
+  }
+}
+
+/** Persist the merge-paragraphs preference so it is sticky across launches. */
+export function saveMergeParagraphs(on: boolean): void {
+  try {
+    localStorage.setItem(MERGE_PARAGRAPHS_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

@@ -25,6 +25,8 @@
     saveBinarize,
     lastSegmenter,
     saveSegmenter,
+    lastMergeParagraphs,
+    saveMergeParagraphs,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -63,10 +65,15 @@
     engine: lastEngine(),
     language: lastLanguage() ?? "eng",
     psm: 3,
-    whitelist: null,
     binarize: lastBinarize(),
     segmenter: lastSegmenter(),
   });
+
+  // Merge-paragraphs is a display-only preference (it does not change what the
+  // OCR engine returns, only how the recognized lines are projected for the
+  // text panel + export). Lives in the toolbar so it can be toggled before a
+  // run; persisted globally like binarize/segmenter.
+  let mergeParagraphs = $state(lastMergeParagraphs());
 
   // Remember the chosen engine + language so they are pre-selected on the next
   // launch. loadLanguages() validates the language against available models,
@@ -85,6 +92,9 @@
   // dropdown value is sticky across launches.
   $effect(() => {
     saveSegmenter(opts.segmenter);
+  });
+  $effect(() => {
+    saveMergeParagraphs(mergeParagraphs);
   });
 
   let jobs = $state<Job[]>([]);
@@ -202,8 +212,8 @@
 
   // ── Keyboard navigation of the thumbnail list ──────────────────────────────
   // Arrow keys move the selection (Up/Left = previous, Down/Right = next),
-  // wrapping at the ends. Ignored while typing in a field (whitelist, selects)
-  // or while a modal dialog is open, so it never steals keystrokes there.
+  // wrapping at the ends. Ignored while typing in a field (selects) or while
+  // a modal dialog is open, so it never steals keystrokes there.
   // Reads happen inside the handler, so this effect registers exactly once.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -422,7 +432,7 @@
   }
 
   async function exportAll() {
-    await exportResults(jobs);
+    await exportResults(jobs, { mergeParagraphs });
   }
 
   loadLanguages();
@@ -435,6 +445,7 @@
     {running}
     {pending}
     {doneCount}
+    {mergeParagraphs}
     batchProgress={batchProgress}
     canRunCurrent={canRunCurrent}
     hasSelection={!!selected}
@@ -446,6 +457,7 @@
     onexport={exportAll}
     onmanagelanguages={openLangManager}
     onsettings={() => (showSettings = true)}
+    onchangemerge={(v: boolean) => (mergeParagraphs = v)}
   />
   <main id="main-area">
     <section class="col left" style="width:{leftW}px">
@@ -478,7 +490,7 @@
       aria-orientation="vertical"
     ></div>
     <section class="col right" style="width:{rightW}px">
-      <Output job={selected} />
+      <Output job={selected} {mergeParagraphs} />
     </section>
   </main>
   {#if dropping}
