@@ -8,6 +8,8 @@
     running: boolean;
     pending: number;
     doneCount: number;
+    /** Merge-paragraphs view toggle (display + export projection). */
+    mergeParagraphs: boolean;
     /** Current/total counter shown beside "Processing" during a batch run.
      *  Null for single runs (Run Current) so no counter appears. */
     batchProgress: { current: number; total: number } | null;
@@ -21,6 +23,7 @@
     onexport: () => void;
     onmanagelanguages: () => void;
     onsettings: () => void;
+    onchangemerge: (v: boolean) => void;
   }
   let {
     opts,
@@ -28,6 +31,7 @@
     running,
     pending,
     doneCount,
+    mergeParagraphs,
     batchProgress,
     canRunCurrent,
     hasSelection,
@@ -39,6 +43,7 @@
     onexport,
     onmanagelanguages,
     onsettings,
+    onchangemerge,
   }: Props = $props();
 
   const psmOptions = [
@@ -55,17 +60,10 @@
     { value: 13, label: "13 · Raw line" },
   ];
 
-  let useWhitelist = $state(false);
-  $effect(() => {
-    opts.whitelist = useWhitelist ? (opts.whitelist ?? "") : null;
-  });
-
   // Pipeline is language-driven:
   //   mya        → Kraken segmentation (hidden) + recognizer chosen by `engine`.
-  //                Kraken recog has no whitelist, so disable it for that combo.
   //   everything → full-page Tesseract with `psm`. Engine selector is hidden.
   let isMyanmar = $derived(opts.language === "mya");
-  let whitelistDisabled = $derived(isMyanmar && opts.engine === "kraken");
 
   // Picking Myanmar defaults the recognizer to Kraken (the whole point —
   // Tesseract is bad at Myanmar script). This must fire ONLY on the language
@@ -78,14 +76,6 @@
     prevLang = opts.language;
     if (becameMyanmar) {
       opts.engine = "kraken";
-    }
-  });
-
-  // Whitelist auto-disable for the kraken recognizer (no char whitelist there).
-  $effect(() => {
-    if (whitelistDisabled && useWhitelist) {
-      useWhitelist = false;
-      opts.whitelist = null;
     }
   });
 </script>
@@ -142,23 +132,14 @@
     </label>
   {/if}
 
-  <label class="check" class:disabled={whitelistDisabled}>
+  <label class="check" title="Join recognized lines into paragraphs (display + export)">
     <input
       type="checkbox"
-      bind:checked={useWhitelist}
-      disabled={whitelistDisabled}
+      checked={mergeParagraphs}
+      onchange={(e) => onchangemerge(e.currentTarget.checked)}
     />
-    Whitelist
+    Merge lines
   </label>
-  {#if useWhitelist && !whitelistDisabled}
-    <input
-      class="wl"
-      type="text"
-      placeholder="0123456789"
-      bind:value={opts.whitelist}
-      size="10"
-    />
-  {/if}
 
   <div class="spacer"></div>
 
@@ -287,18 +268,8 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  .check.disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
   .check input {
     accent-color: var(--accent-dim);
-  }
-  .wl {
-    padding: 4px 8px;
-    font-size: 12px;
-    font-family: var(--mono);
-    width: 90px;
   }
   .spacer { flex: 1; }
   .progress {

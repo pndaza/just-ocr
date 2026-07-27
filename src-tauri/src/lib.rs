@@ -37,9 +37,6 @@ pub struct OcrOpts {
     /// Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path;
     /// ignored by the Myanmar path (Kraken does layout there).
     pub psm: i32,
-    /// Tesseract-only. When non-null + non-empty, restricts recognition to
-    /// these characters.
-    pub whitelist: Option<String>,
     /// Binarize line crops before recognition (Myanmar/Kraken path only):
     /// `"otsu"` (global threshold) or `"sauvola"` (local adaptive). `None`
     /// disables binarization. Ignored by the Tesseract path. Use when the

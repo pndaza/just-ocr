@@ -1,0 +1,150 @@
+import { plainText, type LineBox, type OcrResult } from "./result";
+import { describe, it, expect } from "vitest";
+
+/** Build a LineBox with the geometry the paragraph heuristic reasons about. */
+function line(text: string, x0: number, y0: number, x1: number, y1: number): LineBox {
+  return { text, x0, y0, x1, y1 };
+}
+
+/** Minimal OcrResult wrapper — only `lines` matters for plainText projections. */
+function result(lines: LineBox[]): OcrResult {
+  return {
+    width: 600,
+    height: 800,
+    lines,
+    confidence: 90,
+    elapsedMs: 100,
+  };
+}
+
+// Geometry constants used across the merge-paragraph tests:
+//   leftMargin=100 (10th pct of x0), rightMargin=500 (90th pct of x1),
+//   blockWidth=400, line height=20 → medianHeight=20.
+// Thresholds derived from those: indent 40 (10%), short-right 60 (15%),
+// gap 10 (0.5× height).
+const FULL = 500; // x1 of a full-width body line reaching the right margin.
+
+describe("plainText — line-by-line (default)", () => {
+  it("joins all lines with \\n when mergeParagraphs is omitted", () => {
+    const r = result([line("a", 100, 0, FULL, 20), line("b", 100, 20, FULL, 40)]);
+    expect(plainText(r)).toBe("a\nb");
+  });
+
+  it("joins all lines with \\n when mergeParagraphs is false", () => {
+    const r = result([line("a", 100, 0, FULL, 20), line("b", 100, 20, FULL, 40)]);
+    expect(plainText(r, { mergeParagraphs: false })).toBe("a\nb");
+  });
+
+  it("returns a single line's text unchanged", () => {
+    const r = result([line("solo", 100, 0, FULL, 20)]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("solo");
+  });
+});
+
+describe("plainText — mergeParagraphs", () => {
+  it("joins tight full-width body lines into one paragraph (space-separated)", () => {
+    const r = result([
+      line("one", 100, 0, FULL, 20),
+      line("two", 100, 20, FULL, 40),
+      line("three", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("one two three");
+  });
+
+  it("splits paragraphs on a large vertical gap", () => {
+    // 3 tight lines, then a 60px gap (> 0.5×20), then 2 tight lines.
+    const r = result([
+      line("a1", 100, 0, FULL, 20),
+      line("a2", 100, 20, FULL, 40),
+      line("a3", 100, 40, FULL, 60),
+      line("b1", 100, 120, FULL, 140),
+      line("b2", 100, 140, FULL, 160),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a1 a2 a3\n\nb1 b2");
+  });
+
+  it("splits tight paragraphs by a short last line (no vertical gap)", () => {
+    // p1end ends well short of the right margin ⇒ paragraph end, even though
+    // p2a follows with zero vertical gap. This is the "no gap between
+    // paragraphs" case the gap-only heuristic misses.
+    const r = result([
+      line("p1a", 100, 0, FULL, 20),
+      line("p1b", 100, 20, FULL, 40),
+      line("p1c", 100, 40, FULL, 60),
+      line("p1end", 100, 60, 300, 80),
+      line("p2a", 100, 80, FULL, 100),
+      line("p2b", 100, 100, FULL, 120),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("p1a p1b p1c p1end\n\np2a p2b");
+  });
+
+  it("treats a centered heading as its own block (no false break on its short right)", () => {
+    // A centered heading's right edge is short, but so is its left — it must
+    // NOT be classified as a paragraph end. It becomes its own block.
+    const r = result([
+      line("HEADING", 250, 0, 350, 20),
+      line("body1", 100, 20, FULL, 40),
+      line("body2", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("HEADING\n\nbody1 body2");
+  });
+
+  it("breaks on body → centered → body transitions", () => {
+    const r = result([
+      line("body1", 100, 0, FULL, 20),
+      line("TITLE", 250, 20, 350, 40),
+      line("body2", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("body1\n\nTITLE\n\nbody2");
+  });
+
+  it("keeps a multi-line centered run together", () => {
+    // Two centered heading lines should stay in one block, separate from body.
+    const r = result([
+      line("TITLE A", 240, 0, 360, 20),
+      line("TITLE B", 230, 20, 370, 40),
+      line("body1", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1");
+  });
+
+  it("sorts unsorted input by y0 before grouping", () => {
+    const r = result([
+      line("three", 100, 40, FULL, 60),
+      line("one", 100, 0, FULL, 20),
+      line("two", 100, 20, FULL, 40),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("one two three");
+  });
+
+  it("trims per-line whitespace and skips empty lines", () => {
+    const r = result([
+      line("  hello  ", 100, 0, FULL, 20),
+      line("", 100, 20, FULL, 40),
+      line("world", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("hello world");
+  });
+
+  it("does not split when a paragraph's last line fills the width (known limitation)", () => {
+    // No gap, no indent, and the would-be last line reaches the right margin:
+    // geometry alone can't distinguish this from a mid-paragraph wrap. The
+    // toggle is the escape hatch for documents that hit this.
+    const r = result([
+      line("a", 100, 0, FULL, 20),
+      line("b", 100, 20, FULL, 40),
+      line("c", 100, 40, FULL, 60),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b c");
+  });
+
+  it("degrades to one paragraph when geometry is degenerate (zero-width block)", () => {
+    // All lines share the same x0/x1 → blockWidth 0. Must not throw or divide
+    // by zero; falls back to joining everything with spaces.
+    const r = result([
+      line("x", 100, 0, 100, 20),
+      line("y", 100, 20, 100, 40),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("x y");
+  });
+});
