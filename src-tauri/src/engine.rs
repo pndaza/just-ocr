@@ -483,7 +483,7 @@ pub fn polygon_bbox(
 
 #[cfg(test)]
 mod tests {
-    use super::{polygon_bbox, LineBox, BUNDLED_PPOCR_DET, BUNDLED_REC, BUNDLED_SEG};
+    use super::{polygon_bbox, LineBox, BUNDLED_REC, BUNDLED_SEG};
 
     #[test]
     fn polygon_bbox_basic() {
