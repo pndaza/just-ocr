@@ -4,14 +4,20 @@
 
   interface Props {
     job: Job | null;
+    /** When true, lines are grouped into paragraphs by the geometry heuristic
+     *  in result.ts. Mirrors the toolbar toggle so the panel reflects the
+     *  same projection used for export. */
+    mergeParagraphs: boolean;
   }
-  let { job }: Props = $props();
+  let { job, mergeParagraphs }: Props = $props();
 
-  // The recognized text is a projection of the structured `OcrResult` (lines
-  // joined with "\n"). Falls back to "" until the job is done.
+  // The recognized text is a projection of the structured `OcrResult`. With
+  // mergeParagraphs off, lines join with "\n" (legacy behaviour); with it on,
+  // close lines join with a space and paragraphs are separated by "\n\n".
+  // Falls back to "" until the job is done.
   let displayText = $derived.by(() => {
     if (!job || job.status !== "done" || !job.result) return "";
-    return plainText(job.result).replace(/\s+$/, "");
+    return plainText(job.result, { mergeParagraphs }).replace(/\s+$/, "");
   });
 
   let copied = $state(false);

@@ -15,14 +15,12 @@ use crate::engine::LineBox;
 /// line (text + line-level bbox), plus the mean confidence.
 ///
 /// `psm` is the Tesseract page-segmentation mode (0-13), passed through
-/// unchanged. `whitelist`, when non-empty, restricts recognition to those
-/// characters.
+/// unchanged.
 pub fn recognize(
     img: &DynamicImage,
     app: &tauri::AppHandle,
     language: &str,
     psm: i32,
-    whitelist: &Option<String>,
 ) -> Result<(Vec<LineBox>, i32), String> {
     let rgb = img.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -33,13 +31,6 @@ pub fn recognize(
     let (tessdata, _embedded) = crate::languages::resolve_tessdata(app, language)?;
     api.init_5(&tessdata, tessdata.len() as i32, language, 3, &[])
         .map_err(|e| format!("Tesseract init failed: {e}"))?;
-
-    if let Some(ref wl) = whitelist {
-        if !wl.is_empty() {
-            api.set_variable("tessedit_char_whitelist", wl)
-                .map_err(|e| format!("Failed to set whitelist: {e}"))?;
-        }
-    }
 
     // Map the frontend's PSM int to the engine enum. Unknown values fall back
     // to PSM_AUTO (Tesseract's own default), matching tesseract-rs semantics.
