@@ -116,7 +116,7 @@
   </label>
 
   {#if isMyanmar}
-    <!-- Myanmar: Seg picks the line-box detector, Engine picks the recognizer. -->
+    <!-- Myanmar: Seg picks the line-box detector, Rec picks the recognizer. -->
     <label class="field">
       <span class="lbl">Seg</span>
       <select bind:value={opts.segmenter}>
@@ -125,7 +125,7 @@
       </select>
     </label>
     <label class="field">
-      <span class="lbl">Engine</span>
+      <span class="lbl">Rec</span>
       <select bind:value={opts.engine}>
         <option value="kraken">Kraken</option>
         <option value="tesseract">Tesseract</option>
