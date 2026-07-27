@@ -45,8 +45,8 @@ pub struct OcrOpts {
     /// disables binarization. Ignored by the Tesseract path. Use when the
     /// recognition model was trained on 1-bit (binarized) images.
     pub binarize: Option<String>,
-    /// Segmenter choice for the Myanmar path: `"kraken"` (default) or `"ppocr"`.
-    /// `None`/unrecognized → Kraken. Ignored for non-Myanmar (full-page Tesseract).
+    /// Segmenter choice for the Myanmar path: `"ppocr"` (default) or `"kraken"`.
+    /// `None`/unrecognized → PP-OCR. Ignored for non-Myanmar (full-page Tesseract).
     #[serde(default)]
     pub segmenter: Option<String>,
 }

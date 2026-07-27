@@ -21,8 +21,8 @@ export type ImageMode = "color" | "gray" | "bw";
 export type Engine = "tesseract" | "kraken";
 
 /** Segmentation stage for the Myanmar path (line-box detection). Ignored for
- * other languages. Kraken is the legacy default; PP-OCR is the tiny detector
- * alternative. */
+ * other languages. PP-OCR (the tiny detector) is the default; Kraken is the
+ * legacy alternative for cases where baseline-aware segmentation helps. */
 export type Segmenter = "kraken" | "ppocr";
 
 /** Binarization method for the Myanmar/Kraken path. `null` disables it.
@@ -41,7 +41,7 @@ export interface OcrOpts {
    * when the recognition model was trained on 1-bit (binarized) images. */
   binarize: Binarize;
   /** Myanmar path only. Which line-box detector runs before recognition:
-   * "kraken" (default) or "ppocr" (PaddleOCR PP-OCRv6 tiny). */
+   * "ppocr" (PaddleOCR PP-OCRv6 tiny, default) or "kraken". */
   segmenter: Segmenter;
 }
 
@@ -378,17 +378,17 @@ export function saveEngine(engine: Engine): void {
   }
 }
 
-/** Read the last-used Myanmar segmenter from localStorage; defaults to "kraken".
- * Only "ppocr" switches away from the default — any other stored value (or a
- * missing/unavailable storage) falls back to "kraken". */
+/** Read the last-used Myanmar segmenter from localStorage; defaults to "ppocr".
+ * Only "kraken" switches away from the default — any other stored value (or a
+ * missing/unavailable storage) falls back to "ppocr". */
 export function lastSegmenter(): Segmenter {
   try {
-    return localStorage.getItem(LAST_SEGMENTER_KEY) === "ppocr"
-      ? "ppocr"
-      : "kraken";
+    return localStorage.getItem(LAST_SEGMENTER_KEY) === "kraken"
+      ? "kraken"
+      : "ppocr";
   } catch {
     // storage may be unavailable (private mode) — use the default
-    return "kraken";
+    return "ppocr";
   }
 }
 

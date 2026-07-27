@@ -155,8 +155,13 @@ fn resolve_override_ppocr(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 /// Resolve the segmenter for this OCR call. Choices:
-///   - `opts.segmenter == Some("ppocr")` → `PPOcrSegmenter` (lazy-loads PP-OCR det)
-///   - anything else (including `None`) → `KrakenSegmenter` (lazy-loads Kraken)
+///   - `opts.segmenter == Some("kraken")` → `KrakenSegmenter` (lazy-loads Kraken)
+///   - anything else (including `None`) → `PPOcrSegmenter` (lazy-loads PP-OCR det)
+///
+/// PP-OCR is the default (faster, generalizes well). Kraken remains available
+/// as an explicit opt-in for cases where its baseline-aware segmentation
+/// outperforms PP-OCR's quad detection. Unknown strings warn and fall back to
+/// the PP-OCR default.
 ///
 /// Returns `Arc<dyn Segmenter>` so `run_myanmar` holds a uniform type.
 fn resolve_segmenter(
@@ -165,18 +170,18 @@ fn resolve_segmenter(
 ) -> Result<std::sync::Arc<dyn crate::segmentation::Segmenter>, String> {
     use crate::segmenter_adapters::{KrakenSegmenter, PPOcrSegmenter};
     match opts.segmenter.as_deref() {
-        Some("ppocr") => {
+        Some("kraken") => {
+            let eng = KRAKEN.get_or_try_init(|| kraken_engine(app).cloned())?.clone();
+            Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
+        }
+        Some("ppocr") | None => {
             let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
             Ok(std::sync::Arc::new(PPOcrSegmenter::new(det)))
         }
         Some(other) => {
-            log::warn!("[ocr] unknown segmenter {other:?}, falling back to kraken");
-            let eng = KRAKEN.get_or_try_init(|| kraken_engine(app).cloned())?.clone();
-            Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
-        }
-        None => {
-            let eng = KRAKEN.get_or_try_init(|| kraken_engine(app).cloned())?.clone();
-            Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
+            log::warn!("[ocr] unknown segmenter {other:?}, falling back to ppocr");
+            let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
+            Ok(std::sync::Arc::new(PPOcrSegmenter::new(det)))
         }
     }
 }
