@@ -545,7 +545,7 @@ dependencies = [
  "rand 0.9.4",
  "rand_distr 0.5.1",
  "rayon",
- "safetensors",
+ "safetensors 0.8.0",
  "thiserror 2.0.18",
  "tokenizers",
  "yoke",
@@ -564,7 +564,7 @@ dependencies = [
  "libc",
  "num-traits",
  "rayon",
- "safetensors",
+ "safetensors 0.8.0",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "just-ocr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3010,6 +3010,7 @@ dependencies = [
  "log",
  "lopdf",
  "once_cell",
+ "ppocr-engine",
  "rayon",
  "reqwest 0.12.28",
  "serde",
@@ -4087,6 +4088,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
+name = "ppocr-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "rayon",
+ "safetensors 0.7.0",
+ "serde",
+]
+
+[[package]]
 name = "ppv-lite86"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4880,6 +4893,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "safetensors"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "675656c1eabb620b921efea4f9199f97fc86e36dd6ffd1fbbe48d0f59a4987f5"
+dependencies = [
+ "hashbrown 0.16.1",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -5874,7 +5898,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
