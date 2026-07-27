@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { plainText, type OcrResult } from "./result";
 
 export type { OcrResult, LineBox } from "./result";
@@ -35,8 +36,6 @@ export interface OcrOpts {
   /** Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path
    * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
   psm: number;
-  /** Tesseract-only; ignored by the kraken recognizer. */
-  whitelist: string | null;
   /** Myanmar/Kraken path only. Binarize line crops before recognition — use
    * when the recognition model was trained on 1-bit (binarized) images. */
   binarize: Binarize;
@@ -227,60 +226,71 @@ export async function ocrFromBytes(
   });
 }
 
-/** CSV-escape a single field. */
-function csvField(s: string): string {
-  if (/[",\n\r]/.test(s)) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
-}
-
 /**
- * Write all completed jobs to a combined file via a native save dialog.
- * Format is chosen by the dialog's default extension (CSV or TXT).
+ * Write all completed jobs to a single .txt file via a native save dialog.
+ *
+ * Each completed job becomes a block:
+ *
+ *     === filename  (90% conf, 120 ms) ===
+ *     <recognized text, with merge-paragraphs projection applied>
+ *
+ * Blocks are separated by a blank line. `mergeParagraphs` (default false)
+ * is the same projection used by the Output panel, so the exported file
+ * matches what the user sees on screen.
  */
-export async function exportResults(jobs: Job[]): Promise<void> {
+export async function exportResults(
+  jobs: Job[],
+  opts?: { mergeParagraphs?: boolean },
+): Promise<void> {
   const done = jobs.filter((j) => j.status === "done" && j.result);
   if (!done.length) return;
 
+  // Resolve a concrete default directory from the backend (~/Documents, with
+  // a home-dir fallback) and join it with the default filename. A bare
+  // "ocr-results.txt" defaultPath left NSSavePanel to open wherever it last
+  // remembered — sometimes an app-internal path — so exported files vanished
+  // from the user's expected Downloads/Documents. Pinning the dir fixes that.
+  let defaultPath = "ocr-results.txt";
+  try {
+    const dir = await invoke<string>("default_save_dir");
+    if (dir) {
+      // Join manually rather than pulling in a path lib; the dialog accepts a
+      // full path string and treats the trailing component as the filename.
+      defaultPath = `${dir.replace(/\/$/, "")}/ocr-results.txt`;
+    }
+  } catch {
+    // backend call failed (older build, permission issue) — fall back to the
+    // bare filename and let NSSavePanel pick the dir, as before.
+  }
+
   const dest = await save({
     title: "Export OCR results",
-    defaultPath: "ocr-results",
-    filters: [
-      { name: "CSV", extensions: ["csv"] },
-      { name: "Text", extensions: ["txt"] },
-    ],
+    defaultPath,
+    filters: [{ name: "Text", extensions: ["txt"] }],
   });
   if (!dest) return; // user cancelled
 
-  const lower = dest.toLowerCase();
-  const isCsv = lower.endsWith(".csv");
-  let content: string;
-  if (isCsv) {
-    const rows = ["filename,confidence,elapsed_ms,text"];
-    for (const j of done) {
-      rows.push(
-        [
-          csvField(j.name),
-          // Kraken recognizer returns confidence = -1 (unknown); emit empty so
-          // the column stays structurally present without fabricating a value.
-          j.confidence >= 0 ? String(j.confidence) : "",
-          j.elapsedMs,
-          csvField(plainText(j.result!).replace(/\s+$/, "")),
-        ].join(","),
-      );
-    }
-    content = rows.join("\n") + "\n";
-  } else {
-    const blocks = done.map((j) => {
-      const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
-      return `=== ${j.name}${conf} ===\n` + plainText(j.result!).replace(/\s+$/, "");
-    });
-    content = blocks.join("\n\n") + "\n";
-  }
+  const textOpts = opts?.mergeParagraphs ? { mergeParagraphs: true } : undefined;
+  const blocks = done.map((j) => {
+    const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
+    return `=== ${j.name}${conf} ===\n` + plainText(j.result!, textOpts).replace(/\s+$/, "");
+  });
+  const content = blocks.join("\n\n") + "\n";
 
   const encoder = new TextEncoder();
   await writeFile(dest, encoder.encode(content));
+
+  // Reveal the just-saved file in Finder/Explorer. Finder does not refresh its
+  // directory listing when an external app writes a file, so without this the
+  // user often couldn't see the export until they manually closed/reopened the
+  // window or hit Cmd+Shift+G. Revealing is the macOS convention and forces the
+  // file to appear, selected, in its parent folder. Best-effort: a failure here
+  // (e.g. headless, no file manager) doesn't undo a successful write.
+  try {
+    await revealItemInDir(dest);
+  } catch (e) {
+    console.warn(`Could not reveal "${dest}" in file manager:`, e);
+  }
 }
 
 // ── Language model management ────────────────────────────────────────────────
@@ -338,6 +348,7 @@ const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
 const BINARIZE_KEY = "just-ocr:binarize";
 const LAST_SEGMENTER_KEY = "just-ocr:segmenter";
+const MERGE_PARAGRAPHS_KEY = "just-ocr:merge-paragraphs";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
 export function lastLanguage(): string | null {
@@ -425,6 +436,29 @@ export function lastBinarize(): Binarize {
 export function saveBinarize(b: Binarize): void {
   try {
     localStorage.setItem(BINARIZE_KEY, b === null ? "off" : b);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the merge-paragraphs view preference; defaults to false (line-by-line
+ * output, the legacy behaviour). True → recognized lines are grouped into
+ * paragraphs by the geometry heuristic in result.ts, for both the on-screen
+ * text panel and TXT/CSV export. Does NOT affect what the OCR engine returns,
+ * only how the result lines are projected for display. */
+export function lastMergeParagraphs(): boolean {
+  try {
+    return localStorage.getItem(MERGE_PARAGRAPHS_KEY) === "true";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return false;
+  }
+}
+
+/** Persist the merge-paragraphs preference so it is sticky across launches. */
+export function saveMergeParagraphs(on: boolean): void {
+  try {
+    localStorage.setItem(MERGE_PARAGRAPHS_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }
