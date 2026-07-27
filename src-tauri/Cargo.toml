@@ -24,10 +24,20 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+# Used by the export flow: revealItemInDir() opens Finder/Explorer with the
+# just-saved file selected, so the user immediately sees where it landed
+# (bypassing Finder's directory-listing cache, which often fails to refresh
+# after an external app writes a file).
+tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tesseract-rs = { version = "0.3", features = ["embed-tessdata"] }
 image = "0.25"
+# Resolves user dirs (Documents/Downloads) for the export save dialog's
+# default path — gives NSSavePanel a concrete directory to open in instead of
+# leaving it to whatever it last remembered (which often surprised users by
+# opening in an app-internal or unrelated location).
+dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["io-util"] }

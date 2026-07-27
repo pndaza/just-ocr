@@ -108,6 +108,24 @@ fn read_files(paths: Vec<String>) -> Vec<ReadFile> {
         .collect()
 }
 
+/// Resolve a sensible default directory for the export save dialog, as an
+/// absolute path string. Prefers the user's Documents dir; falls back to the
+/// home dir, then the current working dir. The frontend joins this with the
+/// default filename and passes it as `defaultPath`, so macOS `NSSavePanel`
+/// opens in a predictable, user-visible location instead of wherever it last
+/// remembered (which was sending exported files to surprising places).
+///
+/// We prefer Documents over Downloads here because the export is editable text
+/// the user is likely to keep, not a throwaway download. Both are honoured if
+/// the user navigates elsewhere in the dialog.
+#[tauri::command]
+fn default_save_dir() -> String {
+    dirs::document_dir()
+        .or_else(dirs::home_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string())
+}
+
 /// Run OCR on a raw image file (PNG/JPG/BMP/WebP/...). The heavy work is
 /// performed on a blocking thread so the UI stays responsive.
 #[tauri::command]
@@ -263,6 +281,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // Initialize env_logger. Default to `info` for our crates so the
             // per-stage OCR timing logs print without setting RUST_LOG; set
@@ -291,6 +310,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             available_languages,
             read_files,
+            default_save_dir,
             ocr_from_bytes,
             render_pdf,
             languages::list_languages,
