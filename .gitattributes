@@ -13,3 +13,8 @@
 #   git add kraken-models/bur_segment.safetensors kraken-models/bur_recog.safetensors
 #   git commit -m "Track kraken models via Git LFS"
 kraken-models/*.safetensors filter=lfs diff=lfs merge=lfs -text
+
+# Git LFS tracking for the bundled PP-OCRv6 tiny-det model weights (1.70 MB).
+# Same pattern as kraken-models — embedded into the app binary via
+# `include_bytes!`; LFS keeps them out of regular git history.
+ppocr-models/*.safetensors filter=lfs diff=lfs merge=lfs -text

@@ -20,6 +20,11 @@ export type ImageMode = "color" | "gray" | "bw";
  * Tesseract handles both segmentation and recognition. */
 export type Engine = "tesseract" | "kraken";
 
+/** Segmentation stage for the Myanmar path (line-box detection). Ignored for
+ * other languages. PP-OCR (the tiny detector) is the default; Kraken is the
+ * legacy alternative for cases where baseline-aware segmentation helps. */
+export type Segmenter = "kraken" | "ppocr";
+
 /** Binarization method for the Myanmar/Kraken path. `null` disables it.
  * Ignored by the Tesseract path (libtesseract does its own binarization). */
 export type Binarize = "otsu" | "sauvola" | null;
@@ -35,6 +40,9 @@ export interface OcrOpts {
   /** Myanmar/Kraken path only. Binarize line crops before recognition — use
    * when the recognition model was trained on 1-bit (binarized) images. */
   binarize: Binarize;
+  /** Myanmar path only. Which line-box detector runs before recognition:
+   * "ppocr" (PaddleOCR PP-OCRv6 tiny, default) or "kraken". */
+  segmenter: Segmenter;
 }
 
 /** A single file in the batch queue. */
@@ -329,6 +337,7 @@ export async function deleteLanguage(code: string): Promise<void> {
 const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
 const BINARIZE_KEY = "just-ocr:binarize";
+const LAST_SEGMENTER_KEY = "just-ocr:segmenter";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
 export function lastLanguage(): string | null {
@@ -364,6 +373,29 @@ export function lastEngine(): Engine {
 export function saveEngine(engine: Engine): void {
   try {
     localStorage.setItem(LAST_ENGINE_KEY, engine);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the last-used Myanmar segmenter from localStorage; defaults to "ppocr".
+ * Only "kraken" switches away from the default — any other stored value (or a
+ * missing/unavailable storage) falls back to "ppocr". */
+export function lastSegmenter(): Segmenter {
+  try {
+    return localStorage.getItem(LAST_SEGMENTER_KEY) === "kraken"
+      ? "kraken"
+      : "ppocr";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return "ppocr";
+  }
+}
+
+/** Persist the chosen segmenter so it is pre-selected on next launch. */
+export function saveSegmenter(segmenter: Segmenter): void {
+  try {
+    localStorage.setItem(LAST_SEGMENTER_KEY, segmenter);
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

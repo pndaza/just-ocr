@@ -50,6 +50,9 @@ hayro = "0.7"
 # Kraken OCR engine (vendored from kraken-rust, candle-only path). Lives in its
 # own workspace crate so dev builds optimize it like any other dependency.
 kraken-engine = { path = "kraken-engine" }
+# PP-OCRv6 tiny detector (vendored from ppocr-rs, detector-only). Alternative
+# Myanmar segmenter. Same out-of-workspace trick as kraken-engine.
+ppocr-engine = { path = "ppocr-engine" }
 anyhow = "1"
 log = "0.4"
 once_cell = "1"
