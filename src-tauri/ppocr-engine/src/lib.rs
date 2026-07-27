@@ -30,6 +30,10 @@ mod postprocess;
 mod preprocess;
 mod tensor;
 mod weights;
+// Windows-only CPU-set pinning (selects performance cores on hybrid CPUs
+// like Intel P/E-core). Gates match upstream ppocr-rs/src/cpu/mod.rs.
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use model::{CpuOptions, Detector};
 pub use postprocess::{Detection, DetectorTransform, Point};
