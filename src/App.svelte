@@ -21,8 +21,6 @@
     saveLanguage,
     lastEngine,
     saveEngine,
-    lastBinarize,
-    saveBinarize,
     lastSegmenter,
     saveSegmenter,
     lastMergeParagraphs,
@@ -65,14 +63,13 @@
     engine: lastEngine(),
     language: lastLanguage() ?? "eng",
     psm: 3,
-    binarize: lastBinarize(),
     segmenter: lastSegmenter(),
   });
 
   // Merge-paragraphs is a display-only preference (it does not change what the
   // OCR engine returns, only how the recognized lines are projected for the
   // text panel + export). Lives in the toolbar so it can be toggled before a
-  // run; persisted globally like binarize/segmenter.
+  // run; persisted globally like segmenter.
   let mergeParagraphs = $state(lastMergeParagraphs());
 
   // Remember the chosen engine + language so they are pre-selected on the next
@@ -83,10 +80,6 @@
   });
   $effect(() => {
     saveLanguage(opts.language);
-  });
-  // Binarize is a persisted global preference (chosen in Settings).
-  $effect(() => {
-    saveBinarize(opts.binarize);
   });
   // Segmenter (Myanmar line-box detector) is persisted so the chosen Seg
   // dropdown value is sticky across launches.

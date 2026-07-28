@@ -37,11 +37,6 @@ pub struct OcrOpts {
     /// Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path;
     /// ignored by the Myanmar path (Kraken does layout there).
     pub psm: i32,
-    /// Binarize line crops before recognition (Myanmar/Kraken path only):
-    /// `"otsu"` (global threshold) or `"sauvola"` (local adaptive). `None`
-    /// disables binarization. Ignored by the Tesseract path. Use when the
-    /// recognition model was trained on 1-bit (binarized) images.
-    pub binarize: Option<String>,
     /// Segmenter choice for the Myanmar path: `"ppocr"` (default) or `"kraken"`.
     /// `None`/unrecognized → PP-OCR. Ignored for non-Myanmar (full-page Tesseract).
     #[serde(default)]
@@ -231,7 +226,6 @@ async fn render_pdf(
     let mode = mode.unwrap_or_default();
     let image_mode = match image_mode.as_deref() {
         Some("color") => pdf::ImageMode::Color,
-        Some("bw") => pdf::ImageMode::Bw,
         _ => pdf::ImageMode::Gray,
     };
     async_runtime::spawn_blocking(move || {

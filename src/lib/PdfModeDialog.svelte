@@ -1,13 +1,12 @@
 <script lang="ts">
   import type { ImageMode, PdfMode } from "./ocr";
 
-  // Color format for the per-page PNGs. Grayscale is the Tesseract-friendly
-  // default (smaller, no accuracy loss); B&W is Otsu-thresholded for pristine
-  // scans; Color keeps the source as-is.
+  // Color format for the per-page PNGs. Grayscale is the default (smaller,
+  // no accuracy loss — recognizers binarize internally); Color keeps the
+  // source as-is.
   const imageModes: { value: ImageMode; label: string; hint: string }[] = [
     { value: "color", label: "Color", hint: "Keep the source as-is" },
-    { value: "gray", label: "Gray", hint: "Best for Tesseract (default)" },
-    { value: "bw", label: "B&W", hint: "Otsu-thresholded, for clean scans" },
+    { value: "gray", label: "Gray", hint: "Best for OCR (default)" },
   ];
 
   interface Props {
