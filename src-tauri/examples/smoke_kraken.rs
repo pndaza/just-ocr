@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
         if cw < 2 || ch < 2 {
             continue;
         }
-        let text = match engine.recognize_line_dewarped(&img, &line.baseline, &line.boundary, None) {
+        let text = match engine.recognize_line_dewarped(&img, &line.baseline, &line.boundary) {
             Ok(t) => t,
             Err(e) => {
                 println!("  line {i}: recognize failed: {e}");

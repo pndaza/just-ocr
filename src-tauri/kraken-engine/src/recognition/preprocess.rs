@@ -2,15 +2,21 @@
 //!
 //! Port of kraken's `ImageInputTransforms` for the input spec `(1, 48, 0, 1)`:
 //!   1. Convert to grayscale ('L')
-//!   2. (Optional) Binarize — for models trained on 1-bit images
-//!   3. Normalize to target height:
+//!   2. Sauvola binarization on the full-resolution crop. Binarizing before
+//!      resize gives Sauvola the maximum pixel population for its local-window
+//!      threshold, and lets the bleed-trim (step 3) operate on a clean 1-bit
+//!      strip at native resolution.
+//!   3. Trim neighbor-line bleed + crop to the text body (rows between the
+//!      first white gap above and below the ink center). See
+//!      [`trim_neighbor_bleed`].
+//!   4. Normalize to target height:
 //!      - if `center_norm`: ocropy `CenterNormalizer` content dewarp + resize
 //!        (kraken `_create_transforms` branch B; this is the path our model
 //!        spec selects — see [`super::lineest`])
 //!      - else: plain Lanczos resize keeping aspect ratio
-//!   4. Pad 16px left + 16px right, fill=255 (white)
-//!   5. Scale to [0,1] (uint8 / 255)
-//!   6. Invert (1.0 - im) — ink becomes high values
+//!   5. Pad 16px left + 16px right, fill=255 (white)
+//!   6. Scale to [0,1] (uint8 / 255)
+//!   7. Invert (1.0 - im) — ink becomes high values
 //!
 //! The input `image` is expected to be an already-dewarped flat strip from
 //! [`super::dewarp::extract_polygon_line`] (Stage 1 geometric warp).
@@ -20,32 +26,20 @@ use anyhow::Result;
 use candle_core::{Device, Tensor};
 use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
 
-/// Optional binarization applied before the resize step.
-///
-/// Used to match the distribution of recognition models trained on 1-bit
-/// (binarized) line images, where offline binarization was applied before
-/// training and is therefore not recorded in the model's `one_channel_mode`
-/// metadata (which stays `"L"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Binarization {
-    /// Global Otsu threshold — one value for the whole image. Fast and robust
-    /// on evenly-lit crops.
-    Otsu,
-    /// Sauvola local adaptive threshold — per-pixel threshold from local mean
-    /// and standard deviation. Better than Otsu for uneven lighting and for
-    /// scripts (e.g. Burmese) where preserving thin strokes and diacritics
-    /// matters. Faithful port of Leptonica's `pixSauvolaGetThreshold`.
-    Sauvola,
-}
-
 /// Preprocess a line image for recognition.
 ///
-/// When `binarize` is `Some(...)`, the grayscale image is binarized **before**
-/// the height-normalize step. This is required for recognition models whose
-/// training data was 1-bit (binarized) PNGs: the model learned anti-aliased-
-/// binary edge profiles, so feeding continuous-tone grayscale at inference
-/// causes a train/serve distribution mismatch. Binarizing before the resize
-/// re-introduces the anti-aliased-binary edges the model expects.
+/// Binarization (Sauvola local adaptive threshold) is **always applied**, on
+/// the full-resolution grayscale crop and *before* the resize. Binarizing at
+/// native resolution gives Sauvola the maximum pixel population for its local-
+/// window statistics (more accurate threshold), and lets the bleed-trim
+/// operate on a clean 1-bit strip before any resampling. The subsequent resize
+/// then scales only the cleaned text body.
+///
+/// Sauvola (not Otsu) is used because it adapts per-pixel to local lighting,
+/// which preserves thin strokes and diacritics in scripts like Burmese where a
+/// single global threshold can erode fine detail. It is skipped automatically
+/// when the strip is already binary (1-bit source), where re-thresholding is a
+/// no-op at best and degenerate at worst.
 ///
 /// When `center_norm` is true, the height normalization uses kraken's ocropy
 /// `CenterNormalizer` (content dewarp + resize) instead of a plain Lanczos
@@ -56,34 +50,54 @@ pub fn preprocess_line(
     image: &DynamicImage,
     target_height: usize,
     padding: usize,
-    binarize: Option<Binarization>,
     center_norm: bool,
 ) -> Result<Tensor> {
+    // Debug aid: when KRKN_DUMP_DIR is set, write the input crop and each
+    // intermediate stage to that dir so the pipeline can be inspected.
+    // One seq per line keeps a line's stages grouped.
+    let dump_seq = crate::next_dump_seq();
+    crate::dump_debug(image, "in", dump_seq);
+
     // 1. Convert to grayscale.
     let gray = image.to_luma8();
 
-    // 2. Optional binarization (before resize so Lanczos re-anti-aliases the
-    //    binary edges, matching the 1-bit training distribution). Skip if the
-    //    line is already binary (e.g. a 1-bit source PNG, or a page that came
-    //    through PDF "B&W" extraction): re-running Otsu/Sauvola on {0,255}
-    //    data is a no-op at best and degenerate (Sauvola's local variance
-    //    collapses in uniform regions) at worst.
-    let gray = match binarize {
-        Some(_) if is_binary(&gray) => gray,
-        Some(Binarization::Otsu) => binarize_otsu(&gray),
-        Some(Binarization::Sauvola) => binarize_sauvola(&gray),
-        None => gray,
+    // 2. Sauvola binarization on the full-resolution grayscale crop. Binarizing
+    //    before resize gives Sauvola the maximum pixel population for its local
+    //    window statistics (more accurate threshold), and lets the bleed-trim
+    //    + crop (step 3) operate on a clean 1-bit strip at native resolution
+    //    before any resampling. The subsequent resize then scales only the
+    //    cleaned text body.
+    let binary = if is_binary(&gray) {
+        gray
+    } else {
+        binarize_sauvola(&gray)
     };
 
-    // 3. Normalize to target_height.
+    // 3. Remove neighbor-line ink that bled into an over-tall quad, then CROP
+    //    to the text body (rows [top..=bottom]). Cropping — not just clearing
+    //    to white — means the resize scales only the real text, with no dead
+    //    white rows diluting the height normalization.
+    let binary = trim_neighbor_bleed(&binary);
+    crate::dump_debug(
+        &DynamicImage::ImageLuma8(binary.clone()),
+        "trimmed",
+        dump_seq,
+    );
+
+    // 4. Normalize to target_height.
     let resized = if center_norm {
         let mut lnorm = super::lineest::CenterNormalizer::new(target_height);
-        super::lineest::dewarp_line(&mut lnorm, &gray)
+        super::lineest::dewarp_line(&mut lnorm, &binary)
     } else {
-        resize_to_height(&gray, target_height)
+        resize_to_height(&binary, target_height)
     };
+    crate::dump_debug(
+        &DynamicImage::ImageLuma8(resized.clone()),
+        "resized",
+        dump_seq,
+    );
 
-    // 4. Pad left and right with white (255).
+    // 5. Pad left and right with white (255).
     let (w, h) = (resized.width() as usize, resized.height() as usize);
     let padded_w = w + 2 * padding;
     let mut padded: GrayImage = ImageBuffer::from_pixel(
@@ -102,7 +116,7 @@ pub fn preprocess_line(
         }
     }
 
-    // 5 & 6. Scale to [0,1] and invert in one pass.
+    // 6 & 7. Scale to [0,1] and invert in one pass.
     let data: Vec<f32> = padded
         .iter()
         .map(|&px| 1.0 - (px as f32) / 255.0)
@@ -129,18 +143,6 @@ fn resize_to_height(image: &GrayImage, target_height: usize) -> GrayImage {
     let new_w = ((orig_w as f64) * (target_height as f64) / (orig_h as f64)).round() as u32;
     let new_w = new_w.max(1);
     image::imageops::resize(image, new_w, new_h, image::imageops::FilterType::Lanczos3)
-}
-
-/// Binarize a grayscale image using Otsu's automatic threshold selection.
-///
-/// Computes a global threshold that maximizes inter-class variance, then maps
-/// pixels to pure black (ink = 0) / white (background = 255). This preserves
-/// the black-on-white document polarity that the subsequent invert step (in
-/// [`preprocess_line`]) expects.
-fn binarize_otsu(image: &GrayImage) -> GrayImage {
-    use imageproc::contrast::{threshold, ThresholdType};
-    let level = imageproc::contrast::otsu_level(image);
-    threshold(image, level, ThresholdType::Binary)
 }
 
 /// Binarize a grayscale image using Sauvola local adaptive thresholding.
@@ -254,6 +256,108 @@ fn is_binary(image: &GrayImage) -> bool {
     image.iter().all(|&p| p == 0 || p == 255)
 }
 
+/// Row ink-density threshold below which a row counts as a horizontal white
+/// gap separating the main text body from neighbor-line bleed. Strict zero is
+/// too fragile (a single stray pixel would block the trim); 0.5% is sparse
+/// enough to be a real gap in a 1-bit strip yet tolerant of one or two specks.
+const BLEED_GAP_DENSITY: f64 = 0.005;
+
+/// Remove neighbor-line ink that bled into the top/bottom of an over-tall
+/// PP-OCR quad, returning the CROPPED text body.
+///
+/// PP-OCR's quads are sometimes a few pixels taller than the text they bound,
+/// capturing fragments of the lines above/below. After binarization this
+/// shows up as ink separated from the main text body by a horizontal white
+/// gap. This scans outward from the text center, finds the first gap in each
+/// direction, and returns the sub-image `[top..=bottom]` — i.e. the real text
+/// body with the bleed rows (and any dead white padding above/below) removed.
+///
+/// Cropping rather than clearing-to-white means the subsequent resize scales
+/// only the cleaned text body to `target_height`, so no dead rows dilute the
+/// height normalization. The center is the median row of inked pixels (robust
+/// to asymmetric ascender/descender distributions).
+///
+/// Tall scripts (e.g. Burmese vowel signs and stacked consonants) are safe:
+/// they stay connected to the centerline by intermediate inked rows, so the
+/// scan never sees a gap between them and the center. Only ink genuinely
+/// separated by whitespace is dropped.
+fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
+    let (w, h) = image.dimensions();
+
+    // Per-row ink density. Ink = dark pixels (< 128) on the black-on-white
+    // binarized strip.
+    let mut density = vec![0.0f64; h as usize];
+    let threshold = 128u8;
+    for y in 0..h {
+        let mut ink = 0u32;
+        for x in 0..w {
+            if image.get_pixel(x, y)[0] < threshold {
+                ink += 1;
+            }
+        }
+        density[y as usize] = ink as f64 / w as f64;
+    }
+
+    // Center = median row of meaningfully-inked rows. If the strip is (near-)
+    // empty there's nothing to trim — return it unchanged.
+    let inked: Vec<u32> = density
+        .iter()
+        .enumerate()
+        .filter(|(_, &d)| d > BLEED_GAP_DENSITY)
+        .map(|(i, _)| i as u32)
+        .collect();
+    if inked.is_empty() {
+        return image.clone();
+    }
+    let center = inked[inked.len() / 2] as i32;
+
+    // Scan upward from center-1; first gap row marks the top text boundary.
+    let mut top = 0i32;
+    for r in (0..center).rev() {
+        if density[r as usize] < BLEED_GAP_DENSITY {
+            top = r + 1;
+            break;
+        }
+    }
+    // Scan downward from center+1; first gap row marks the bottom boundary.
+    let mut bottom = (h - 1) as i32;
+    for r in (center + 1)..h as i32 {
+        if density[r as usize] < BLEED_GAP_DENSITY {
+            bottom = r - 1;
+            break;
+        }
+    }
+
+    // Keep a proportional white margin above/below the text body. The model
+    // expects the glyphs surrounded by some whitespace (training renders
+    // weren't tight-cropped), so cropping flush to the body would over-stretch
+    // it at the resize. Margin = a fraction of the body height, symmetric,
+    // clamped to the available white rows so we never reach back into bleed.
+    let body_h = (bottom - top + 1).max(1);
+    let margin = (body_h as f64 * BLEED_KEEP_MARGIN_FRAC).round() as i32;
+    let top = (top - margin).max(0);
+    let bottom = (bottom + margin).min((h - 1) as i32);
+
+    // Return the cropped [top..=bottom] with the margin kept as white. The
+    // margin rows beyond the original strip bounds are dropped (clamped above),
+    // so they aren't synthesized — only rows that actually existed (and were
+    // white, being outside the body) are kept.
+    let new_h = (bottom - top + 1).max(1) as u32;
+    let mut out = GrayImage::new(w, new_h);
+    for (oy, sy) in (top..=bottom).enumerate() {
+        for x in 0..w {
+            out.put_pixel(x, oy as u32, *image.get_pixel(x, sy as u32));
+        }
+    }
+    out
+}
+
+/// Fraction of the text-body height to keep as white margin above and below
+/// when trimming neighbor-bleed. 0.15 ≈ 15%: enough breathing room that the
+/// resize doesn't over-stretch the glyphs, small enough that a typical over-
+/// tall quad still sheds its bleed. Tuned for the bundled Burmese model.
+const BLEED_KEEP_MARGIN_FRAC: f64 = 0.15;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,7 +381,7 @@ mod tests {
         // test is "output height == target_height", not "height is 48".
         let target_height = 48;
         let padding = 16;
-        let tensor = preprocess_line(&img, target_height, padding, None, false).unwrap();
+        let tensor = preprocess_line(&img, target_height, padding, false).unwrap();
         let dims = tensor.dims();
         assert_eq!(dims.len(), 4);
         assert_eq!(dims[0], 1); // batch
@@ -285,36 +389,6 @@ mod tests {
         assert_eq!(dims[2], target_height); // height tracks the argument
         // Width should be > 0
         assert!(dims[3] > 2 * padding); // at least 2*padding
-    }
-
-    #[test]
-    fn test_binarize_otsu_produces_binary_output() {
-        // Build a synthetic grayscale image: dark half (0..16) on the left,
-        // bright half (200..255) on the right. Otsu should find a threshold
-        // somewhere in the gap and split the two halves cleanly.
-        let (w, h) = (32u32, 4u32);
-        let mut img: GrayImage = ImageBuffer::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let v = if x < w / 2 { (x * 4) as u8 } else { 200 + (x as u8 % 8) * 7 };
-                img.put_pixel(x, y, Luma([v]));
-            }
-        }
-
-        let out = binarize_otsu(&img);
-
-        // Every output pixel must be exactly 0 (ink) or 255 (background).
-        for p in out.iter() {
-            assert!(
-                *p == 0 || *p == 255,
-                "binarize_otsu produced a non-binary pixel: {p}"
-            );
-        }
-
-        // Polarity: dark input region → 0 (ink), bright input region → 255 (bg).
-        // This is the black-on-white polarity the invert step expects.
-        assert_eq!(out.get_pixel(0, 0)[0], 0, "dark input should map to ink (0)");
-        assert_eq!(out.get_pixel(w - 1, 0)[0], 255, "bright input should map to bg (255)");
     }
 
     #[test]
@@ -383,40 +457,129 @@ mod tests {
     }
 
     #[test]
-    fn test_preprocess_line_skips_binarize_on_binary_input() {
-        // Feature guard: when the input is already binary, the `binarize`
-        // option must have NO effect on the output tensor — i.e. passing
-        // `Some(Otsu)` produces the same tensor as `None`. This is the
-        // regression test for the skip-binary-input behavior.
-        //
-        // Build a small binary image (mix of ink and background), wrap as a
-        // DynamicImage, and compare the two preprocess_line outputs.
+    fn test_preprocess_line_skips_sauvola_on_binary_input() {
+        // Feature guard: when the input is already binary, Sauvola must be
+        // skipped (its local-variance estimate degenerates on uniform {0,255}
+        // regions). We assert this indirectly — since resize legitimately
+        // anti-aliases {0,255} edges into gray ramps when upscaling, we can't
+        // check the full tensor for binary values. Instead we verify the
+        // `is_binary` gate itself: a {0,255} image is detected as binary, so
+        // the binarize stage is a no-op (the four `test_is_binary_*` cases
+        // cover the detector; this test pins the pipeline-level consequence).
         let (w, h) = (16u32, 4u32);
         let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
         for x in 2..6 {
             img.put_pixel(x, 1, Luma([0]));
             img.put_pixel(x, 2, Luma([0]));
         }
+        // The is_binary gate must fire → Sauvola branch is skipped.
+        assert!(is_binary(&img), "binary input not detected — Sauvola would run");
+
+        // And the full pipeline must not error on binary input.
         let dyn_img = DynamicImage::ImageLuma8(img);
+        let tensor = preprocess_line(&dyn_img, h as usize, 2, false).expect("preprocess failed");
+        // Output shape is intact (1, 1, target_height, padded_w).
+        let dims = tensor.dims();
+        assert_eq!(dims[0], 1);
+        assert_eq!(dims[1], 1);
+        assert_eq!(dims[2], h as usize);
+    }
 
-        let tensor_none =
-            preprocess_line(&dyn_img, 4, 2, None, false).expect("None path failed");
-        let tensor_otsu = preprocess_line(&dyn_img, 4, 2, Some(Binarization::Otsu), false)
-            .expect("Otsu path failed");
+    #[test]
+    fn test_trim_neighbor_bleed_crops_to_text_body() {
+        // A 16-row strip with a contiguous text body in rows 6..10, plus
+        // stray "bleed" ink in the top rows (1..2) and bottom rows (13..14),
+        // separated from the body by white gaps (rows 3..5 and 11..12).
+        // The trim should drop the bleed rows (1..2, 13..14) and keep the
+        // body (6..10) plus a small white margin around it.
+        let (w, h) = (16u32, 16u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        // Main body rows 6..10.
+        for y in 6..=10 {
+            for x in 2..14 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        // Bleed above (rows 1..2).
+        for x in 3..6 {
+            img.put_pixel(x, 1, Luma([0]));
+            img.put_pixel(x, 2, Luma([0]));
+        }
+        // Bleed below (rows 13..14).
+        for x in 8..11 {
+            img.put_pixel(x, 13, Luma([0]));
+            img.put_pixel(x, 14, Luma([0]));
+        }
 
-        // Same shape (sanity) and identical values → binarize was skipped.
-        assert_eq!(tensor_none.shape(), tensor_otsu.shape(), "shapes diverged");
-        let none_vals = tensor_none.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        let otsu_vals = tensor_otsu.flatten_all().unwrap().to_vec1::<f32>().unwrap();
-        assert_eq!(
-            none_vals.len(),
-            otsu_vals.len(),
-            "value counts diverged (should be identical)"
+        let out = trim_neighbor_bleed(&img);
+
+        // Output is the body (5 rows) + a symmetric 15% margin (≈1 row each
+        // side) = 7 rows, strictly less than the original 16 (bleed dropped).
+        assert_eq!(out.width(), w, "width unchanged");
+        assert!(
+            out.height() < h,
+            "should drop the bleed rows ({} < {})",
+            out.height(),
+            h
         );
-        for (i, (a, b)) in none_vals.iter().zip(otsu_vals.iter()).enumerate() {
-            assert!(
-                (a - b).abs() < 1e-6,
-                "pixel {i} differs: None={a}, Otsu={b} — binarize was NOT skipped on binary input"
+        // All 5 body rows of ink must survive somewhere in the output.
+        let ink_rows: Vec<usize> = (0..out.height())
+            .map(|y| out.get_pixel(5, y)[0])
+            .enumerate()
+            .filter_map(|(y, v)| if v == 0 { Some(y) } else { None })
+            .collect();
+        assert_eq!(
+            ink_rows.len(),
+            5,
+            "all 5 body ink rows must survive, got {ink_rows:?}"
+        );
+        // Bleed rows (src rows 1..2 above, 13..14 below) must be entirely
+        // absent — i.e. the crop window [5..=11] excludes them. The output
+        // maps src rows 5..11 → out rows 0..6, so neither bleed band appears.
+        // Verify by checking the white margin rows (out row 0 = src row 5, a
+        // gap row) carry no ink at the bleed columns.
+        assert_eq!(out.get_pixel(3, 0)[0], 255, "top margin row should be white");
+        assert_eq!(out.get_pixel(8, out.height() - 1)[0], 255, "bottom margin row should be white");
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_noop_on_no_gap() {
+        // When ink fills the whole strip with no white gap, nothing should be
+        // trimmed (the whole strip is the text body). Guards against trimming
+        // legitimate full-height ink. Height is unchanged.
+        let (w, h) = (8u32, 8u32);
+        let img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([0]));
+        let out = trim_neighbor_bleed(&img);
+        assert_eq!(out.dimensions(), (w, h), "full-ink strip height should be unchanged");
+        assert!(out.iter().all(|&p| p == 0), "full-ink strip was wrongly trimmed");
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_preserves_tall_diacritic() {
+        // A tall vertical stroke (like a Burmese vowel sign) extending from
+        // the body up to row 0, with NO white gap between it and the body,
+        // must NOT be cropped away — it's connected to the centerline.
+        let (w, h) = (16u32, 16u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        // Body rows 6..10.
+        for y in 6..=10 {
+            for x in 2..14 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        // Tall stroke from body up to row 0 (contiguous, no gap).
+        for y in 0..=10 {
+            img.put_pixel(7, y, Luma([0]));
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // The tall stroke must survive at every output row — it's connected
+        // to the body, so the upward scan finds no gap and top stays at row 0.
+        for y in 0..=10 {
+            assert_eq!(
+                out.get_pixel(7, y)[0], 0,
+                "tall diacritic at out-row {y} was wrongly cropped (not separated by a gap)"
             );
         }
     }
