@@ -143,7 +143,7 @@ fn run_ocr(
 }
 
 /// How to turn a PDF page into an image. "extract" pulls the embedded raster
-/// scan (fast, native resolution); "render" rasterizes the page at 1500px
+/// scan (fast, native resolution); "render" rasterizes the page at 1600px
 /// height (slower, handles vector/mixed content).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -159,8 +159,9 @@ impl Default for PdfMode {
 }
 
 /// Fixed output height for render mode. Chosen as a balance between OCR
-/// accuracy and speed; wide enough to keep body text legible at any page size.
-const PDF_RENDER_HEIGHT: u16 = 1500;
+/// accuracy and speed; ~53px per 30pt glyph (1600 / 30), tall enough to keep
+/// body text legible at any page size.
+const PDF_RENDER_HEIGHT: u16 = 1600;
 
 /// PDF page PNGs are written under the system temp dir to
 /// `just-ocr-<pid>-<seq>`. We namespace by PID so a directory is unambiguously

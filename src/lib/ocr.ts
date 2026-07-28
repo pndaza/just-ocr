@@ -9,7 +9,7 @@ export type { OcrResult, LineBox } from "./result";
 
 /** How a PDF is turned into per-page images before OCR.
  * - "extract": pull the embedded raster scan (fast, native resolution)
- * - "render":  rasterize the page at 1500px height (handles vector content) */
+ * - "render":  rasterize the page at 1600px height (handles vector content) */
 export type PdfMode = "extract" | "render";
 
 /** Color format for the per-page PNGs a PDF is turned into before OCR.

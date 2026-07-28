@@ -77,7 +77,7 @@
         <button class="opt" onclick={() => onprocess("render", imageMode)}>
           <span class="opt-title">Render</span>
           <span class="opt-desc">
-            Rasterize each page at 1500px height. Best for vector or mixed content.
+            Rasterize each page at 1600px height. Best for vector or mixed content.
           </span>
         </button>
       </div>
