@@ -5,8 +5,9 @@
 //!   resolution — correct for Tesseract. Best for scanned PDFs, which are just
 //!   containers around full-page images.
 //! - **Render**: rasterize each page with `hayro` at a fixed output height of
-//!   1500 px. Slower, but handles PDFs with no extractable image (vector text,
-//!   mixed content) by producing a faithful bitmap of the page.
+//!   1600 px (see `PDF_RENDER_HEIGHT` in `lib.rs`). Slower, but handles PDFs
+//!   with no extractable image (vector text, mixed content) by producing a
+//!   faithful bitmap of the page.
 //!
 //! Both return one PNG per page so the result drops straight into the existing
 //! image-based OCR pipeline.

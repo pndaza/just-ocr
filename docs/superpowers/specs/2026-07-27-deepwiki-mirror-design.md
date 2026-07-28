@@ -190,8 +190,8 @@ owns which slice of state.
 ### 7. `PDF-Support.md`
 
 **Role.** The extract-vs-render duality (lopdf extracts the largest embedded
-image XObject per page, default; hayro rasterizes at `PDF_RENDER_HEIGHT=1500`
-in render mode). Image modes (Color / Gray / Bw-with-Otsu). The decode filter
+image XObject per page, default; hayro rasterizes at `PDF_RENDER_HEIGHT=1600`
+in render mode). Image modes (Color / Gray). The decode filter
 chain (`decode_image` dispatches DCT/JPX/JBIG2/CCITT/Flate/RunLength/PNG
 predictor). Per-page temp PNGs at
 `$TMPDIR/just-ocr-<pid>-<seq>/pNNN.png` and why they're path-returned (not
