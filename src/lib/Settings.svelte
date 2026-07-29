@@ -29,8 +29,11 @@
   // `updateAvailable` prop — opening Settings never re-fires the startup check).
   let status = $state<UpdateStatus>({ kind: "idle" });
 
+  // getVersion() rejects only outside a Tauri runtime (e.g. vitest/jsdom), where
+  // appVersion staying "" is the correct fallback — the header just omits the
+  // version. Swallow so it never surfaces as an unhandled promise rejection.
   $effect(() => {
-    getVersion().then((v) => (appVersion = v));
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
   });
 
   // If the startup check already found an update, pre-populate as "available".
@@ -132,7 +135,13 @@
           </div>
         {:else if status.kind === "downloading"}
           <div class="upd-progress">
-            <div class="bar"><div class="fill" style="width:{status.percent}%"></div></div>
+            <div
+              class="bar"
+              role="progressbar"
+              aria-valuenow={status.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            ><div class="fill" style="width:{status.percent}%"></div></div>
             <span class="upd-note">Downloading… {status.percent}%</span>
           </div>
         {:else if status.kind === "installing"}
