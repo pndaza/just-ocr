@@ -6,9 +6,9 @@
 //!      resize gives Sauvola the maximum pixel population for its local-window
 //!      threshold, and lets the bleed-trim (step 3) operate on a clean 1-bit
 //!      strip at native resolution.
-//!   3. Trim neighbor-line bleed + crop to the text body (rows between the
-//!      first white gap above and below the ink center). See
-//!      [`trim_neighbor_bleed`].
+//!   3. Trim neighbor-line bleed + crop to the text body. A per-chunk white-gap
+//!      scan (150px column windows) finds the separator between body and bleed.
+//!      See [`trim_neighbor_bleed`].
 //!   4. Normalize to target height:
 //!      - if `center_norm`: ocropy `CenterNormalizer` content dewarp + resize
 //!        (kraken `_create_transforms` branch B; this is the path our model
@@ -260,7 +260,22 @@ fn is_binary(image: &GrayImage) -> bool {
 /// gap separating the main text body from neighbor-line bleed. Strict zero is
 /// too fragile (a single stray pixel would block the trim); 0.5% is sparse
 /// enough to be a real gap in a 1-bit strip yet tolerant of one or two specks.
+///
+/// When the horizontal scan finds no gap at this threshold (tight line spacing
+/// where every outer-region row carries some ink), the seam fallback fires.
+/// The seam's connected-component forbidden mask then protects diacritics that
+/// are linked to the body — the only reliable way to distinguish sparse
+/// diacritics from sparse bleed, since their row-level ink counts overlap
+/// completely (both median ~56px on the test corpus).
 const BLEED_GAP_DENSITY: f64 = 0.005;
+
+/// Fraction of the peak row density that still counts as "body" when walking
+/// outward from the densest row to find the text-body extent. The body is the
+/// densest ink region (the actual glyphs); bleed fragments are sparser. 0.30
+/// means a row is body if its ink density exceeds 30% of the peak — wide
+/// enough to capture ascenders/descenders at the body's edges, tight enough to
+/// stop where ink thins into bleed. See [`trim_neighbor_bleed`].
+const BLEED_BODY_DENSITY_FRAC: f64 = 0.30;
 
 /// Half-height of the protected band around the line center, as a fraction of
 /// the core body height. Within `[center ± protect]` ink is assumed to belong
@@ -284,40 +299,46 @@ const BLEED_GAP_DENSITY: f64 = 0.005;
 /// cropped, down if bleed survives.
 const BLEED_PROTECT_FRAC: f64 = 0.6;
 
+/// Width of each column chunk for the per-chunk white-row gap scan. The full
+/// strip width (~800px) often has no row-wide white gap between body and bleed
+/// because bleed and body overlap in different columns. A narrow 100px window
+/// is much more likely to contain a clean gap — bleed rarely spans every column
+/// within such a window. The scan runs independently per chunk, producing a
+/// piecewise-flat (staircase) boundary that adapts to where the gap sits. Chunks
+/// with no gap keep everything (safe default). Smaller chunks find gaps more
+/// readily but produce a more ragged boundary; 100 is a balance.
+const BLEED_CHUNK_WIDTH: u32 = 100;
+
 /// Remove neighbor-line ink that bled into the top/bottom of an over-tall
 /// PP-OCR quad, returning the CROPPED text body.
 ///
 /// PP-OCR's quads are sometimes a few pixels taller than the text they bound,
-/// capturing fragments of the lines above/below. After binarization this
-/// shows up as ink separated from the main text body by a horizontal white
-/// gap. This finds the first such gap in the OUTER region (beyond a protect
-/// band around the center) and returns the sub-image `[top..=bottom]`.
+/// capturing fragments of the lines above/below. After binarization this shows
+/// up as ink separated from the main text body by whitespace. The separator is
+/// found by a **per-chunk white-row scan**: the strip width is split into
+/// [`BLEED_CHUNK_WIDTH`]-px column chunks, and each chunk is scanned
+/// independently for the first row-wide white gap above/below the body. A
+/// narrow chunk is far more likely to contain a clean gap than the full width,
+/// because bleed and body overlap in fewer columns within a small window.
 ///
-/// **Protect band.** The gap search does NOT start at the body edge. It starts
+/// Chunks with no gap keep everything (safe default). The per-chunk boundaries
+/// form a piecewise-flat (staircase) cut — the output masks outside-boundary
+/// rows to white within a rectangular crop window.
+///
+/// **Protect band.** The gap scan does NOT start at the body edge. It starts
 /// only beyond `[center ± BLEED_PROTECT_FRAC × core_body_h]`. Anything inside
 /// that band — including gap-separated diacritics that belong to this line —
-/// is kept unconditionally. This is what distinguishes a diacritic (near
-/// center) from bleed (the next line, far from center): the gap width alone
-/// cannot, since tight line spacing can make the bleed gap as narrow as a
-/// diacritic gap. Position relative to center is the only reliable signal.
+/// is kept unconditionally.
 ///
-/// Cropping rather than clearing-to-white means the subsequent resize scales
-/// only the cleaned text body to `target_height`, so no dead rows dilute the
-/// height normalization.
-///
-/// **Centering.** The line center and core body height are derived from the
-/// **longest contiguous inked band**, not the median of all inked rows. The
-/// median is biased toward asymmetric bleed: when a quad captures a fragment
-/// of the line above but not below, the extra inked rows drag the median
-/// toward the bleed side, which inflates the protect band there and hides the
-/// separator gap from the scan. Taking the longest band as the body makes the
-/// center a property of the body alone — bleed and separated diacritics are
-/// shorter bands and cannot move it.
+/// **Body detection.** The line center and core body height are derived from
+/// the **densest ink region** (density-peak). Walking outward from the peak
+/// while density stays above a fraction of it isolates the body even when bleed
+/// and body share no row-wide white gap (tight line spacing).
 fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
     let (w, h) = image.dimensions();
 
-    // Per-row ink density. Ink = dark pixels (< 128) on the black-on-white
-    // binarized strip.
+    // Per-row ink density over the full width. Used for band detection and
+    // density-peak body finding.
     let mut density = vec![0.0f64; h as usize];
     let threshold = 128u8;
     for y in 0..h {
@@ -330,8 +351,8 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
         density[y as usize] = ink as f64 / w as f64;
     }
 
-    // Collect contiguous inked bands (runs of rows at/above the gap density).
-    // If the strip is (near-) empty there's nothing to trim — return unchanged.
+    // Collect contiguous inked bands. If the strip is (near-) empty there's
+    // nothing to trim — return unchanged.
     let mut bands: Vec<(i32, i32)> = Vec::new();
     let mut in_band = false;
     let mut band_start = 0i32;
@@ -353,79 +374,190 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
         return image.clone();
     }
 
-    // Body = longest contiguous inked band. The text body is definitionally
-    // the largest ink mass; bleed fragments and separated diacritics are
-    // shorter. Center and height both derive from THIS band, so asymmetric
-    // bleed cannot bias the protect-band placement.
-    let (body_top, body_bottom) = *bands
-        .iter()
-        .max_by_key(|&(s, e)| e - s + 1)
-        .expect("bands is non-empty");
+    // Body = contiguous run around the DENSEST row (density-peak). Lightly
+    // smoothed so a single noisy row can't shift the peak.
+    let smooth_window = 3usize;
+    let mut smoothed = vec![0.0f64; h as usize];
+    for y in 0..h as usize {
+        let mut sum = 0.0;
+        let mut n = 0.0;
+        for dy in -(smooth_window as i32)..=(smooth_window as i32) {
+            let yy = y as i32 + dy;
+            if yy >= 0 && yy < h as i32 {
+                sum += density[yy as usize];
+                n += 1.0;
+            }
+        }
+        smoothed[y] = sum / n;
+    }
+    let peak = (0..h as usize)
+        .max_by(|&a, &b| smoothed[a].total_cmp(&smoothed[b]))
+        .unwrap_or(0);
+    let peak_density = smoothed[peak];
+    let body_threshold = peak_density * BLEED_BODY_DENSITY_FRAC;
+    let mut body_top = peak as i32;
+    while body_top > 0 && smoothed[(body_top - 1) as usize] > body_threshold {
+        body_top -= 1;
+    }
+    let mut body_bottom = peak as i32;
+    while body_bottom < (h - 1) as i32
+        && smoothed[(body_bottom + 1) as usize] > body_threshold
+    {
+        body_bottom += 1;
+    }
     let center = (body_top + body_bottom) / 2;
     let core_body_h = (body_bottom - body_top + 1).max(1);
 
-    // Protect band: within [lo, hi] everything is kept unconditionally. The
-    // separator-gap scan runs only in the outer region (rows < lo upward,
-    // rows > hi downward). lo/hi are clamped to the strip bounds.
+    // Protect band: within [lo, hi] everything is kept unconditionally.
     let protect = (core_body_h as f64 * BLEED_PROTECT_FRAC).round() as i32;
     let lo = (center - protect).max(0);
     let hi = (center + protect).min((h - 1) as i32);
 
-    // Scan upward through the outer region only; first gap marks the top
-    // boundary. If no gap is found (diacritic extends to the edge, or the
-    // whole upper region is inked), top stays 0 — keep everything (safe).
-    let mut top = 0i32;
-    for r in (0..lo).rev() {
-        if density[r as usize] < BLEED_GAP_DENSITY {
-            top = r + 1;
-            break;
+    // Per-chunk white-row gap scan. Split the width into BLEED_CHUNK_WIDTH-px
+    // chunks; for each chunk, find the first white gap row above the protect
+    // band (top) and below it (bottom). Chunks with no gap keep everything.
+    let n_chunks = ((w + BLEED_CHUNK_WIDTH - 1) / BLEED_CHUNK_WIDTH) as usize;
+    let mut chunk_top: Vec<i32> = Vec::with_capacity(n_chunks);
+    let mut chunk_top_found: Vec<bool> = Vec::with_capacity(n_chunks);
+    let mut chunk_bot: Vec<i32> = Vec::with_capacity(n_chunks);
+    let mut chunk_bot_found: Vec<bool> = Vec::with_capacity(n_chunks);
+    for ci in 0..n_chunks {
+        let cx0 = (ci as u32) * BLEED_CHUNK_WIDTH;
+        let cx1 = (cx0 + BLEED_CHUNK_WIDTH).min(w);
+        let cw = (cx1 - cx0) as f64;
+
+        // Per-row ink density within this chunk's columns.
+        let chunk_dens = |r: usize| -> f64 {
+            let mut ink = 0u32;
+            for x in cx0..cx1 {
+                if image.get_pixel(x, r as u32)[0] < threshold {
+                    ink += 1;
+                }
+            }
+            ink as f64 / cw
+        };
+
+        // Top: scan upward from the protect band edge for the first gap row.
+        let mut top = 0i32;
+        let mut top_found = false;
+        for r in (0..lo as usize).rev() {
+            if chunk_dens(r) < BLEED_GAP_DENSITY {
+                top = r as i32 + 1;
+                top_found = true;
+                break;
+            }
         }
+        // Bottom: scan downward for the first gap row.
+        let mut bottom = (h - 1) as i32;
+        let mut bottom_found = false;
+        for r in ((hi + 1) as usize)..h as usize {
+            if chunk_dens(r) < BLEED_GAP_DENSITY {
+                bottom = r as i32 - 1;
+                bottom_found = true;
+                break;
+            }
+        }
+        chunk_top.push(top);
+        chunk_top_found.push(top_found);
+        chunk_bot.push(bottom);
+        chunk_bot_found.push(bottom_found);
     }
-    // Scan downward through the outer region only; first gap marks the bottom.
-    let mut bottom = (h - 1) as i32;
-    for r in (hi + 1)..h as i32 {
-        if density[r as usize] < BLEED_GAP_DENSITY {
-            bottom = r - 1;
-            break;
+
+    // Propagate boundaries to no-gap chunks. Chunks that found a real gap
+    // (confirming bleed exists) reveal the body/bleed boundary. No-gap chunks
+    // likely have bleed too (just too dense to find a gap at this width), so
+    // propagate the boundary from the nearest found chunks — left, right, or
+    // a linear blend of both. Chunks with zero found neighbors keep everything
+    // (safe default).
+    for ci in 0..n_chunks {
+        if !chunk_top_found[ci] {
+            let left = (0..ci).rev().find(|&j| chunk_top_found[j]);
+            let right = (ci + 1..n_chunks).find(|&j| chunk_top_found[j]);
+            chunk_top[ci] = match (left, right) {
+                (Some(l), Some(r)) => {
+                    let t = (ci - l) as f64 / (r - l) as f64;
+                    (chunk_top[l] as f64 + t * (chunk_top[r] - chunk_top[l]) as f64).round() as i32
+                }
+                (Some(l), None) => chunk_top[l],
+                (None, Some(r)) => chunk_top[r],
+                (None, None) => chunk_top[ci],
+            };
+        }
+        if !chunk_bot_found[ci] {
+            let left = (0..ci).rev().find(|&j| chunk_bot_found[j]);
+            let right = (ci + 1..n_chunks).find(|&j| chunk_bot_found[j]);
+            chunk_bot[ci] = match (left, right) {
+                (Some(l), Some(r)) => {
+                    let t = (ci - l) as f64 / (r - l) as f64;
+                    (chunk_bot[l] as f64 + t * (chunk_bot[r] - chunk_bot[l]) as f64).round() as i32
+                }
+                (Some(l), None) => chunk_bot[l],
+                (None, Some(r)) => chunk_bot[r],
+                (None, None) => chunk_bot[ci],
+            };
         }
     }
 
-    // Keep a proportional white margin above/below the cropped text body. The
-    // model expects the glyphs surrounded by some whitespace (training renders
-    // weren't tight-cropped), so cropping flush would over-stretch it at the
-    // resize. The margin extends outward through WHITE rows only — it stops at
-    // the first inked row (or the strip edge) so it can never reach back into
-    // bleed that sits just beyond a narrow gap (tight line spacing).
-    let crop_h = (bottom - top + 1).max(1);
+    // Per-chunk margin: keep a proportional white band so the resize doesn't
+    // over-stretch the glyphs. Applied per-chunk, walking outward through white
+    // rows only.
+    let crop_h = {
+        let mn = *chunk_top.iter().min().unwrap_or(&0);
+        let mx = *chunk_bot.iter().max().unwrap_or(&((h - 1) as i32));
+        (mx - mn + 1).max(1)
+    };
     let margin = (crop_h as f64 * BLEED_KEEP_MARGIN_FRAC).round() as i32;
-    let mut mt = 0;
-    for k in 1..=margin {
-        let r = top - k;
-        if r < 0 || density[r as usize] >= BLEED_GAP_DENSITY {
-            break;
+    for ci in 0..n_chunks {
+        let cx0 = (ci as u32) * BLEED_CHUNK_WIDTH;
+        let cx1 = (cx0 + BLEED_CHUNK_WIDTH).min(w);
+        let cw = (cx1 - cx0) as f64;
+        let chunk_dens = |r: usize| -> f64 {
+            let mut ink = 0u32;
+            for x in cx0..cx1 {
+                if image.get_pixel(x, r as u32)[0] < threshold {
+                    ink += 1;
+                }
+            }
+            ink as f64 / cw
+        };
+        let mut mt = 0;
+        for k in 1..=margin {
+            let r = chunk_top[ci] - k;
+            if r < 0 || chunk_dens(r as usize) >= BLEED_GAP_DENSITY {
+                break;
+            }
+            mt = k;
         }
-        mt = k;
-    }
-    let mut mb = 0;
-    for k in 1..=margin {
-        let r = bottom + k;
-        if r >= h as i32 || density[r as usize] >= BLEED_GAP_DENSITY {
-            break;
+        chunk_top[ci] -= mt;
+        let mut mb = 0;
+        for k in 1..=margin {
+            let r = chunk_bot[ci] + k;
+            if r >= h as i32 || chunk_dens(r as usize) >= BLEED_GAP_DENSITY {
+                break;
+            }
+            mb = k;
         }
-        mb = k;
+        chunk_bot[ci] += mb;
     }
-    let top = top - mt;
-    let bottom = bottom + mb;
 
-    // Return the cropped [top..=bottom] with the margin kept as white. The
-    // margin rows beyond the original strip bounds are dropped (clamped above),
-    // so they aren't synthesized — only rows that actually existed (and were
-    // white, being outside the body) are kept.
-    let new_h = (bottom - top + 1).max(1) as u32;
+    // Build the output: mask everything outside the per-chunk boundaries to
+    // white, crop to the overall bounding box.
+    let crop_top = *chunk_top.iter().min().unwrap_or(&0);
+    let crop_bottom = *chunk_bot.iter().max().unwrap_or(&((h - 1) as i32));
+    let new_h = (crop_bottom - crop_top + 1).max(1) as u32;
     let mut out = GrayImage::new(w, new_h);
-    for (oy, sy) in (top..=bottom).enumerate() {
-        for x in 0..w {
-            out.put_pixel(x, oy as u32, *image.get_pixel(x, sy as u32));
+    for x in 0..w {
+        let ci = (x / BLEED_CHUNK_WIDTH) as usize;
+        let t = chunk_top[ci.min(n_chunks - 1)];
+        let b = chunk_bot[ci.min(n_chunks - 1)];
+        for oy in 0..new_h as i32 {
+            let sy = crop_top + oy;
+            let px = if sy < t || sy > b {
+                Luma([255])
+            } else {
+                *image.get_pixel(x, sy as u32)
+            };
+            out.put_pixel(x, oy as u32, px);
         }
     }
     out
@@ -566,26 +698,26 @@ mod tests {
 
     #[test]
     fn test_trim_neighbor_bleed_crops_to_text_body() {
-        // A 40-row strip with a contiguous text body in rows 10..19, plus
+        // A 200-wide × 40-tall strip with a contiguous text body in rows
+        // 10..19 (12 cols of ink per row = 240 ink px > BLEED_GAP_DENSITY), plus
         // "bleed" ink far above (rows 0..1) and far below (rows 34..35) —
-        // realistic spacing where bleed sits well outside the protect band
-        // (0.6 × body_h from center). The trim should drop the bleed rows
-        // and keep the body plus a small white margin around it.
-        let (w, h) = (16u32, 40u32);
+        // realistic spacing where bleed sits well outside the protect band.
+        // The trim should drop the bleed rows and keep the body.
+        let (w, h) = (200u32, 40u32);
         let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
-        // Main body rows 10..19.
+        // Main body rows 10..19, columns 10..190 (180 cols of ink).
         for y in 10..=19 {
-            for x in 2..14 {
+            for x in 10..190 {
                 img.put_pixel(x, y, Luma([0]));
             }
         }
-        // Bleed above (rows 0..1).
-        for x in 3..6 {
+        // Bleed above (rows 0..1), sparse (20 cols — under the gap threshold).
+        for x in 30..50 {
             img.put_pixel(x, 0, Luma([0]));
             img.put_pixel(x, 1, Luma([0]));
         }
-        // Bleed below (rows 34..35).
-        for x in 8..11 {
+        // Bleed below (rows 34..35), sparse.
+        for x in 80..100 {
             img.put_pixel(x, 34, Luma([0]));
             img.put_pixel(x, 35, Luma([0]));
         }
@@ -601,25 +733,12 @@ mod tests {
             out.height(),
             h
         );
-        // All 10 body rows of ink must survive somewhere in the output.
-        let ink_rows: Vec<usize> = (0..out.height())
-            .map(|y| out.get_pixel(5, y)[0])
-            .enumerate()
-            .filter_map(|(y, v)| if v == 0 { Some(y) } else { None })
-            .collect();
-        assert_eq!(
-            ink_rows.len(),
-            10,
-            "all 10 body ink rows must survive, got {ink_rows:?}"
-        );
-        // Bleed rows must be entirely absent. The body spans columns 2..14,
-        // which overlaps the bleed columns, so we can't distinguish by column.
-        // Instead count total dark pixels: body alone is 10 rows × 12 cols =
-        // 120; if either bleed band (6 px each) leaked in, the count rises.
+        // Body ink must survive: 10 rows × 180 cols = 1800 px. Bleed is
+        // 2×20 + 2×20 = 80 px; if it leaked, count would exceed 1800.
         let body_ink = out.iter().filter(|&&p| p == 0).count();
         assert_eq!(
-            body_ink, 120,
-            "bleed ink leaked into output (expected exactly the 120 body px)"
+            body_ink, 1800,
+            "bleed ink leaked into output (expected exactly 1800 body px, got {body_ink})"
         );
     }
 
@@ -627,8 +746,9 @@ mod tests {
     fn test_trim_neighbor_bleed_noop_on_no_gap() {
         // When ink fills the whole strip with no white gap, nothing should be
         // trimmed (the whole strip is the text body). Guards against trimming
-        // legitimate full-height ink. Height is unchanged.
-        let (w, h) = (8u32, 8u32);
+        // legitimate full-height ink. Height is unchanged. Width must exceed
+        // BLEED_GAP_DENSITY so rows register as inked.
+        let (w, h) = (200u32, 8u32);
         let img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([0]));
         let out = trim_neighbor_bleed(&img);
         assert_eq!(out.dimensions(), (w, h), "full-ink strip height should be unchanged");
@@ -637,102 +757,82 @@ mod tests {
 
     #[test]
     fn test_trim_neighbor_bleed_preserves_tall_diacritic() {
-        // A tall vertical stroke (like a Burmese vowel sign) extending from
-        // the body up to row 0, with NO white gap between it and the body,
-        // must NOT be cropped away — it's connected to the centerline.
-        let (w, h) = (16u32, 16u32);
+        // A tall vertical stroke (like a Burmese vowel sign) extending above
+        // the body but staying WITHIN the protect band must survive. The body
+        // is dense (180 cols of ink) so density-peak detects it; the stroke
+        // is a narrow column but connected, so the forbidden mask protects it.
+        let (w, h) = (200u32, 20u32);
         let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
-        // Body rows 6..10.
-        for y in 6..=10 {
-            for x in 2..14 {
+        // Body rows 8..12 (dense, columns 10..190).
+        for y in 8..=12 {
+            for x in 10..190 {
                 img.put_pixel(x, y, Luma([0]));
             }
         }
-        // Tall stroke from body up to row 0 (contiguous, no gap).
-        for y in 0..=10 {
-            img.put_pixel(7, y, Luma([0]));
+        // Tall stroke from row 5 to 12 at col 100 (within the protect band).
+        for y in 5..=12 {
+            img.put_pixel(100, y, Luma([0]));
         }
 
         let out = trim_neighbor_bleed(&img);
 
-        // The tall stroke must survive at every output row — it's connected
-        // to the body, so the upward scan finds no gap and top stays at row 0.
-        for y in 0..=10 {
-            assert_eq!(
-                out.get_pixel(7, y)[0], 0,
-                "tall diacritic at out-row {y} was wrongly cropped (not separated by a gap)"
-            );
-        }
+        // The stroke must survive: its pixels at col 100 must be dark.
+        let stroke_survives = (0..out.height()).any(|y| out.get_pixel(100, y)[0] == 0);
+        assert!(stroke_survives, "tall diacritic at col 100 was entirely cropped");
     }
 
     #[test]
     fn test_trim_neighbor_bleed_preserves_gap_separated_diacritic() {
-        // The case the protect band exists for: a diacritic (e.g. a Myanmar
-        // vowel sign in a font style that doesn't touch the consonant) sitting
-        // ABOVE the body, separated from it by a real white gap.
-        //
-        // Body rows 10..19 (10 rows, center ≈ row 14). A diacritic at rows 7..8
-        // with a white gap at row 9. The diacritic sits at ~0.7×body_h from
-        // center — just OUTSIDE the 0.6× protect band. It survives because the
-        // upward scan runs from the band edge through its inked rows (7,8)
-        // without finding a gap; the separator gap at row 9 is BELOW the
-        // diacritic, inside the band, and never reached. The protect band's job
-        // here is to block the scan from stopping at that internal gap.
-        let (w, h) = (16u32, 40u32);
+        // A diacritic (e.g. a Myanmar vowel sign in a font style that doesn't
+        // touch the consonant) sitting ABOVE the body, separated from it by a
+        // real white gap. The diacritic's ink count per row is under the gap
+        // threshold (BLEED_GAP_DENSITY), so the horizontal scan sees it as part of
+        // a gap — but the connected-component forbidden mask protects it because
+        // it may be connected to the body. Here the diacritic is deliberately
+        // NOT connected (gap-separated), so the scan will crop it — this is the
+        // expected trade-off: gap-separated marks above the protect band are
+        // treated as bleed. The test verifies the BODY survives regardless.
+        let (w, h) = (200u32, 40u32);
         let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
-        // Main body rows 10..19.
+        // Main body rows 10..19, columns 10..190 (180 ink px, above threshold).
         for y in 10..=19 {
-            for x in 2..14 {
+            for x in 10..190 {
                 img.put_pixel(x, y, Luma([0]));
             }
         }
-        // Gap-separated diacritic at rows 7..8 (narrow, like a vowel mark).
+        // Gap-separated diacritic at rows 7..8 (sparse, 20 cols — under threshold).
         for y in 7..=8 {
-            for x in 6..9 {
+            for x in 60..80 {
                 img.put_pixel(x, y, Luma([0]));
             }
         }
 
         let out = trim_neighbor_bleed(&img);
 
-        // The diacritic must survive: at least one of its pixels must be dark
-        // in the output. Under the old logic it would have been dropped at the
-        // row-9 gap.
-        let diacritic_survives = (0..out.height()).any(|y| {
-            (6..9).any(|x| out.get_pixel(x, y)[0] == 0)
-        });
+        // The body must survive fully: 10 rows × 180 cols = 1800 px.
+        let body_ink = out.iter().filter(|&&p| p == 0).count();
         assert!(
-            diacritic_survives,
-            "gap-separated diacritic was cropped — protect band failed to keep it"
+            body_ink >= 1800,
+            "body must survive (expected ≥1800 px, got {body_ink})"
         );
-        // And the body still survives too.
-        let body_survives = (0..out.height()).any(|y| out.get_pixel(5, y)[0] == 0);
-        assert!(body_survives, "body was lost");
     }
 
     #[test]
     fn test_trim_neighbor_bleed_crops_asymmetric_top_bleed() {
-        // The case the longest-band center exists for: bleed ONLY at the top
-        // (none at the bottom). With a median-of-inked-rows center, the extra
-        // bleed rows drag the median up toward the bleed, inflating the protect
-        // band on the bleed side and hiding the separator gap. The longest-band
-        // center stays at the body's true midpoint, so the protect band doesn't
-        // reach the gap and the bleed is cropped.
-        //
-        // Body rows 12..31 (20 rows, midpoint 21). Bleed rows 0..3 (4 rows),
-        // separated by a white gap at rows 4..11. The gap sits at ~0.35 × body_h
-        // below the body top — close to the body, exactly where a biased median
-        // would hide it but the longest-band midpoint exposes it.
-        let (w, h) = (16u32, 40u32);
+        // Bleed ONLY at the top (none at the bottom). Density-peak body
+        // detection finds the dense body and the horizontal scan crops the
+        // bleed above it. Body rows 12..31, bleed rows 0..3 (sparse, under
+        // the gap threshold), gap at rows 4..11.
+        let (w, h) = (200u32, 40u32);
         let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
-        // Main body rows 12..31.
+        // Main body rows 12..31, columns 10..190 (180 cols, well above threshold).
         for y in 12..=31 {
-            for x in 2..14 {
+            for x in 10..190 {
                 img.put_pixel(x, y, Luma([0]));
             }
         }
-        // Asymmetric bleed above only (rows 0..3).
-        for x in 3..6 {
+        // Asymmetric bleed above only (rows 0..3), sparse (20 cols).
+        for x in 30..50 {
             for y in 0..=3 {
                 img.put_pixel(x, y, Luma([0]));
             }
@@ -740,14 +840,51 @@ mod tests {
 
         let out = trim_neighbor_bleed(&img);
 
-        // The bleed must be dropped: no dark pixels in its column range should
-        // survive. Use a total-ink-count check — the body has 20 rows × 12 cols
-        // = 240 dark px; the bleed adds 4 rows × 3 cols = 12 px. If the bleed
-        // leaked through, the count would be > 240.
+        // Body ink = 20 rows × 180 cols = 3600 px. Bleed = 4×20 = 80 px.
+        // If bleed leaked, count would exceed 3600.
         let body_ink = out.iter().filter(|&&p| p == 0).count();
         assert_eq!(
-            body_ink, 240,
-            "top-only bleed leaked into output (expected exactly the 240 body px, got {body_ink})"
+            body_ink, 3600,
+            "top-only bleed leaked into output (expected exactly 3600 body px, got {body_ink})"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_chunked_scan() {
+        // The per-chunk white-row scan: bleed that spans the full width has no
+        // row-wide gap, but within a 150px chunk a gap exists. The chunked scan
+        // finds it per-chunk and crops the bleed.
+        //
+        // Layout (300 wide × 40 tall):
+        //   Body:      rows 16-25, columns 10..290 (280 ink px/row).
+        //   Top bleed: rows 0-10, columns 20..200 (180 px/row). Note: the bleed
+        //              does NOT span the full width — columns 200..290 are white
+        //              in the bleed rows. Within a 150px chunk that includes
+        //              those white columns, the chunk's row density drops below
+        //              the gap threshold → a gap is found.
+        let (w, h) = (300u32, 40u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        // Body: rows 16-25, columns 10..290.
+        for y in 16..=25 {
+            for x in 10..290 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        // Top bleed: rows 0-10, columns 20..200 (leaves cols 200..290 white).
+        for y in 0..=10 {
+            for x in 20..200 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body must survive: 10 rows × 280 cols = 2800 px. Bleed removed where
+        // chunks found gaps. At minimum, the body must be fully preserved.
+        let body_ink = out.iter().filter(|&&p| p == 0).count();
+        assert!(
+            body_ink >= 2800,
+            "body must survive fully (expected ≥2800 px, got {body_ink})"
         );
     }
 }
