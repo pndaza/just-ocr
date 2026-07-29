@@ -31,25 +31,25 @@ page. Distribution stays zero-infrastructure: the existing `release.yml` +
 | New Rust commands | **None** — frontend drives via the `@tauri-apps/plugin-updater` JS API |
 | New persisted state | **None** — no localStorage, nothing to remember between sessions |
 
-## Tension with the "fully offline" identity
+## Relationship to the "fully offline" identity
 
 `AGENTS.md` frames just-ocr as **"fully offline … no internet, no system
-installs."** An auto-check-on-startup is a deliberate, acknowledged departure
-from that posture. The design mitigates the contradiction:
+installs."** That promise is specifically about **OCR**: models are bundled in
+the binary via `include_bytes!`, recognition runs entirely on-device, and no
+cloud API is ever consulted to recognize text. An update check is fully
+compatible with this — it is a separate, occasional concern (discovery of newer
+builds), not part of the OCR pipeline. A machine with no network still OCRs
+exactly as before.
+
+Two properties keep the update path well-behaved regardless of connectivity:
 
 1. **Startup check is silent and fails soft.** An offline user sees nothing —
    no error, no spinner, no degraded UX. The check is best-effort: success
    surfaces an available update; any failure is swallowed to `console.warn`.
-2. **Install is never automatic.** Even when an update is found, the app never
-   downloads or installs without an explicit second click ("Download & install").
-3. **No telemetry.** The updater hits exactly one endpoint (the GitHub Releases
+2. **No telemetry.** The updater hits exactly one endpoint (the GitHub Releases
    manifest). There is no analytics, version ping-back, or usage reporting —
    the only network call is fetching `latest.json`, and only to learn whether a
    newer build exists.
-
-The trade-off accepted here: a machine that is online at launch will make one
-HTTPS GET to `github.com` per app open. This is the cost of auto-detection. The
-silent-failure rule ensures offline use is unaffected.
 
 ## Architecture
 
