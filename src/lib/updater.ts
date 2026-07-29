@@ -46,7 +46,8 @@ export function downloadPercent(downloaded: number, contentLength: number): numb
 }
 
 // The most-recently-found update, held in module state so the manual "Download
-// & install" flow can act on it without re-checking. Set by checkForUpdate().
+// & install" flow can act on it without re-checking. Set by both
+// checkForUpdate() and checkForUpdateSilent().
 let pendingUpdate: Update | null = null;
 
 /**
