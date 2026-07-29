@@ -33,4 +33,10 @@ describe("downloadPercent", () => {
   it("returns 0 when contentLength is 0 (avoids divide-by-zero)", () => {
     expect(downloadPercent(500, 0)).toBe(0);
   });
+
+  it("treats a missing contentLength (undefined) as 0 to avoid NaN", () => {
+    // A server may omit Content-Length; downloadPercent must never return NaN.
+    expect(downloadPercent(500, undefined as any)).toBe(0);
+    expect(downloadPercent(500, NaN)).toBe(0);
+  });
 });

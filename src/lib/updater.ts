@@ -38,7 +38,10 @@ export function mapCheckResult(update: Update | null | undefined): UpdateStatus 
  * server omits Content-Length).
  */
 export function downloadPercent(downloaded: number, contentLength: number): number {
-  if (contentLength <= 0) return 0;
+  // NaN-safe guard: `!(x > 0)` covers 0, negative, undefined (cast), and NaN.
+  // Without it, a missing Content-Length produced NaN percent (undefined <= 0
+  // is false), which would render as "NaN%" in the download progress bar.
+  if (!(contentLength > 0)) return 0;
   return Math.min(100, Math.floor((downloaded / contentLength) * 100));
 }
 
@@ -99,7 +102,7 @@ export async function downloadAndInstall(
   await update.downloadAndInstall((event) => {
     switch (event.event) {
       case "Started":
-        contentLength = event.data.contentLength;
+        contentLength = event.data.contentLength ?? 0;
         break;
       case "Progress":
         downloaded += event.data.chunkLength;
