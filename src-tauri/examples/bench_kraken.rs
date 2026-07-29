@@ -215,7 +215,7 @@ fn main() -> anyhow::Result<()> {
         let mut t_fwd_acc = Duration::ZERO;
         for crop in &crops {
             let t = Instant::now();
-            let tensor = preprocess_line(crop, rec.height, rec.padding, None, rec.center_norm)?;
+            let tensor = preprocess_line(crop, rec.height, rec.padding, rec.center_norm)?;
             t_pre_acc += t.elapsed();
 
             let t = Instant::now();
@@ -245,7 +245,7 @@ fn main() -> anyhow::Result<()> {
         let results: Vec<String> = crops
             .par_iter()
             .map(|crop| {
-                let tensor = preprocess_line(crop, rec.height, rec.padding, None, rec.center_norm)?;
+                let tensor = preprocess_line(crop, rec.height, rec.padding, rec.center_norm)?;
                 rec.recognize(&tensor)
             })
             .collect::<Result<_, anyhow::Error>>()
