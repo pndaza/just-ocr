@@ -1,9 +1,15 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
   import type { Theme } from "../theme";
+  import {
+    checkForUpdate,
+    downloadAndInstall,
+    type UpdateStatus,
+  } from "./updater";
+  import { getVersion } from "@tauri-apps/api/app";
 
   interface Props {
-    /** Reactive OCR opts — `binarize` is bound here. */
+    /** Reactive OCR opts. (Theme lives outside opts and is bound separately.) */
     opts: OcrOpts;
     /** Current theme (kept in sync with the document root by App.svelte). */
     theme: Theme;
@@ -11,8 +17,53 @@
     onchangetheme: (t: Theme) => void;
     /** Called when the modal should close (backdrop click, ✕, or Esc). */
     onclose: () => void;
+    /** Set by App's silent startup check. Pre-populates the Updates section so the
+     *  user doesn't have to re-check after the badge drew them here. */
+    updateAvailable: string | null;
   }
-  let { opts, theme, onchangetheme, onclose }: Props = $props();
+  let { opts, theme, onchangetheme, onclose, updateAvailable }: Props = $props();
+
+  // Current app version, fetched once on mount for the Updates section header.
+  let appVersion = $state("");
+  // Status of the MANUAL check button (separate from the silent startup
+  // `updateAvailable` prop — opening Settings never re-fires the startup check).
+  let status = $state<UpdateStatus>({ kind: "idle" });
+
+  // getVersion() rejects only outside a Tauri runtime (e.g. vitest/jsdom), where
+  // appVersion staying "" is the correct fallback — the header just omits the
+  // version. Swallow so it never surfaces as an unhandled promise rejection.
+  $effect(() => {
+    getVersion().then((v) => (appVersion = v)).catch(() => {});
+  });
+
+  // If the startup check already found an update, pre-populate as "available".
+  // Guards on status === "idle" so a manual check the user kicks off is never
+  // clobbered by a stale startup result.
+  $effect(() => {
+    if (updateAvailable && status.kind === "idle") {
+      status = { kind: "available", version: updateAvailable };
+    }
+  });
+
+  async function onCheck() {
+    status = { kind: "checking" };
+    status = await checkForUpdate();
+  }
+
+  async function onInstall() {
+    try {
+      status = { kind: "downloading", percent: 0 };
+      await downloadAndInstall((p) => {
+        status = { kind: "downloading", percent: p };
+      });
+      status = { kind: "installing" };
+      // relaunch() inside downloadAndInstall restarts the app; this line is
+      // only reached on platforms where relaunch returns / the install defers.
+    } catch (e: any) {
+      const message = typeof e === "string" ? e : e?.message ?? String(e);
+      status = { kind: "error", message };
+    }
+  }
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -68,34 +119,37 @@
       </section>
 
       <section class="sec">
-        <span class="lbl">Binarization</span>
-        <p class="desc">
-          For recognition models trained on 1-bit images. Myanmar / Kraken path
-          only; ignored by Tesseract.
-        </p>
-        <div class="seg" role="radiogroup" aria-label="Binarization mode">
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === null}
-            onclick={() => (opts.binarize = null)}
-            role="radio"
-            aria-checked={opts.binarize === null}
-          >Off</button>
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === "otsu"}
-            onclick={() => (opts.binarize = "otsu")}
-            role="radio"
-            aria-checked={opts.binarize === "otsu"}
-          >Otsu</button>
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === "sauvola"}
-            onclick={() => (opts.binarize = "sauvola")}
-            role="radio"
-            aria-checked={opts.binarize === "sauvola"}
-          >Sauvola</button>
-        </div>
+        <span class="lbl">Updates {appVersion ? `· v${appVersion}` : ""}</span>
+
+        {#if status.kind === "idle"}
+          <button class="upd-btn" onclick={onCheck}>Check for updates</button>
+        {:else if status.kind === "checking"}
+          <button class="upd-btn" disabled>Checking…</button>
+        {:else if status.kind === "up-to-date"}
+          <span class="upd-ok">Just OCR is up to date ✓</span>
+        {:else if status.kind === "available"}
+          <div class="upd-available">
+            <span>v{status.version} available</span>
+            <button class="upd-btn primary" onclick={onInstall}>Download &amp; install</button>
+            <span class="upd-note">The app will restart.</span>
+          </div>
+        {:else if status.kind === "downloading"}
+          <div class="upd-progress">
+            <div
+              class="bar"
+              role="progressbar"
+              aria-valuenow={status.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            ><div class="fill" style="width:{status.percent}%"></div></div>
+            <span class="upd-note">Downloading… {status.percent}%</span>
+          </div>
+        {:else if status.kind === "installing"}
+          <span class="upd-note">Installing…</span>
+        {:else if status.kind === "error"}
+          <span class="upd-err">{status.message}</span>
+          <button class="upd-btn" onclick={onCheck}>Retry</button>
+        {/if}
       </section>
     </div>
   </div>
@@ -163,12 +217,6 @@
     color: var(--text-faint);
     margin-bottom: 8px;
   }
-  .desc {
-    margin: 0 0 10px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: var(--text-dim);
-  }
   .seg {
     display: flex;
     background: var(--bg-inset);
@@ -193,5 +241,69 @@
   .seg-btn.active {
     background: var(--accent-dim);
     color: var(--bg);
+  }
+  .upd-btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 13px;
+    border-radius: 6px;
+    color: var(--text-dim);
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .upd-btn:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .upd-btn.primary {
+    color: var(--bg);
+    background: var(--accent);
+    border-color: transparent;
+  }
+  .upd-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .upd-ok {
+    font-size: 12px;
+    color: var(--ok);
+  }
+  .upd-available {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+  }
+  .upd-available > span:first-child {
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .upd-note {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .upd-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .upd-progress .bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-inset);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .upd-progress .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.15s;
+  }
+  .upd-err {
+    display: block;
+    font-size: 12px;
+    color: var(--danger);
+    margin-bottom: 8px;
   }
 </style>

@@ -23,6 +23,8 @@
     onexport: () => void;
     onmanagelanguages: () => void;
     onsettings: () => void;
+    /** When non-null, a newer version exists — shows a badge on the gear. */
+    updateAvailable: string | null;
     onchangemerge: (v: boolean) => void;
   }
   let {
@@ -43,6 +45,7 @@
     onexport,
     onmanagelanguages,
     onsettings,
+    updateAvailable,
     onchangemerge,
   }: Props = $props();
 
@@ -87,9 +90,10 @@
 
   <button
     class="icon-btn"
+    class:has-update={!!updateAvailable}
     onclick={onsettings}
-    title="Settings"
-    aria-label="Settings"
+    title={updateAvailable ? `Update available: v${updateAvailable}` : "Settings"}
+    aria-label={updateAvailable ? `Settings — update available (v${updateAvailable})` : "Settings"}
   >⚙</button>
 
   <label class="field">
@@ -205,6 +209,8 @@
     background: var(--border);
   }
   .icon-btn {
+    /* relative so the ::after badge dot can absolute-position onto the gear */
+    position: relative;
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text-faint);
@@ -222,6 +228,19 @@
     color: var(--accent);
     border-color: var(--accent-dim);
     background: var(--accent-soft);
+  }
+  /* Accent dot on the gear when a newer version exists. Punch-through border
+     uses the elevated bg so the dot reads cleanly on top of the gear glyph. */
+  .icon-btn.has-update::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    width: 7px;
+    height: 7px;
+    background: var(--accent);
+    border-radius: 50%;
+    border: 1.5px solid var(--bg-elev);
   }
   .field {
     display: flex;

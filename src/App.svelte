@@ -21,8 +21,6 @@
     saveLanguage,
     lastEngine,
     saveEngine,
-    lastBinarize,
-    saveBinarize,
     lastSegmenter,
     saveSegmenter,
     lastMergeParagraphs,
@@ -35,10 +33,15 @@
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
   import { currentTheme, setTheme, resolveTheme, type Theme } from "./theme";
+  import { checkForUpdateSilent } from "./lib/updater";
 
   let languages = $state<string[]>(["eng"]);
   let theme = $state<Theme>(currentTheme());
   let showSettings = $state(false);
+
+  // Set by the silent startup update check. Null = no update / not yet checked.
+  // Non-null surfaces the gear badge (Toolbar) + pre-populates the Updates section.
+  let updateAvailable = $state<string | null>(null);
 
   // Theme is now changed from the Settings modal (not a toolbar toggle).
   function changeTheme(t: Theme) {
@@ -65,14 +68,13 @@
     engine: lastEngine(),
     language: lastLanguage() ?? "eng",
     psm: 3,
-    binarize: lastBinarize(),
     segmenter: lastSegmenter(),
   });
 
   // Merge-paragraphs is a display-only preference (it does not change what the
   // OCR engine returns, only how the recognized lines are projected for the
   // text panel + export). Lives in the toolbar so it can be toggled before a
-  // run; persisted globally like binarize/segmenter.
+  // run; persisted globally like segmenter.
   let mergeParagraphs = $state(lastMergeParagraphs());
 
   // Remember the chosen engine + language so they are pre-selected on the next
@@ -83,10 +85,6 @@
   });
   $effect(() => {
     saveLanguage(opts.language);
-  });
-  // Binarize is a persisted global preference (chosen in Settings).
-  $effect(() => {
-    saveBinarize(opts.binarize);
   });
   // Segmenter (Myanmar line-box detector) is persisted so the chosen Seg
   // dropdown value is sticky across launches.
@@ -435,6 +433,14 @@
     await exportResults(jobs, { mergeParagraphs });
   }
 
+  // Silent startup update check. Fire-and-forget, never blocks startup.
+  // Errors are swallowed inside checkForUpdateSilent — an offline launch sees
+  // nothing. Only a successful "update available" sets updateAvailable.
+  // No reactive reads by design → the effect runs exactly once after mount.
+  $effect(() => {
+    checkForUpdateSilent((v) => (updateAvailable = v));
+  });
+
   loadLanguages();
 </script>
 
@@ -457,6 +463,7 @@
     onexport={exportAll}
     onmanagelanguages={openLangManager}
     onsettings={() => (showSettings = true)}
+    updateAvailable={updateAvailable}
     onchangemerge={(v: boolean) => (mergeParagraphs = v)}
   />
   <main id="main-area">
@@ -516,6 +523,7 @@
     {theme}
     onchangetheme={changeTheme}
     onclose={() => (showSettings = false)}
+    {updateAvailable}
   />
 {/if}
 
