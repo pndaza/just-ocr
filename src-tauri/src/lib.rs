@@ -273,10 +273,24 @@ async fn render_pdf(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    // Updater + process (relaunch after install) are desktop-only. This is a
+    // desktop app, so the cfg gate is defensive/documentation rather than
+    // strictly necessary — it matches the official Tauri pattern and keeps a
+    // future mobile target clean. Registration is split out of the chain
+    // because #[cfg(desktop)] cannot attach to a method call mid-chain.
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
+
+    builder
         .setup(|app| {
             // Initialize env_logger. Default to `info` for our crates so the
             // per-stage OCR timing logs print without setting RUST_LOG; set
