@@ -92,6 +92,15 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing: the private key + its password. tauri-action signs
+          # each updater bundle and emits a .sig alongside it, plus the
+          # latest.json manifest (uploadUpdaterJson is on by default). The
+          # matching public key is embedded in tauri.conf.json
+          # (plugins.updater.pubkey). Without these, bundles build but no
+          # signed update artifacts are produced, so existing installs can't
+          # auto-update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # tesseract 5.x uses std::filesystem (introduced in macOS 10.15).
           # Xcode 26+ SDKs enforce availability annotations, so without an
           # explicit 10.15 floor the libtesseract compile fails. The patched
@@ -116,8 +125,11 @@ jobs:
           tagName: app-v__VERSION__
           releaseName: 'just-ocr v__VERSION__'
           releaseBody: 'See the assets below to download and install this version.'
-          # Draft so we can review + publish manually after CI passes —
-          # avoids shipping a broken bundle if a platform-specific issue slips in.
-          releaseDraft: true
+          # Auto-publish: the release (and its auto-generated latest.json) goes
+          # live as soon as all platforms pass CI, so existing installs discover
+          # the update via the releases/latest/download endpoint. The previous
+          # manual draft-review gate is removed — fail-fast: false still surfaces
+          # every platform failure before the release is created.
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
