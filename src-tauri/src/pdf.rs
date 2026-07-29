@@ -5,8 +5,9 @@
 //!   resolution — correct for Tesseract. Best for scanned PDFs, which are just
 //!   containers around full-page images.
 //! - **Render**: rasterize each page with `hayro` at a fixed output height of
-//!   1500 px. Slower, but handles PDFs with no extractable image (vector text,
-//!   mixed content) by producing a faithful bitmap of the page.
+//!   1600 px (see `PDF_RENDER_HEIGHT` in `lib.rs`). Slower, but handles PDFs
+//!   with no extractable image (vector text, mixed content) by producing a
+//!   faithful bitmap of the page.
 //!
 //! Both return one PNG per page so the result drops straight into the existing
 //! image-based OCR pipeline.
@@ -23,14 +24,16 @@ use std::sync::Mutex;
 /// - `Gray`: 8-bit grayscale — the recommended default. Tesseract 4/5 (LSTM)
 ///   binarizes internally from grayscale, so this keeps everything it needs
 ///   while cutting the PNG to ~1/3 the size of RGB.
-/// - `Bw`: 8-bit black & white, Otsu-thresholded. Smallest and ideal for
-///   pristine printed scans, but can hurt accuracy on noisy/photographic pages
-///   because it discards the gray levels Tesseract relies on.
+///
+/// (A whole-page `Bw` mode existed previously — Otsu-thresholded at the page
+/// level — but was removed: Tesseract binarizes internally, and the Myanmar/
+/// Kraken path now binarizes per-line with Sauvola inside `preprocess_line`,
+/// so whole-page binarization only threw away gray levels earlier with no
+/// accuracy benefit.)
 #[derive(Clone, Copy)]
 pub(crate) enum ImageMode {
     Color,
     Gray,
-    Bw,
 }
 
 impl Default for ImageMode {
@@ -40,57 +43,12 @@ impl Default for ImageMode {
 }
 
 /// Convert a decoded page image (24-bit RGB, or RGB composited over white)
-/// into the requested color format for Tesseract.
+/// into the requested color format.
 fn to_target(img: image::DynamicImage, mode: ImageMode) -> image::DynamicImage {
     match mode {
         ImageMode::Color => img,
         ImageMode::Gray => img.grayscale(),
-        ImageMode::Bw => {
-            let gray = img.grayscale().into_luma8();
-            let thresh = otsu_threshold(&gray);
-            let bin = image::GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
-                image::Luma([if gray.get_pixel(x, y).0[0] < thresh { 0 } else { 255 }])
-            });
-            image::DynamicImage::ImageLuma8(bin)
-        }
     }
-}
-
-/// Otsu's method: pick the 0..=255 threshold maximizing between-class variance,
-/// so foreground text and background are split automatically (no fixed cutoff).
-fn otsu_threshold(img: &image::GrayImage) -> u8 {
-    let mut hist = [0u32; 256];
-    for p in img.pixels() {
-        hist[p.0[0] as usize] += 1;
-    }
-    let total = img.pixels().count() as u64;
-    let mut sum = 0u64;
-    for (i, &c) in hist.iter().enumerate() {
-        sum += i as u64 * c as u64;
-    }
-    let mut w_b = 0u64;
-    let mut sum_b = 0u64;
-    let mut max_var = 0.0_f64;
-    let mut threshold = 127u8;
-    for t in 0..256 {
-        w_b += hist[t] as u64;
-        if w_b == 0 {
-            continue;
-        }
-        let w_f = total - w_b;
-        if w_f == 0 {
-            break;
-        }
-        sum_b += t as u64 * hist[t] as u64;
-        let m_b = sum_b as f64 / w_b as f64;
-        let m_f = (sum - sum_b) as f64 / w_f as f64;
-        let between = w_b as f64 * w_f as f64 * (m_b - m_f) * (m_b - m_f);
-        if between > max_var {
-            max_var = between;
-            threshold = t as u8;
-        }
-    }
-    threshold
 }
 
 /// Formats the display name for a page extracted from a PDF.

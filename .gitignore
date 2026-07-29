@@ -8,6 +8,8 @@ src-tauri/gen/
 # kraken-engine is built standalone (not a workspace member — see
 # src-tauri/Cargo.toml), so it has its own target/ dir.
 src-tauri/kraken-engine/target/
+# ppocr-engine is also standalone (same out-of-workspace trick).
+src-tauri/ppocr-engine/target/
 
 # misc
 .DS_Store

@@ -3,7 +3,7 @@
   import type { Theme } from "../theme";
 
   interface Props {
-    /** Reactive OCR opts — `binarize` is bound here. */
+    /** Reactive OCR opts. (Theme lives outside opts and is bound separately.) */
     opts: OcrOpts;
     /** Current theme (kept in sync with the document root by App.svelte). */
     theme: Theme;
@@ -64,37 +64,6 @@
             role="radio"
             aria-checked={theme === "system"}
           >System</button>
-        </div>
-      </section>
-
-      <section class="sec">
-        <span class="lbl">Binarization</span>
-        <p class="desc">
-          For recognition models trained on 1-bit images. Myanmar / Kraken path
-          only; ignored by Tesseract.
-        </p>
-        <div class="seg" role="radiogroup" aria-label="Binarization mode">
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === null}
-            onclick={() => (opts.binarize = null)}
-            role="radio"
-            aria-checked={opts.binarize === null}
-          >Off</button>
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === "otsu"}
-            onclick={() => (opts.binarize = "otsu")}
-            role="radio"
-            aria-checked={opts.binarize === "otsu"}
-          >Otsu</button>
-          <button
-            class="seg-btn"
-            class:active={opts.binarize === "sauvola"}
-            onclick={() => (opts.binarize = "sauvola")}
-            role="radio"
-            aria-checked={opts.binarize === "sauvola"}
-          >Sauvola</button>
         </div>
       </section>
     </div>
@@ -162,12 +131,6 @@
     letter-spacing: 0.06em;
     color: var(--text-faint);
     margin-bottom: 8px;
-  }
-  .desc {
-    margin: 0 0 10px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: var(--text-dim);
   }
   .seg {
     display: flex;

@@ -105,15 +105,11 @@ impl Engine {
 
     /// Recognize text from a single pre-cropped line image.
     ///
-    /// When `binarize` is `Some(method)`, the crop is binarized before
-    /// recognition (for models trained on 1-bit images).
-    pub fn recognize_line(
-        &self,
-        crop: &DynamicImage,
-        binarize: Option<recognition::Binarization>,
-    ) -> Result<String> {
+    /// Sauvola binarization is applied unconditionally inside
+    /// [`preprocess_line`] (before resize); see its docs for why.
+    pub fn recognize_line(&self, crop: &DynamicImage) -> Result<String> {
         let tensor =
-            preprocess_line(crop, self.rec.height, self.rec.padding, binarize, self.rec.center_norm)?;
+            preprocess_line(crop, self.rec.height, self.rec.padding, self.rec.center_norm)?;
         self.rec
             .recognize(&tensor)
             .context("Kraken recognition failed")
@@ -134,7 +130,6 @@ impl Engine {
         image: &DynamicImage,
         baseline: &[(f64, f64)],
         boundary: &[(f64, f64)],
-        binarize: Option<recognition::Binarization>,
     ) -> Result<String> {
         let strip =
             recognition::dewarp::extract_polygon_line(image, baseline, boundary).unwrap_or_else(
@@ -145,12 +140,168 @@ impl Engine {
                 },
             );
         let strip_dyn = DynamicImage::ImageLuma8(strip);
-        self.recognize_line(&strip_dyn, binarize)
+        self.recognize_line(&strip_dyn)
+    }
+
+    /// Recognize text from a line whose geometry is fully described by its
+    /// boundary polygon — the PP-OCR direct path.
+    ///
+    /// Skips kraken's Stage-1 geometric dewarp (`extract_polygon_line`) entirely.
+    /// That dewarp exists for kraken's *baselines*, which carry genuine
+    /// curvature that the piecewise-affine mesh warp (`curved_dewarp`)
+    /// straightens. PP-OCR's segmenter emits rigid quads (4 corners, no
+    /// curvature) whose boundary is the only real geometry — there is no
+    /// baseline-derived curve to straighten, and the synth 8-point midline we
+    /// used to feed `recognize_line_dewarped` carries no curvature information
+    /// either. Running the mesh warp on it is near-identity work for
+    /// axis-aligned text (output ≈ input) plus an avoidable double-resample
+    /// (mesh bilinear + Stage-2 `scale_to_h`) that softens edges.
+    ///
+    /// Pipeline:
+    ///   1. `crop_polygon_white_bg` — mask outside-quad to white (255). For an
+    ///      axis-aligned quad this is an exact no-op (quad == its AABB); for a
+    ///      rotated quad it isolates the AABB corner triangles so neighbor ink
+    ///      doesn't bleed into the strip. Correct and ~free either way.
+    ///   2. Deskew when the quad's top edge is tilted above
+    ///      [`DESKEW_THRESHOLD`] (1.5°): `angle = atan2(TR.y - TL.y, TR.x - TL.x)`.
+    ///      This matters for the downstream `trim_neighbor_bleed`, whose
+    ///      horizontal row-scan breaks on skewed text (the body crosses every
+    ///      row, hiding the gap to neighbor-line bleed). Uses the cheap 2-point
+    ///      [`recognition::dewarp::rotate_deskew`], never the mesh warp — a
+    ///      rigid quad has no curve to straighten.
+    ///   3. [`recognize_line`] — binarize → trim_neighbor_bleed →
+    ///      center_norm/resize → pad → invert → forward → CTC.
+    ///
+    /// Assumes `boundary[0]`/`boundary[1]` are the quad's top edge `[TL, TR]`,
+    /// as PaddleOCR DB's `fit_rotated_box` emits and `detection_to_line`
+    /// preserves. Only call this for PP-OCR lines.
+    pub fn recognize_line_direct(
+        &self,
+        image: &DynamicImage,
+        boundary: &[(f64, f64)],
+    ) -> Result<String> {
+        // Mask the quad. Falls back to a plain bbox crop for degenerate
+        // polygons (<3 pts) inside crop_polygon_white_bg.
+        let mut crop = crop_polygon_white_bg(image, boundary);
+
+        // Deskew only for genuinely tilted quads.
+        if let Some(angle) = quad_deskew_angle(boundary) {
+            if angle.abs() >= DESKEW_THRESHOLD {
+                let strip = recognition::dewarp::rotate_deskew(
+                    &crop.to_luma8(),
+                    &[
+                        (boundary[0].0, boundary[0].1),
+                        (boundary[1].0, boundary[1].1),
+                    ],
+                    255,
+                );
+                crop = DynamicImage::ImageLuma8(strip);
+            }
+        }
+
+        self.recognize_line(&crop)
     }
 
     /// Borrow the recognition model directly (e.g. for rayon-parallel batch
     /// recognition — `RecognitionModel` is `Send + Sync`).
     pub fn recognizer(&self) -> &RecognitionModel {
         &self.rec
+    }
+}
+
+// ── PP-OCR direct pipeline helpers ──────────────────────────────────
+
+/// Quad deskew threshold in radians (~1.5°). PP-OCR quads below this angle are
+/// left as-is; above it the crop is de-rotated before binarize+trim+resize.
+///
+/// Set low (1.5°) because `trim_neighbor_bleed` finds the text-body boundary
+/// with a *horizontal* row scan: even ~1.5° of residual skew makes the text
+/// body cross every row, defeating the gap detection and leaving neighbor-line
+/// bleed untrimmed. Above this the scan is reliable and the bilinear resample
+/// cost of deskewing is negligible.
+const DESKEW_THRESHOLD: f64 = 1.5_f64.to_radians();
+
+/// The tilt of a quad's top edge, in radians. `Some(angle)` from
+/// `atan2(boundary[1].y - boundary[0].y, boundary[1].x - boundary[0].x)`,
+/// or `None` if `boundary` has fewer than 2 points.
+///
+/// Assumes `boundary[0]`/`boundary[1]` are the top edge `[TL, TR]` (the order
+/// PaddleOCR's `fit_rotated_box` emits). A horizontal line has `angle == 0`;
+/// clockwise tilt (top edge sloping down in image coords, y-down) is positive.
+pub(crate) fn quad_deskew_angle(boundary: &[(f64, f64)]) -> Option<f64> {
+    if boundary.len() < 2 {
+        return None;
+    }
+    let (x0, y0) = boundary[0];
+    let (x1, y1) = boundary[1];
+    Some((y1 - y0).atan2(x1 - x0))
+}
+
+// ── Debug image dumping (KRKN_DUMP_DIR env var) ─────────────────────
+//
+// When `KRKN_DUMP_DIR` is set, intermediate images along the recognition
+// pipeline are written as PNGs into that directory so you can eyeball exactly
+// what the net sees. Files are named `<seq>_<stage>.png` where `<seq>` is a
+// process-wide monotonic line counter (so the stages of one line share a
+// prefix) and `<stage>` ∈ {in, trimmed, resized}. Off by default — no
+// perf cost when unset (a single env read, cached in a OnceLock).
+
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+static DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate the next line sequence number for dump filenames. Monotonic
+/// across threads, so concurrent rayon workers don't clobber each other's
+/// files (interleaving is fine; per-line collisions are not).
+fn next_dump_seq() -> u64 {
+    DUMP_SEQ.fetch_add(1, AtomicOrdering::Relaxed)
+}
+
+/// Dump an image to `{KRKN_DUMP_DIR}/{seq}_{stage}.png` if the env var is set.
+/// Any write error is logged at warn level and swallowed — dumping is a debug
+/// aid, never a functional failure.
+pub(crate) fn dump_debug(image: &DynamicImage, stage: &str, seq: u64) {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        std::env::var_os("KRKN_DUMP_DIR").map(std::path::PathBuf::from)
+    });
+    let Some(dir) = dir else { return };
+    let path = dir.join(format!("{seq:04}_{stage}.png"));
+    if let Err(e) = image.save(&path) {
+        log::warn!("[dump] failed to write {}: {e}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quad_deskew_angle_axis_aligned_is_zero() {
+        // Horizontal top edge TL(0,10) → TR(100,10): dy=0 → angle 0.
+        let boundary = [(0.0, 10.0), (100.0, 10.0), (100.0, 40.0), (0.0, 40.0)];
+        let angle = quad_deskew_angle(&boundary).unwrap();
+        assert!(angle.abs() < 1e-9, "axis-aligned angle should be ~0, got {angle}");
+    }
+
+    #[test]
+    fn quad_deskew_angle_rotated_quad() {
+        // A ~10° clockwise tilt: top edge TL(0,0) → TR(100, tan(10°)*100≈17.6).
+        let deg: f64 = 10.0;
+        let dy = (deg.to_radians().tan() * 100.0).round();
+        let boundary = [(0.0, 0.0), (100.0, dy), (100.0, dy + 30.0), (0.0, 30.0)];
+        let angle = quad_deskew_angle(&boundary).unwrap().to_degrees();
+        // Allow rounding from the integer dy.
+        assert!(
+            (angle - deg).abs() < 0.5,
+            "rotated quad angle should be ~{deg}°, got {angle:.2}°"
+        );
+    }
+
+    #[test]
+    fn quad_deskew_angle_degenerate_returns_none() {
+        assert!(quad_deskew_angle(&[]).is_none());
+        assert!(quad_deskew_angle(&[(1.0, 2.0)]).is_none());
     }
 }

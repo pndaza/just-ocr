@@ -253,6 +253,29 @@ fn run_myanmar(
         lines.len()
     );
 
+    // Detected-line heights (bbox height in source pixels). Useful as a sanity
+    // signal: a too-small or too-large average hints at over/under-segmentation,
+    // and it sizes the resize scale the recognizer applies. Computed from the
+    // same `polygon_bbox` the recog path uses, skipping degenerate lines
+    // (boundary < 3 pts or zero-area bbox), so the stats reflect the lines
+    // actually recognized.
+    let line_heights: Vec<u32> = lines
+        .iter()
+        .filter_map(|line| polygon_bbox((w, h), &line.boundary).map(|(_, _, _, lh)| lh))
+        .collect();
+    if line_heights.is_empty() {
+        log::info!("[ocr] avg line height: n/a (no valid lines)");
+    } else {
+        let avg = line_heights.iter().map(|&x| x as f64).sum::<f64>()
+            / line_heights.len() as f64;
+        log::info!(
+            "[ocr] avg line height: {:.0} px (range {}-{} px)",
+            avg,
+            line_heights.iter().min().unwrap(),
+            line_heights.iter().max().unwrap(),
+        );
+    }
+
     // If recog is Kraken, we need a Kraken engine handle regardless of which
     // segmenter produced the lines. Lazy-load it (shares the OnceCell with
     // KrakenSegmenter — no double-load).
@@ -271,14 +294,6 @@ fn run_myanmar(
     // overlap.
     let recog_start = Instant::now();
     let engine_kind = opts.engine.as_str();
-
-    // Parse the binarize option once (Myanmar/Kraken path only). Tesseract
-    // does its own internal binarization and ignores this.
-    let binarize = opts.binarize.as_deref().and_then(|s| match s {
-        "otsu" => Some(kraken_engine::recognition::Binarization::Otsu),
-        "sauvola" => Some(kraken_engine::recognition::Binarization::Sauvola),
-        _ => None,
-    });
 
     // Build the (LineBox, conf) pairs from each non-degenerate line. The
     // closure captures shared refs to img + engine + (for tesseract) the app
@@ -303,12 +318,20 @@ fn run_myanmar(
             // + the line's baseline + boundary, producing a flat strip that
             // the Stage-2 centerline normalizer and LSTM consume. Falls back
             // to a masked bbox crop inside the engine if the dewarp fails.
+            //
+            // PP-OCR seg → Kraken recog takes a direct path
+            // (recognize_line_direct): it skips the baseline mesh warp, since
+            // PP-OCR's rigid quads carry no curvature and the synth midline is
+            // not a real baseline. It still masks + deskews (cheap, correct).
             "kraken" => {
                 // Safe unwrap: kraken_rec_engine is Some iff engine_kind == "kraken".
                 let eng = kraken_rec_engine.expect("kraken engine loaded for kraken recog");
-                let t = eng
-                    .recognize_line_dewarped(img, &line.baseline, &line.boundary, binarize)
-                    .map_err(|e| format!("Recognition failed: {e}"))?;
+                let t = if seg_name == "ppocr-tiny" {
+                    eng.recognize_line_direct(img, &line.boundary)
+                } else {
+                    eng.recognize_line_dewarped(img, &line.baseline, &line.boundary)
+                }
+                .map_err(|e| format!("Recognition failed: {e}"))?;
                 (t, -1)
             }
             other => return Err(format!("Unknown engine: {other}")),

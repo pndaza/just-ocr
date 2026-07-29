@@ -27,4 +27,4 @@ pub use codec::Codec;
 pub use crop::crop_polygon_white_bg;
 pub use dewarp::extract_polygon_line;
 pub use model::RecognitionModel;
-pub use preprocess::{preprocess_line, Binarization};
+pub use preprocess::preprocess_line;
