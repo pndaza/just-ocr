@@ -33,10 +33,15 @@
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
   import { currentTheme, setTheme, resolveTheme, type Theme } from "./theme";
+  import { checkForUpdateSilent } from "./lib/updater";
 
   let languages = $state<string[]>(["eng"]);
   let theme = $state<Theme>(currentTheme());
   let showSettings = $state(false);
+
+  // Set by the silent startup update check. Null = no update / not yet checked.
+  // Non-null surfaces the gear badge (Toolbar) + pre-populates the Updates section.
+  let updateAvailable = $state<string | null>(null);
 
   // Theme is now changed from the Settings modal (not a toolbar toggle).
   function changeTheme(t: Theme) {
@@ -428,6 +433,14 @@
     await exportResults(jobs, { mergeParagraphs });
   }
 
+  // Silent startup update check. Fire-and-forget, never blocks startup.
+  // Errors are swallowed inside checkForUpdateSilent — an offline launch sees
+  // nothing. Only a successful "update available" sets updateAvailable.
+  // No reactive reads by design → the effect runs exactly once after mount.
+  $effect(() => {
+    checkForUpdateSilent((v) => (updateAvailable = v));
+  });
+
   loadLanguages();
 </script>
 
@@ -450,6 +463,7 @@
     onexport={exportAll}
     onmanagelanguages={openLangManager}
     onsettings={() => (showSettings = true)}
+    updateAvailable={updateAvailable}
     onchangemerge={(v: boolean) => (mergeParagraphs = v)}
   />
   <main id="main-area">
@@ -509,6 +523,7 @@
     {theme}
     onchangetheme={changeTheme}
     onclose={() => (showSettings = false)}
+    {updateAvailable}
   />
 {/if}
 
