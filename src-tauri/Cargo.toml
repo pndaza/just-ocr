@@ -29,6 +29,11 @@ tauri-plugin-fs = "2"
 # (bypassing Finder's directory-listing cache, which often fails to refresh
 # after an external app writes a file).
 tauri-plugin-opener = "2"
+# In-app updater: serves the v2 updater plugin so the frontend can check for
+# and install newer builds published to GitHub Releases (see updater.ts).
+tauri-plugin-updater = "2"
+# relaunch() after an update installs — the updater triggers a process restart.
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tesseract-rs = { version = "0.3", features = ["embed-tessdata"] }
