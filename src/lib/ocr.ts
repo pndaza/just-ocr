@@ -9,13 +9,13 @@ export type { OcrResult, LineBox } from "./result";
 
 /** How a PDF is turned into per-page images before OCR.
  * - "extract": pull the embedded raster scan (fast, native resolution)
- * - "render":  rasterize the page at 1500px height (handles vector content) */
+ * - "render":  rasterize the page at 1600px height (handles vector content) */
 export type PdfMode = "extract" | "render";
 
 /** Color format for the per-page PNGs a PDF is turned into before OCR.
- * Gray is the Tesseract-friendly default (smaller, no accuracy loss);
- * B&W is Otsu-thresholded for pristine scans; Color keeps the source as-is. */
-export type ImageMode = "color" | "gray" | "bw";
+ * Gray is the default (smaller, no accuracy loss — recognizers binarize
+ * internally); Color keeps the source as-is. */
+export type ImageMode = "color" | "gray";
 
 /** Recognizer choice (Myanmar path only). Ignored for other languages, where
  * Tesseract handles both segmentation and recognition. */
@@ -26,19 +26,12 @@ export type Engine = "tesseract" | "kraken";
  * legacy alternative for cases where baseline-aware segmentation helps. */
 export type Segmenter = "kraken" | "ppocr";
 
-/** Binarization method for the Myanmar/Kraken path. `null` disables it.
- * Ignored by the Tesseract path (libtesseract does its own binarization). */
-export type Binarize = "otsu" | "sauvola" | null;
-
 export interface OcrOpts {
   engine: Engine;
   language: string;
   /** Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path
    * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
   psm: number;
-  /** Myanmar/Kraken path only. Binarize line crops before recognition — use
-   * when the recognition model was trained on 1-bit (binarized) images. */
-  binarize: Binarize;
   /** Myanmar path only. Which line-box detector runs before recognition:
    * "ppocr" (PaddleOCR PP-OCRv6 tiny, default) or "kraken". */
   segmenter: Segmenter;
@@ -346,7 +339,6 @@ export async function deleteLanguage(code: string): Promise<void> {
 
 const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
-const BINARIZE_KEY = "just-ocr:binarize";
 const LAST_SEGMENTER_KEY = "just-ocr:segmenter";
 const MERGE_PARAGRAPHS_KEY = "just-ocr:merge-paragraphs";
 
@@ -407,35 +399,6 @@ export function lastSegmenter(): Segmenter {
 export function saveSegmenter(segmenter: Segmenter): void {
   try {
     localStorage.setItem(LAST_SEGMENTER_KEY, segmenter);
-  } catch {
-    /* storage may be unavailable (private mode) — ignore */
-  }
-}
-
-/** Read the binarization mode, falling back to Sauvola when the user has
- * never set it. Storage values: "otsu" | "sauvola" | "off"; key-absent =
- * apply the default (sauvola). Storing "off" explicitly (rather than removing
- * the key) keeps a deliberate disable sticky across launches instead of
- * resetting to the default. */
-export function lastBinarize(): Binarize {
-  try {
-    const v = localStorage.getItem(BINARIZE_KEY);
-    if (v === "otsu") return "otsu";
-    if (v === "sauvola") return "sauvola";
-    if (v === "off") return null; // explicitly disabled
-    return "sauvola"; // never set → default
-  } catch {
-    // storage may be unavailable (private mode) — use the default
-    return "sauvola";
-  }
-}
-
-/** Persist the chosen binarization mode so it is pre-selected on next launch.
- * `null` (Off) is stored as "off" — NOT removed — so an explicit disable stays
- * sticky and is not reset to the default on the next launch. */
-export function saveBinarize(b: Binarize): void {
-  try {
-    localStorage.setItem(BINARIZE_KEY, b === null ? "off" : b);
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

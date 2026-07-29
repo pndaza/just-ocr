@@ -37,11 +37,6 @@ pub struct OcrOpts {
     /// Tesseract page-segmentation mode (0-13). Used by the non-Myanmar path;
     /// ignored by the Myanmar path (Kraken does layout there).
     pub psm: i32,
-    /// Binarize line crops before recognition (Myanmar/Kraken path only):
-    /// `"otsu"` (global threshold) or `"sauvola"` (local adaptive). `None`
-    /// disables binarization. Ignored by the Tesseract path. Use when the
-    /// recognition model was trained on 1-bit (binarized) images.
-    pub binarize: Option<String>,
     /// Segmenter choice for the Myanmar path: `"ppocr"` (default) or `"kraken"`.
     /// `None`/unrecognized → PP-OCR. Ignored for non-Myanmar (full-page Tesseract).
     #[serde(default)]
@@ -148,7 +143,7 @@ fn run_ocr(
 }
 
 /// How to turn a PDF page into an image. "extract" pulls the embedded raster
-/// scan (fast, native resolution); "render" rasterizes the page at 1500px
+/// scan (fast, native resolution); "render" rasterizes the page at 1600px
 /// height (slower, handles vector/mixed content).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -164,8 +159,9 @@ impl Default for PdfMode {
 }
 
 /// Fixed output height for render mode. Chosen as a balance between OCR
-/// accuracy and speed; wide enough to keep body text legible at any page size.
-const PDF_RENDER_HEIGHT: u16 = 1500;
+/// accuracy and speed; ~53px per 30pt glyph (1600 / 30), tall enough to keep
+/// body text legible at any page size.
+const PDF_RENDER_HEIGHT: u16 = 1600;
 
 /// PDF page PNGs are written under the system temp dir to
 /// `just-ocr-<pid>-<seq>`. We namespace by PID so a directory is unambiguously
@@ -231,7 +227,6 @@ async fn render_pdf(
     let mode = mode.unwrap_or_default();
     let image_mode = match image_mode.as_deref() {
         Some("color") => pdf::ImageMode::Color,
-        Some("bw") => pdf::ImageMode::Bw,
         _ => pdf::ImageMode::Gray,
     };
     async_runtime::spawn_blocking(move || {

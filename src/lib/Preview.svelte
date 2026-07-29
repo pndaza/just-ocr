@@ -29,10 +29,13 @@
   let natW = $state(0);
   let natH = $state(0);
 
-  // Reset zoom whenever the selected job changes.
+  // Reset zoom + dims whenever the selected job changes (avoids showing the
+  // previous image's dimensions until the new one loads).
   $effect(() => {
     job?.id; // track selection
     zoom = null;
+    natW = 0;
+    natH = 0;
   });
   // Path-based (PDF page) jobs hold their pixels in a temp file; load the
   // preview image on demand instead of keeping all pages in memory.
@@ -219,6 +222,9 @@
 <div class="panel" role="region" aria-label="Image preview">
   <div class="head">
     <span class="title">{job ? job.name : "Preview"}</span>
+    {#if natW && natH}
+      <span class="dims">{natW}×{natH}</span>
+    {/if}
     {#if job}
       <span class="status-pill {job.status}">
         {#if job.status === "queued"}Queued
@@ -371,6 +377,13 @@
   .status-pill.done { color: var(--ok); background: var(--ok-soft); }
   .status-pill.running { color: var(--accent); background: var(--accent-soft); }
   .status-pill.error { color: var(--danger); background: var(--danger-soft); }
+  .dims {
+    font-size: 11px;
+    color: var(--text-faint);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
 
   /* ── Zoom controls ─────────────────────────────────────────────────────── */
   .zoom-controls {

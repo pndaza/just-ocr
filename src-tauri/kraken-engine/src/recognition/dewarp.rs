@@ -28,7 +28,7 @@ use image::{GrayImage, Luma, GenericImageView};
 use crate::polygon::simplify as approximate_polygon;
 use crate::polygon::Point;
 
-type Pt = (f64, f64);
+pub(crate) type Pt = (f64, f64);
 
 /// Extract a single line as a flat, dewarped grayscale strip.
 ///
@@ -166,7 +166,7 @@ fn fill_polygon_mask(mask: &mut [bool], polygon: &[Pt], w: u32, h: u32) {
 /// 1551`). `angle = atan2(dy, dx)`; the output is sized to fit the rotated
 /// corners and sampled with **bilinear** interpolation (kraken uses BILINEAR
 /// for `order=1`). Outside the rotated extent is filled `cval`.
-fn rotate_deskew(image: &GrayImage, baseline: &[Pt], cval: u8) -> GrayImage {
+pub(crate) fn rotate_deskew(image: &GrayImage, baseline: &[Pt], cval: u8) -> GrayImage {
     let (w, h) = image.dimensions();
     let (dx, dy) = (baseline[1].0 - baseline[0].0, baseline[1].1 - baseline[0].1);
     let angle = dy.atan2(dx);
