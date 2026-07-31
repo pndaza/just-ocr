@@ -15,6 +15,10 @@ src-tauri/ppocr-engine/target/
 .DS_Store
 *.log
 
+# Debug scratch: analysis scripts and dumped pipeline images
+# (KRKN_DUMP_DIR output, A/B comparisons, etc.)
+debug/
+
 # Kraken models are now tracked via Git LFS (see .gitattributes) so they're
 # available to CI. Keep sample scans out of the repo.
 sample_pdf/

@@ -350,9 +350,15 @@ fn run_myanmar(
         )))
     };
 
-    // Dispatch: parallel for kraken, serial for tesseract.
+    // Dispatch: parallel for kraken, serial for tesseract. When debug image
+    // dumping is on (KRKN_DUMP_DIR set), force kraken serial too — the per-line
+    // dump sequence numbers are allocated via an atomic counter, so parallel
+    // workers grab them in scheduler order, not document order, and the dumped
+    // files come out shuffled. Serial execution makes `0004_in.png` actually be
+    // document line 4. Debug runs don't need the parallel speedup.
+    let dump_enabled = std::env::var_os("KRKN_DUMP_DIR").is_some();
     let results: Vec<(LineBox, i32)> = match engine_kind {
-        "kraken" => lines
+        "kraken" if !dump_enabled => lines
             .par_iter()
             .map(|line| recognize(line))
             .collect::<Result<Vec<_>, String>>()?
