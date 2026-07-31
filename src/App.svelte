@@ -35,7 +35,7 @@
   import { currentTheme, setTheme, resolveTheme, type Theme } from "./theme";
   import { checkForUpdateSilent } from "./lib/updater";
 
-  let languages = $state<string[]>(["eng"]);
+  let languages = $state<string[]>(["mya"]);
   let theme = $state<Theme>(currentTheme());
   let showSettings = $state(false);
 
@@ -66,7 +66,7 @@
 
   let opts = $state<OcrOpts>({
     engine: lastEngine(),
-    language: lastLanguage() ?? "eng",
+    language: lastLanguage() ?? "mya",
     psm: 3,
     segmenter: lastSegmenter(),
   });
