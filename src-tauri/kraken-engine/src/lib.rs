@@ -219,6 +219,12 @@ impl Engine {
 /// body cross every row, defeating the gap detection and leaving neighbor-line
 /// bleed untrimmed. Above this the scan is reliable and the bilinear resample
 /// cost of deskewing is negligible.
+///
+/// **Empirically validated:** lowering this to 0.0 (deskew *every* quad, even
+/// sub-degree) was A/B tested on thawzin_02 and *regressed* recognition on
+/// ~17 of 34 lines. The double bilinear resample (deskew + height-resize)
+/// softens edges enough to hurt the recognizer more than the sub-degree skew
+/// it removes. 1.5° is the right gate — keep it.
 const DESKEW_THRESHOLD: f64 = 1.5_f64.to_radians();
 
 /// The tilt of a quad's top edge, in radians. `Some(angle)` from
