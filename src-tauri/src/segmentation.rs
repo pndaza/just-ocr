@@ -19,8 +19,17 @@ pub struct DetectedLine {
     /// if only the boundary matters (e.g. Tesseract recog only).
     pub baseline: Vec<(f64, f64)>,
     /// Closed boundary polygon (≥ 3 points). Used for bbox, Tesseract crop,
-    /// overlay, and Kraken dewarp fallback. For PP-OCR: 4 corners + repeat-first.
+    /// overlay, and Kraken dewarp fallback. For PP-OCR quad mode: 4 corners +
+    /// repeat-first. For PP-OCR poly mode: a multi-point contour (contour →
+    /// Douglas-Peucker simplify → pyclipper unclip) that follows curved text.
     pub boundary: Vec<(f64, f64)>,
+    /// Original 4-corner quad `[TL, TR, BR, BL]` in source coords. Present
+    /// only for the `ppocr-poly` segmenter, where `boundary` is a multi-point
+    /// polygon that can't be indexed as a quad. Used by `recognize_line_direct`'s
+    /// deskew (which reads `[0]`/`[1]` as the top edge). `None` for kraken and
+    /// `ppocr` (quad), which carry the quad directly in `boundary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quad: Option<[(f64, f64); 4]>,
 }
 
 /// A text-line segmenter. Both vendored engines implement this so the host
@@ -41,6 +50,7 @@ mod tests {
         let line = DetectedLine {
             baseline: vec![(1.0, 2.0), (3.0, 2.0)],
             boundary: vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)],
+            quad: None,
         };
         let json = serde_json::to_string(&line).expect("serialize");
         assert!(json.contains("\"baseline\""), "missing baseline in: {json}");

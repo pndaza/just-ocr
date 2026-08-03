@@ -15,6 +15,11 @@ mod tesseract_page;
 
 pub use engine::{LineBox, OcrResult};
 pub use kraken_engine::Engine as KrakenEngine;
+// Re-export the segmentation types + the poly segmenter for debug examples
+// (smoke_ppocr_poly.rs) that exercise the poly path end-to-end. The modules
+// themselves stay private; only these items are surfaced.
+pub use segmentation::{DetectedLine, Segmenter};
+pub use segmenter_adapters::PPOcrPolySegmenter;
 
 /// OCR options sent from the frontend.
 ///

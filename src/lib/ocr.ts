@@ -22,9 +22,11 @@ export type ImageMode = "color" | "gray";
 export type Engine = "tesseract" | "kraken";
 
 /** Segmentation stage for the Myanmar path (line-box detection). Ignored for
- * other languages. PP-OCR (the tiny detector) is the default; Kraken is the
- * legacy alternative for cases where baseline-aware segmentation helps. */
-export type Segmenter = "kraken" | "ppocr";
+ * other languages. PP-OCR (tiny detector + quad postprocess) is the default;
+ * PP-OCR (poly) opts into the wider small detector + multi-point polygon
+ * postprocess + curvature-gated dewarp, which helps dense/curved Burmese;
+ * Kraken is the baseline-aware alternative. */
+export type Segmenter = "kraken" | "ppocr" | "ppocr-poly";
 
 export interface OcrOpts {
   engine: Engine;
@@ -33,7 +35,8 @@ export interface OcrOpts {
    * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
   psm: number;
   /** Myanmar path only. Which line-box detector runs before recognition:
-   * "ppocr" (PaddleOCR PP-OCRv6 tiny, default) or "kraken". */
+   * "ppocr" (PP-OCRv6 tiny + quad, default), "ppocr-poly" (PP-OCRv6 small +
+   * polygon), or "kraken". */
   segmenter: Segmenter;
 }
 
@@ -382,13 +385,13 @@ export function saveEngine(engine: Engine): void {
 }
 
 /** Read the last-used Myanmar segmenter from localStorage; defaults to "ppocr".
- * Only "kraken" switches away from the default — any other stored value (or a
- * missing/unavailable storage) falls back to "ppocr". */
+ * Validates the stored value against the known segmenter ids — anything stale
+ * (e.g. a prior dev build's "ppocr-small") or missing falls back to "ppocr". */
 export function lastSegmenter(): Segmenter {
+  const KNOWN: Segmenter[] = ["kraken", "ppocr", "ppocr-poly"];
   try {
-    return localStorage.getItem(LAST_SEGMENTER_KEY) === "kraken"
-      ? "kraken"
-      : "ppocr";
+    const v = localStorage.getItem(LAST_SEGMENTER_KEY);
+    return (v && KNOWN.includes(v as Segmenter) ? v : "ppocr") as Segmenter;
   } catch {
     // storage may be unavailable (private mode) — use the default
     return "ppocr";

@@ -852,6 +852,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipper2-rust"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fd663fe209e7030c956e3be4c051dcc20cdb73da794f31466762cff12ca11bf"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3277,6 +3286,7 @@ name = "just-ocr"
 version = "0.4.1"
 dependencies = [
  "anyhow",
+ "clipper2-rust",
  "dirs 5.0.1",
  "env_logger",
  "fax",
@@ -3284,6 +3294,7 @@ dependencies = [
  "futures-util",
  "hayro",
  "image",
+ "imageproc",
  "kraken-engine",
  "log",
  "lopdf",

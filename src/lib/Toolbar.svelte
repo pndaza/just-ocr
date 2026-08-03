@@ -115,7 +115,8 @@
       <span class="lbl">Seg</span>
       <select bind:value={opts.segmenter}>
         <option value="kraken">Kraken</option>
-        <option value="ppocr">PP-OCR</option>
+        <option value="ppocr">PP-OCR (quad)</option>
+        <option value="ppocr-poly">PP-OCR (poly)</option>
       </select>
     </label>
     <label class="field">

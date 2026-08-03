@@ -1,5 +1,5 @@
 //! Smoke test for the PP-OCR-direct pipeline: load the bundled PP-OCR
-//! tiny-det + bundled Kraken rec, detect text quads on a page image, and
+//! small-det + bundled Kraken rec, detect text quads on a page image, and
 //! recognize each line via `Engine::recognize_line_direct` (the path that
 //! skips kraken's baseline mesh warp and just masks + deskews the quad).
 //! Run with:
@@ -13,12 +13,12 @@ use std::time::Instant;
 
 use image::GenericImageView;
 use kraken_engine::Engine;
-use ppocr_engine::Detector;
+use ppocr_engine::{Detector, DetectorConfig};
 
 // Bundled models. Paths are relative to this file (`src-tauri/examples/`):
 // two levels up reaches the repo root. (The host's `engine.rs` uses the same
 // two levels from `src-tauri/src/`.)
-const BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/tiny-det.safetensors");
+const BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/small-det.safetensors");
 const BUNDLED_KRAKEN_SEG: &[u8] = include_bytes!("../../kraken-models/bur_segment.safetensors");
 const BUNDLED_KRAKEN_REC: &[u8] = include_bytes!("../../kraken-models/bur_recog.safetensors");
 
@@ -33,8 +33,12 @@ fn main() -> anyhow::Result<()> {
     println!("Image dimensions: {w}x{h}");
 
     let t = Instant::now();
-    println!("Loading PP-OCR tiny-det from bundled bytes...");
-    let det = Detector::load_from_buffer(BUNDLED_PPOCR_DET)?;
+    println!("Loading PP-OCR small-det from bundled bytes...");
+    let det = Detector::load_from_buffer_with_config(
+        BUNDLED_PPOCR_DET,
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        DetectorConfig::small(),
+    )?;
     println!("  loaded in {:?}", t.elapsed());
 
     let t = Instant::now();
