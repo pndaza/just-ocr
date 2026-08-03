@@ -202,6 +202,77 @@ impl Engine {
         self.recognize_line(&crop)
     }
 
+    /// Poly-segmenter recog path. Uses the **multi-point boundary polygon** to
+    /// decide whether the line curves, then picks the cheapest correct dewarp:
+    ///
+    /// - **Curved** (sagitta / chord ≥ [`CURVATURE_THRESHOLD`]): synthesize a
+    ///   curved centerline from the polygon (the polygon genuinely follows the
+    ///   text shape — unlike the rigid quad) and run the full Stage-1 geometric
+    ///   dewarp (`extract_polygon_line` → piecewise-affine mesh warp), which
+    ///   straightens the curve before the Stage-2 center_norm. This is the path
+    ///   kraken's own segmenter takes for curved baselines.
+    /// - **Straight**: crop masked to the polygon (tighter than a quad bbox —
+    ///   excludes neighbor-line ink) + deskew from the quad's TL→TR top edge,
+    ///   same as `recognize_line_direct`. Cheap, no double-resample.
+    ///
+    /// `polygon` is the unclipped contour (used for the crop mask and, when
+    /// curved, the dewarp boundary + centerline source). `quad` is the
+    /// `[TL, TR, BR, BL]` 4-corner box (from `fit_min_area_quad`), used only
+    /// for the straight-path deskew angle.
+    pub fn recognize_line_poly(
+        &self,
+        image: &DynamicImage,
+        polygon: &[(f64, f64)],
+        quad: &[(f64, f64)],
+    ) -> Result<String> {
+        use image::GenericImageView;
+
+        // Curvature gate: synthesize a centerline from the polygon and measure
+        // its sagitta. Only genuinely curved lines pay for the mesh warp.
+        let midline = recognition::dewarp::curved_midline(polygon, 16);
+        let sagitta = recognition::dewarp::baseline_sagitta(&midline);
+        if sagitta >= CURVATURE_THRESHOLD && midline.len() >= 3 {
+            log::info!("[ocr] poly line curved (sag={:.3}) → geometric dewarp", sagitta);
+            let strip =
+                recognition::dewarp::extract_polygon_line(image, &midline, polygon).unwrap_or_else(
+                    |_| {
+                        // Fallback: masked bbox crop (no dewarp), as a GrayImage strip.
+                        let crop = crop_polygon_white_bg(image, polygon);
+                        crop.to_luma8()
+                    },
+                );
+            return self.recognize_line(&DynamicImage::ImageLuma8(strip));
+        }
+
+        // Straight path: polygon mask + quad deskew.
+        let mut crop = crop_polygon_white_bg(image, polygon);
+
+        // Deskew from the quad's top edge (TL→TR), same gate as the direct path.
+        if let Some(angle) = quad_deskew_angle(quad) {
+            if angle.abs() >= DESKEW_THRESHOLD {
+                // The deskew angle is in source-image coords; the crop's local
+                // frame has the same orientation (just translated), so the angle
+                // applies directly. Translate the quad's TL/TR to crop-local
+                // coords (offset by the polygon bbox origin) for rotate_deskew.
+                let (img_w, img_h) = image.dimensions();
+                let min_x = polygon.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+                let min_y = polygon.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+                let _ = (img_w, img_h);
+                let strip = recognition::dewarp::rotate_deskew(
+                    &crop.to_luma8(),
+                    &[
+                        (quad[0].0 - min_x as f64, quad[0].1 - min_y as f64),
+                        (quad[1].0 - min_x as f64, quad[1].1 - min_y as f64),
+                    ],
+                    255,
+                );
+                crop = DynamicImage::ImageLuma8(strip);
+            }
+        }
+
+        self.recognize_line(&crop)
+    }
+
     /// Borrow the recognition model directly (e.g. for rayon-parallel batch
     /// recognition — `RecognitionModel` is `Send + Sync`).
     pub fn recognizer(&self) -> &RecognitionModel {
@@ -226,6 +297,19 @@ impl Engine {
 /// softens edges enough to hurt the recognizer more than the sub-degree skew
 /// it removes. 1.5° is the right gate — keep it.
 const DESKEW_THRESHOLD: f64 = 1.5_f64.to_radians();
+
+/// Curvature gate (sagitta / chord length) above which a PP-OCR poly line is
+/// treated as curved and run through the full geometric dewarp
+/// (`extract_polygon_line` → `curved_dewarp` piecewise-affine mesh warp) instead
+/// of the cheap crop+deskew path.
+///
+/// 0.04 means the baseline's peak deviation reaches 4% of its length — for a
+/// 300px-wide line that's ~12px of sag, which is clearly visible curvature and
+/// starts to hurt the recognizer (column ink-centers drift, the height-normalize
+/// resize smears the curve). Below this the straight-quad path is cheaper and
+/// avoids a double bilinear resample that softens edges (see `DESKEW_THRESHOLD`
+/// comment for the analogous regression on sub-threshold deskew).
+const CURVATURE_THRESHOLD: f64 = 0.04;
 
 /// The tilt of a quad's top edge, in radians. `Some(angle)` from
 /// `atan2(boundary[1].y - boundary[0].y, boundary[1].x - boundary[0].x)`,

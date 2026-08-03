@@ -1,22 +1,22 @@
-//! Smoke test for the PP-OCR detector: load the bundled tiny-det, detect text
+//! Smoke test for the PP-OCR detector: load the bundled small-det, detect text
 //! regions on a page image, and print the resulting quads. Run with:
 //!
 //!   cargo run --release --example smoke_ppocr -- <image.png>
 //!
 //! Defaults to /tmp/scan2_p1.png if no arg is given. Loads the bundled
-//! tiny-det bytes via `include_bytes!` (same path the host app uses).
+//! small-det bytes via `include_bytes!` (same path the host app uses).
 
 use std::time::Instant;
 
 use image::GenericImageView;
-use ppocr_engine::Detector;
+use ppocr_engine::{Detector, DetectorConfig};
 
-/// Bundled tiny-det. Path is relative to this file's directory
+/// Bundled small-det. Path is relative to this file's directory
 /// (`src-tauri/examples/`): two levels up reaches the repo root, where
 /// `ppocr-models/` lives. (The host's `engine.rs` uses `../../ppocr-models/`
 /// from `src-tauri/src/` — one level up from `src/` to `src-tauri/`, then one
 /// more to the repo root. From `examples/` we need the same two levels.)
-const BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/tiny-det.safetensors");
+const BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/small-det.safetensors");
 
 fn main() -> anyhow::Result<()> {
     let img_path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/scan2_p1.png".to_string());
@@ -27,8 +27,12 @@ fn main() -> anyhow::Result<()> {
     println!("Image dimensions: {w}x{h}");
 
     let t = Instant::now();
-    println!("Loading PP-OCR tiny-det from bundled bytes...");
-    let det = Detector::load_from_buffer(BUNDLED_PPOCR_DET)?;
+    println!("Loading PP-OCR small-det from bundled bytes...");
+    let det = Detector::load_from_buffer_with_config(
+        BUNDLED_PPOCR_DET,
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        DetectorConfig::small(),
+    )?;
     println!("  loaded in {:?}", t.elapsed());
 
     let t = Instant::now();

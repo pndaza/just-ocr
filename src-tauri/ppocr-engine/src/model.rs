@@ -1541,28 +1541,99 @@ pub struct Detector {
     arena: InferenceArena,
 }
 
+/// Architecture width configuration for the PP-OCRv6 detector. The tiny and
+/// small variants share the same graph topology (PPLCNetV4-Large stem +
+/// RepLKFPN neck + DBHead, same block counts `[2,3,5,3]`) — only the channel
+/// widths differ. This struct captures the five width values that parameterize
+/// the graph so a single code path can load either variant from its
+/// safetensors (both published by PaddlePaddle with identical tensor names).
+///
+/// The host app bundles tiny via `include_bytes!` and defaults to
+/// [`DetectorConfig::tiny`]; small is loaded from disk for testing via
+/// [`DetectorConfig::small`].
+#[derive(Clone, Copy, Debug)]
+pub struct DetectorConfig {
+    /// Per-stage backbone output channels (4 stages).
+    pub stage_channels: [usize; 4],
+    /// Large-stem mid/out channels (stem1 mid, stem4 out).
+    pub stem_mid: usize,
+    pub stem_out: usize,
+    /// RepLKFPN neck output channels (also the DBHead input width).
+    pub neck_channels: usize,
+    /// RepLKFPN dilated depthwise kernel size (5 for tiny, 7 for small).
+    pub neck_kernel: usize,
+}
+
+impl DetectorConfig {
+    /// PP-OCRv6 **tiny** det — the bundled default (`tiny-det.safetensors`).
+    pub const fn tiny() -> Self {
+        Self {
+            stage_channels: [32, 48, 64, 160],
+            stem_mid: 16,
+            stem_out: 32,
+            neck_channels: 64,
+            neck_kernel: 5,
+        }
+    }
+
+    /// PP-OCRv6 **small** det — the wider variant (`small-det.safetensors`),
+    /// matching PaddlePaddle's `PP-OCRv6_small_det_safetensors`. Produces a
+    /// score map closer to the Python `PP-OCRv6_small_det_infer` reference.
+    pub const fn small() -> Self {
+        Self {
+            stage_channels: [48, 96, 192, 384],
+            stem_mid: 24,
+            stem_out: 48,
+            neck_channels: 96,
+            neck_kernel: 7,
+        }
+    }
+}
+
+impl Default for DetectorConfig {
+    /// Defaults to [`tiny`](Self::tiny) — the bundled model.
+    fn default() -> Self {
+        Self::tiny()
+    }
+}
+
 impl Detector {
-    pub fn load(path: impl AsRef<Path>, options: CpuOptions) -> Result<Self> {
-        let pool = thread_pool(options)?;
-        let weights = Weights::load(path)?;
-        let vb = weights.builder();
+    /// Build the detector graph from a loaded `VarBuilder` + width config.
+    /// Shared by both the path-based and buffer-based loaders so the two paths
+    /// can never drift apart.
+    fn build(vb: &crate::weights::VarBuilder, config: DetectorConfig) -> Result<(LcNetBackbone, DetectorNeckKind, DetectorHead)> {
         let encoder = vb.pp("model").pp("backbone").pp("encoder");
         let backbone = LcNetBackbone::load(
             encoder,
-            &detector_stages_for_channels([32, 48, 64, 160]),
+            &detector_stages_for_channels(config.stage_channels),
             StemSpec::Large {
-                mid_channels: 16,
-                out_channels: 32,
+                mid_channels: config.stem_mid,
+                out_channels: config.stem_out,
             },
             Activation::Relu,
         )?;
         let neck = DetectorNeckKind::RepLkFpn(RepLkFpn::load(
             vb.pp("model").pp("neck"),
-            [32, 48, 64, 160],
-            64,
-            5,
+            config.stage_channels,
+            config.neck_channels,
+            config.neck_kernel,
         )?);
-        let head = DetectorHead::load(vb.pp("head"), 64)?;
+        let head = DetectorHead::load(vb.pp("head"), config.neck_channels)?;
+        Ok((backbone, neck, head))
+    }
+
+    /// Load a detector from a safetensors file on disk, with explicit CPU
+    /// options and architecture config. Use this to load the **small** variant:
+    ///   `Detector::load_with_config("small-det.safetensors", opts, DetectorConfig::small())`
+    pub fn load_with_config(
+        path: impl AsRef<Path>,
+        options: CpuOptions,
+        config: DetectorConfig,
+    ) -> Result<Self> {
+        let pool = thread_pool(options)?;
+        let weights = Weights::load(path)?;
+        let vb = weights.builder();
+        let (backbone, neck, head) = Self::build(&vb, config)?;
         Ok(Self {
             backbone,
             neck,
@@ -1570,6 +1641,10 @@ impl Detector {
             pool,
             arena: InferenceArena::default(),
         })
+    }
+
+    pub fn load(path: impl AsRef<Path>, options: CpuOptions) -> Result<Self> {
+        Self::load_with_config(path, options, DetectorConfig::tiny())
     }
 
     /// Load the bundled tiny-det weights from an in-memory safetensors buffer.
@@ -1584,33 +1659,27 @@ impl Detector {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
-        Self::load_from_buffer_with_threads(bytes, threads)
+        Self::load_from_buffer_with_config(bytes, threads, DetectorConfig::tiny())
     }
 
     /// Same as [`load_from_buffer`](Self::load_from_buffer) but with an explicit
     /// worker count. `threads` must be ≥ 1 (the upstream `thread_pool` asserts
     /// this).
     pub fn load_from_buffer_with_threads(bytes: &[u8], threads: usize) -> Result<Self> {
+        Self::load_from_buffer_with_config(bytes, threads, DetectorConfig::tiny())
+    }
+
+    /// Buffer-based load with an explicit architecture config. For loading the
+    /// small variant from an in-memory buffer.
+    pub fn load_from_buffer_with_config(
+        bytes: &[u8],
+        threads: usize,
+        config: DetectorConfig,
+    ) -> Result<Self> {
         let pool = thread_pool(CpuOptions { threads })?;
         let weights = Weights::from_bytes(bytes)?;
         let vb = weights.builder();
-        let encoder = vb.pp("model").pp("backbone").pp("encoder");
-        let backbone = LcNetBackbone::load(
-            encoder,
-            &detector_stages_for_channels([32, 48, 64, 160]),
-            StemSpec::Large {
-                mid_channels: 16,
-                out_channels: 32,
-            },
-            Activation::Relu,
-        )?;
-        let neck = DetectorNeckKind::RepLkFpn(RepLkFpn::load(
-            vb.pp("model").pp("neck"),
-            [32, 48, 64, 160],
-            64,
-            5,
-        )?);
-        let head = DetectorHead::load(vb.pp("head"), 64)?;
+        let (backbone, neck, head) = Self::build(&vb, config)?;
         Ok(Self {
             backbone,
             neck,

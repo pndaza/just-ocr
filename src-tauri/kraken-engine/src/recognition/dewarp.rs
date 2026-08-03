@@ -618,6 +618,163 @@ fn polyline_length(pts: &[Pt]) -> f64 {
         .sum()
 }
 
+// ───────────────────────── curved-midline synthesis (PP-OCR) ─────────────────────────
+
+/// Synthesize a curved centerline from a closed boundary polygon, for use as a
+/// dewarp baseline when the segmenter emits only a boundary (PP-OCR poly seg)
+/// and a straight quad midline would misrepresent a curved text line.
+///
+/// Walks along the polygon's PCA principal axis in thin steps, and at each step
+/// casts a perpendicular scanline across the polygon to find the top and bottom
+/// crossing points. The midpoint of those crossings is a sample of the text
+/// centerline. The result is a polyline (≥2 points) that genuinely tracks
+/// curvature — unlike `segmenter_adapters::synth_midline`, which averages two
+/// straight quad edges and is always colinear.
+///
+/// `n_samples` controls resolution along the axis (more = smoother curve).
+/// Returns an empty `Vec` only for degenerate input (<3 polygon vertices or
+/// near-zero axis span); callers should fall back to the straight midline in
+/// that case.
+pub fn curved_midline(polygon: &[Pt], n_samples: usize) -> Vec<Pt> {
+    let n = polygon.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    // Centroid.
+    let cnt = n as f64;
+    let (mut sx, mut sy) = (0.0, 0.0);
+    for &(x, y) in polygon {
+        sx += x;
+        sy += y;
+    }
+    let (cx, cy) = (sx / cnt, sy / cnt);
+
+    // PCA principal axis (text-reading direction).
+    let (mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0);
+    for &(x, y) in polygon {
+        let (dx, dy) = (x - cx, y - cy);
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+    let angle = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let axis = (angle.cos(), angle.sin());
+    let normal = (-axis.1, axis.0);
+
+    // Project each vertex onto (axis, normal) to get the axis extent.
+    let (mut min_a, mut max_a, mut min_n, mut max_n) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in polygon {
+        let (dx, dy) = (x - cx, y - cy);
+        let along = dx * axis.0 + dy * axis.1;
+        let across = dx * normal.0 + dy * normal.1;
+        min_a = min_a.min(along);
+        max_a = max_a.max(along);
+        min_n = min_n.min(across);
+        max_n = max_n.max(across);
+    }
+    let span_a = max_a - min_a;
+    if span_a < 2.0 {
+        return Vec::new();
+    }
+
+    // Build an edge list of the closed polygon for scanline intersection.
+    // polygon may or may not repeat the first point at the end; handle both.
+    let closed: Vec<Pt> = if polygon.first() == polygon.last() && n > 3 {
+        polygon[..n - 1].to_vec()
+    } else {
+        polygon.to_vec()
+    };
+    let m = closed.len();
+    let edges: Vec<(Pt, Pt)> = (0..m)
+        .map(|i| (closed[i], closed[(i + 1) % m]))
+        .collect();
+
+    let steps = n_samples.max(2);
+    let mut midline = Vec::with_capacity(steps);
+    for i in 0..steps {
+        let t = if steps == 1 { 0.5 } else { i as f64 / (steps - 1) as f64 };
+        // Shrink the sampling range slightly inward so the perpendicular ray at
+        // the very ends still crosses the polygon (the true endpoints sit on
+        // the boundary, where a scanline is degenerate).
+        let a = min_a + span_a * (0.02 + 0.96 * t);
+        // Axis point at (a, 0) in (axis, normal) coords → world point on axis.
+        let px = cx + axis.0 * a;
+        let py = cy + axis.1 * a;
+
+        // Cast a perpendicular ray (along `normal`) and collect all polygon
+        // crossings, then take the midpoint of [min, max] crossing `across`.
+        let mut crosses: Vec<f64> = Vec::new();
+        for &(p0, p1) in &edges {
+            // Edge endpoints in (axis, normal) coords relative to centroid.
+            let (e0x, e0y) = (p0.0 - cx, p0.1 - cy);
+            let (e1x, e1y) = (p1.0 - cx, p1.1 - cy);
+            let a0 = e0x * axis.0 + e0y * axis.1;
+            let a1 = e1x * axis.0 + e1y * axis.1;
+            // Does the edge straddle the scanline at axis-position `a`?
+            if (a0 <= a && a1 >= a) || (a0 >= a && a1 <= a) {
+                let denom = a1 - a0;
+                if denom.abs() < 1e-12 {
+                    continue;
+                }
+                let u = (a - a0) / denom;
+                let n0 = e0x * normal.0 + e0y * normal.1;
+                let n1 = e1x * normal.0 + e1y * normal.1;
+                crosses.push(n0 + u * (n1 - n0));
+            }
+        }
+        if crosses.len() < 2 {
+            continue;
+        }
+        // For a convex/strip polygon, the two extreme crossings are the outer
+        // hull; their midpoint is the centerline sample. (For a simple band
+        // polygon there are exactly 2 crossings.)
+        let (mn, mx) = crosses
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), &v| {
+                (mn.min(v), mx.max(v))
+            });
+        let mid_n = (mn + mx) * 0.5;
+        // Back to world coords.
+        let wx = px + normal.0 * mid_n;
+        let wy = py + normal.1 * mid_n;
+        midline.push((wx, wy));
+    }
+    midline
+}
+
+/// Scale-invariant curvature of a baseline polyline: the maximum perpendicular
+/// deviation of any interior point from the chord (start→end), divided by the
+/// chord length. 0.0 = perfectly straight; ~0.1 = noticeably curved.
+///
+/// Used to gate the expensive geometric dewarp (`extract_polygon_line` mesh
+/// warp) so it only runs on lines that actually curve. Below the threshold the
+/// straight-quad crop+deskew path is cheaper and avoids a double-resample.
+pub fn baseline_sagitta(baseline: &[Pt]) -> f64 {
+    let n = baseline.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let (x0, y0) = baseline[0];
+    let (x1, y1) = baseline[n - 1];
+    let (cx, cy) = (x1 - x0, y1 - y0);
+    let chord = (cx * cx + cy * cy).sqrt();
+    if chord < 1e-9 {
+        return 0.0;
+    }
+    let mut max_dev = 0.0f64;
+    for &(x, y) in &baseline[1..n - 1] {
+        let (px, py) = (x - x0, y - y0);
+        // Perpendicular distance from point p to the chord, scaled by chord
+        // length: |cx*py - cy*px| / chord. (z-component of the 2D cross.)
+        let dev = (cx * py - cy * px).abs() / chord;
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+    max_dev / chord
+}
+
 /// Axis-aligned bbox of a polygon as `(min_x, min_y, max_x, max_y)`, clamped to
 /// the image bounds.
 fn polygon_bbox(boundary: &[Pt], img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
@@ -787,6 +944,59 @@ mod tests {
             after < before,
             "curved dewarp should flatten the band; ink-center variance before={before:.2} after={after:.2}"
         );
+    }
+
+    #[test]
+    fn test_curved_midline_tracks_parabolic_band() {
+        // A parabolic strip polygon: top edge sags, bottom edge sags in mirror.
+        // The centerline should track the sag and be non-colinear.
+        let center = |xf: f64| 20.0 + 20.0 * ((xf - 50.0) / 50.0).powi(2);
+        let mut polygon: Vec<Pt> = Vec::new();
+        for i in 0..=10 {
+            let xf = (i as f64 / 10.0) * 100.0;
+            polygon.push((xf, center(xf) - 8.0));
+        }
+        for i in (0..=10).rev() {
+            let xf = (i as f64 / 10.0) * 100.0;
+            polygon.push((xf, center(xf) + 12.0));
+        }
+        let mid = curved_midline(&polygon, 9);
+        assert!(mid.len() >= 3, "midline should have >=3 points, got {}", mid.len());
+        let sag = baseline_sagitta(&mid);
+        assert!(
+            sag > 0.05,
+            "curved midline sagitta should be noticeable (>0.05), got {sag:.4}"
+        );
+    }
+
+    #[test]
+    fn test_curved_midline_for_straight_band_is_flat() {
+        // An axis-aligned rectangle: the centerline should be ~straight.
+        let polygon = vec![
+            (0.0, 0.0), (100.0, 0.0), (100.0, 20.0), (0.0, 20.0),
+        ];
+        let mid = curved_midline(&polygon, 9);
+        assert!(mid.len() >= 3);
+        let sag = baseline_sagitta(&mid);
+        assert!(
+            sag < 0.02,
+            "straight-band midline sagitta should be ~0, got {sag:.4}"
+        );
+    }
+
+    #[test]
+    fn test_baseline_sagitta_zero_for_colinear() {
+        let bl = vec![(0.0, 0.0), (50.0, 25.0), (100.0, 50.0)];
+        assert!(baseline_sagitta(&bl) < 1e-9);
+    }
+
+    #[test]
+    fn test_baseline_sagitta_detects_curve() {
+        // A V-shape: chord from (0,0) to (100,0), midpoint dips to (50,20).
+        let bl = vec![(0.0, 0.0), (50.0, 20.0), (100.0, 0.0)];
+        let sag = baseline_sagitta(&bl);
+        // Perpendicular dev = 20, chord = 100 → sagitta = 0.2.
+        assert!((sag - 0.2).abs() < 1e-9, "expected 0.2, got {sag}");
     }
 
     #[test]

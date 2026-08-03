@@ -1,13 +1,21 @@
-//! ppocr-engine: vendored PP-OCRv6 tiny text detector (DBNet).
+//! ppocr-engine: vendored PP-OCRv6 text detector (DBNet).
 //!
 //! Slimmed subset of ppocr-rs (https://github.com/weidix/ppocr-rs): detector +
 //! preprocess + DB postprocess only. The recognizer, GPU backend, model
-//! download, and CLI were excluded. The tiny-det safetensors is bundled by the
+//! download, and CLI were excluded. A detector safetensors is bundled by the
 //! host via `include_bytes!`; this crate exposes `Detector::load_from_buffer`.
+//!
+//! The host app bundles the **small** detector (`small-det.safetensors`, loaded
+//! via `load_from_buffer_with_config(.., DetectorConfig::small())`) — it
+//! measures far more accurate than tiny on dense/curved text (tiny over-detected
+//! 44 vs small's correct 27 on a test page). The `tiny` config + the
+//! `load_from_buffer` convenience (which hard-codes tiny) remain for A/B
+//! comparison examples, not for production use.
 //!
 //! Public API:
 //!   - [`Detector`] — loaded detector, reused across calls.
-//!   - [`Detector::load_from_buffer`] — load the bundled tiny-det weights.
+//!   - [`Detector::load_from_buffer`] — load weights with the **tiny** config
+//!     (convenience; production uses `load_from_buffer_with_config` + `small()`).
 //!   - [`Detector::detect`] — image → quads in source-image pixel coords.
 
 // The bulk of this crate is verbatim upstream code (tensor ops, kernels, the
@@ -35,7 +43,7 @@ mod weights;
 #[cfg(target_os = "windows")]
 mod windows;
 
-pub use model::{CpuOptions, Detector};
+pub use model::{CpuOptions, Detector, DetectorConfig};
 pub use postprocess::{Detection, DetectorTransform, Point};
 pub use tensor::Tensor;
 
@@ -72,7 +80,7 @@ impl RgbImage {
 
 use crate::postprocess::{DetectorInputPlan, DetectorPostprocessOptions};
 use crate::preprocess::prepare_detector;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 impl Detector {
     /// Run end-to-end detection: image → quads in source-image pixel coords.
@@ -93,6 +101,37 @@ impl Detector {
         let shape: &[usize] = output.shape();
         let opts = DetectorPostprocessOptions::default();
         crate::postprocess::extract_detections(values, shape, plan.transform(), opts)
+    }
+
+    /// Run the detector forward pass and return the **raw DB score map**
+    /// before postprocess collapses it to quads.
+    ///
+    /// Each value in `values` is the network's text-region probability in
+    /// `[0,1]` for the corresponding input-space pixel (row-major:
+    /// `values[y * width + x]`). The map has the same H, W as the resized
+    /// detector input (≤ 736 on the long side, 32-aligned) — *not* source
+    /// resolution. Use the returned [`DetectorTransform`] to map input coords
+    /// back to source-image pixel space (`map_x_to_source` / `map_y_to_source`).
+    ///
+    /// Intended for debug visualization (e.g. dumping a heatmap PNG) and for
+    /// experimenting with alternative postprocess paths (multi-point polygon
+    /// tracing). The production path is [`detect`](Self::detect), which runs
+    /// `extract_detections` on this same tensor.
+    pub fn detect_raw(
+        &self,
+        img: &image::DynamicImage,
+    ) -> Result<(Vec<f32>, usize, usize, DetectorTransform)> {
+        let rgb = RgbImage::from_dynamic(img);
+        let plan = DetectorInputPlan::new(rgb.width(), rgb.height(), Some(736))?;
+        let prepared = prepare_detector(&rgb, plan);
+        let input = Tensor::from_f32(prepared.shape().to_vec(), prepared.data)?;
+        let output = self.forward(input)?;
+        let values = output.as_f32()?.to_vec();
+        let shape = output.shape();
+        // [1, 1, H, W] — DB head preserves spatial dims, so H/W match the input.
+        let height = *shape.get(2).context("detector output missing H dim")?;
+        let width = *shape.get(3).context("detector output missing W dim")?;
+        Ok((values, height, width, plan.transform()))
     }
 }
 
