@@ -235,7 +235,7 @@ pub(crate) fn render_pages(
 }
 
 /// Decode one PDF image XObject into RGB8 pixels (plus its dimensions),
-/// dispatching on the stream's /Filter.
+/// dispatching on the stream's /Filter chain.
 fn decode_image(img: &lopdf::xobject::PdfImage) -> Result<(Vec<u8>, u32, u32), String> {
     let width = img.width as u32;
     let height = img.height as u32;
@@ -245,28 +245,48 @@ fn decode_image(img: &lopdf::xobject::PdfImage) -> Result<(Vec<u8>, u32, u32), S
     let filters: Vec<String> = img.filters.clone().unwrap_or_default();
     let content = img.content;
 
-    // JPEG and JPEG2000 are self-contained: hand the raw bytes to the image
-    // crate. (JP2 is unsupported by default features; DCT = JPEG.)
-    if filters.contains(&"DCTDecode".to_string()) {
-        let rgb = image::load_from_memory(content)
-            .map_err(|e| format!("JPEG decode: {e}"))?
-            .to_rgb8()
-            .into_raw();
-        return Ok((rgb, width, height));
-    }
-    if filters.contains(&"JPXDecode".to_string()) {
-        return Err("JPEG2000 not supported".into());
-    }
-    if filters.contains(&"JBIG2Decode".to_string()) {
-        return Err("JBIG2 not supported".into());
-    }
-
-    // CCITT (fax) — black & white scans. Result is grayscale 8-bit.
-    if filters.contains(&"CCITTFaxDecode".to_string()) {
-        let dp = img.origin_dict.get(b"DecodeParms").ok();
-        let gray = decode_ccitt(content, width, height, dp)?;
-        let rgb = gray.iter().flat_map(|&v| [v, v, v]).collect();
-        return Ok((rgb, width, height));
+    // "Terminal" image formats — self-describing bitstreams (JPEG, JPEG2000,
+    // JBIG2) or fax (CCITT) — can't go through the raw-pixel interpreter
+    // below. But a compression filter (FlateDecode is the common one) may sit
+    // earlier in the /Filter array and must be unwound first.
+    //
+    // Real-world example: some PDF producers wrap JPEG streams in FlateDecode
+    // (/Filter [/FlateDecode /DCTDecode]). The old code did an early return
+    // on `filters.contains("DCTDecode")` and handed the still-zlib bytes
+    // straight to the JPEG decoder, which failed and silently dropped every
+    // affected page. Apply every filter before the terminal one, then decode.
+    let terminal_idx = filters.iter().position(|f| {
+        matches!(
+            f.as_str(),
+            "DCTDecode" | "JPXDecode" | "JBIG2Decode" | "CCITTFaxDecode"
+        )
+    });
+    if let Some(idx) = terminal_idx {
+        // Walk the compression chain that precedes the terminal format.
+        let mut data = content.to_vec();
+        for (i, filter) in filters[..idx].iter().enumerate() {
+            data = apply_filter(&data, img.origin_dict, filter, i)?;
+        }
+        return match filters[idx].as_str() {
+            // DCT = JPEG; hand the (now-decompressed) bytes to the image crate.
+            "DCTDecode" => {
+                let rgb = image::load_from_memory(&data)
+                    .map_err(|e| format!("JPEG decode: {e}"))?
+                    .to_rgb8()
+                    .into_raw();
+                Ok((rgb, width, height))
+            }
+            "JPXDecode" => Err("JPEG2000 not supported".into()),
+            "JBIG2Decode" => Err("JBIG2 not supported".into()),
+            // CCITT (fax) — black & white scans. Result is grayscale 8-bit.
+            "CCITTFaxDecode" => {
+                let dp = img.origin_dict.get(b"DecodeParms").ok();
+                let gray = decode_ccitt(&data, width, height, dp)?;
+                let rgb = gray.iter().flat_map(|&v| [v, v, v]).collect();
+                Ok((rgb, width, height))
+            }
+            _ => unreachable!("terminal_idx only matches the four filters above"),
+        };
     }
 
     // Otherwise a chain of compression filters (FlateDecode, RunLengthDecode,
@@ -663,6 +683,34 @@ mod extract_tests {
         for png in &pages {
             assert!(!png.is_empty(), "extracted page PNG must be non-empty");
             assert_eq!(&png[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        }
+    }
+
+    /// Regression for the FlateDecode-wrapped-JPEG case (`/Filter
+    /// [/FlateDecode /DCTDecode]`): the old code early-returned on
+    /// DCTDecode and handed still-zlib bytes to the JPEG decoder, dropping
+    /// every page. Reproduced by `sample_pdf/tmp.pdf`. Skipped when the
+    /// sample dir isn't present (not bundled in CI).
+    #[test]
+    fn extracts_flate_wrapped_jpeg_pages() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/tmp.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/tmp.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read tmp.pdf");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        // tmp.pdf has 5 pages, every one a FlateDecode→DCTDecode image.
+        assert_eq!(pages.len(), 5, "all 5 pages should extract, got {}", pages.len());
+        for (i, png) in pages.iter().enumerate() {
+            assert!(!png.is_empty(), "page {} PNG empty", i + 1);
+            assert_eq!(
+                &png[0..8],
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "page {} is not a PNG",
+                i + 1
+            );
         }
     }
 
