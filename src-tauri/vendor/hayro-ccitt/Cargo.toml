@@ -1,0 +1,10 @@
+[package]
+name = "hayro-ccitt"
+version = "0.3.0"
+edition = "2024"
+description = "A decoder for CCITT fax-encoded images (vendored from LaurenzV/hayro)."
+license = "Apache-2.0 OR MIT"
+
+[lib]
+name = "hayro_ccitt"
+path = "src/lib.rs"

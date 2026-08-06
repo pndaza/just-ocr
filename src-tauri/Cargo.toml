@@ -47,8 +47,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = "0.3"
 tokio = { version = "1", features = ["io-util"] }
 # PDF image extraction: lopdf walks page resources; flate2/weezl/fax decode
-# the common compressed image streams (FlateDecode, LZWDecode, CCITTFaxDecode).
-# The `image` crate (above) handles JPEG decode and PNG re-encode.
+# the common compressed image streams (FlateDecode, LZWDecode, CCITTFaxDecode),
+# and hayro-jbig2 decodes JBIG2 (the standard compression for 1-bit scanned
+# PDFs). The `image` crate (above) handles JPEG decode and PNG re-encode.
 lopdf = { version = "0.43", default-features = false }
 # Parallel page decoding in PDF extract mode (pdf.rs). Each page's image is
 # decoded/re-encoded independently, so a rayon work pool gives a near-linear
@@ -61,6 +62,16 @@ fax = "0.2"
 # listing it here reuses that single copy (no extra compile). Used with
 # with_tiff_size_switch — see the comment in pdf.rs::apply_filter.
 weezl = "0.2"
+# JBIG2Decode stream filter (1-bit bilevel scans). Vendored from LaurenzV/hayro
+# at vendor/hayro-jbig2 (+ vendor/hayro-ccitt) because we needed to raise
+# upstream's hardcoded MAX_INSTANCES (10k, "arbitrarily chosen to prevent
+# timeouts") — it rejected legitimate high-res text scans. Same vendoring
+# pattern as kraken-engine/ppocr-engine. Pure Rust, MIT/Apache; the `simd`
+# feature pulls `fearless_simd` (optional unsafe in a dep) for faster decode.
+# We drive the `Decoder` trait directly, so the upstream `image` feature is
+# omitted. See pdf.rs::decode_jbig2 and the patch note in
+# vendor/hayro-jbig2/src/decode/text.rs.
+hayro-jbig2 = { path = "vendor/hayro-jbig2" }
 # Optional PDF page renderer (used when the user picks "render" mode). hayro
 # interprets the page content stream and rasterizes it; we scale to a 1500px
 # page height regardless of MediaBox size, so oversized pages render at a sane

@@ -2528,6 +2528,10 @@ dependencies = [
 [[package]]
 name = "hayro-ccitt"
 version = "0.3.0"
+
+[[package]]
+name = "hayro-ccitt"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
 
@@ -2563,11 +2567,19 @@ dependencies = [
 [[package]]
 name = "hayro-jbig2"
 version = "0.3.0"
+dependencies = [
+ "fearless_simd",
+ "hayro-ccitt 0.3.0",
+]
+
+[[package]]
+name = "hayro-jbig2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69374b3668dd45aeb3d3145cda68f2c7b4f223aaa2511e67d076f1c7d741388d"
 dependencies = [
  "fearless_simd",
- "hayro-ccitt",
+ "hayro-ccitt 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2592,8 +2604,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0edeafd70aa2db743de8ede8637d07ec87db05efe69cde371d03f1b185fcef27"
 dependencies = [
  "flate2",
- "hayro-ccitt",
- "hayro-jbig2",
+ "hayro-ccitt 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hayro-jbig2 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "hayro-jpeg2000",
  "memchr",
  "rustc-hash",
@@ -3293,6 +3305,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hayro",
+ "hayro-jbig2 0.3.0",
  "image",
  "imageproc",
  "kraken-engine",
