@@ -768,42 +768,55 @@ fn decode_jbig2(
 
 /// Decode a CCITT (fax) encoded image to 8-bit grayscale. Tries Group 4 then
 /// Group 3 based on /DecodeParms /K, falling back sensibly when absent.
+///
+/// `/BlackIs1` (PDF spec §7.4.6) controls decoded bit polarity: `false` (the
+/// default) means a `1` bit is white; `true` means a `1` bit is black. The
+/// `fax` crate decodes to semantic `Color::Black`/`Color::White` assuming a
+/// fixed polarity (matching `BlackIs1 false`). So when `BlackIs1` is true we
+/// invert the mapping — otherwise the page comes out white-on-black. Real-world
+/// scans encoded with the TIFF/bitmap convention (`BlackIs1 true`) hit this.
 fn decode_ccitt(
     content: &[u8],
     width: u32,
     height: u32,
     decode_parms: Option<&Object>,
 ) -> Result<Vec<u8>, String> {
-    let columns: u16 = match decode_parms {
-        Some(Object::Dictionary(d)) => d
-            .get(b"Columns")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(width as i64) as u16,
-        Some(Object::Array(arr)) => arr
-            .first()
-            .and_then(|o| match o {
-                Object::Dictionary(d) => d.get(b"Columns").and_then(|v| v.as_i64()).ok(),
+    // Read a scalar DecodeParms field from either a dict or an array-of-dicts
+    // (one entry per /Filter element). Avoids repeating the dict/array walk
+    // for Columns, K, and BlackIs1.
+    let parm = |key: &[u8]| -> Option<lopdf::Object> {
+        let dp = decode_parms?;
+        let d = match dp {
+            Object::Dictionary(d) => d,
+            Object::Array(arr) => arr.first().and_then(|o| match o {
+                Object::Dictionary(d) => Some(d),
                 _ => None,
-            })
-            .unwrap_or(width as i64) as u16,
-        _ => width as u16,
+            })?,
+            _ => return None,
+        };
+        d.get(key).ok().cloned()
     };
-    let k: i64 = match decode_parms {
-        Some(Object::Dictionary(d)) => d.get(b"K").and_then(|v| v.as_i64()).unwrap_or(0),
-        Some(Object::Array(arr)) => arr
-            .first()
-            .and_then(|o| match o {
-                Object::Dictionary(d) => d.get(b"K").and_then(|v| v.as_i64()).ok(),
-                _ => None,
-            })
-            .unwrap_or(0),
-        _ => 0,
+
+    let columns: u16 = parm(b"Columns")
+        .and_then(|v| v.as_i64().ok())
+        .unwrap_or(width as i64) as u16;
+    let k: i64 = parm(b"K").and_then(|v| v.as_i64().ok()).unwrap_or(0);
+    // /BlackIs1 defaults to false (PDF §7.4.6). A bare boolean or an integer
+    // (1 = true) both appear in the wild.
+    let black_is_1 = match parm(b"BlackIs1") {
+        Some(Object::Boolean(b)) => b,
+        Some(o) => o.as_i64().map(|v| v != 0).unwrap_or(false),
+        None => false,
     };
 
     let mut pixels: Vec<u8> = Vec::with_capacity((width * height) as usize);
     let decode = |transitions: &[u16], px: &mut Vec<u8>| {
         for pel in fax::decoder::pels(transitions, columns) {
-            px.push(if pel == fax::Color::Black { 0 } else { 255 });
+            // fax's Color semantics match BlackIs1=false (1=white). When the
+            // stream declares BlackIs1=true, flip black↔white.
+            let is_black = pel == fax::Color::Black;
+            let ink = if black_is_1 { !is_black } else { is_black };
+            px.push(if ink { 0 } else { 255 });
         }
     };
     if k < 0 {
@@ -1096,6 +1109,44 @@ mod extract_tests {
                 &png[0..8],
                 &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
                 "page {} is not a PNG",
+                i + 1
+            );
+        }
+    }
+
+    /// Regression for CCITT `/BlackIs1` handling: a 1-bit fax scan encoded
+    /// with `/BlackIs1 true` (the TIFF/bitmap convention) used to come out
+    /// inverted (white text on black). The page should be ~5-15% dark (text
+    /// on white paper), not ~95%. Skipped when the sample isn't bundled.
+    #[test]
+    fn extracts_ccitt_black_is1_not_inverted() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/sample_ccitt.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/sample_ccitt.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read sample_ccitt.pdf");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        assert_eq!(pages.len(), 5, "expected 5 pages, got {}", pages.len());
+
+        // Each page should be predominantly white (a text scan), not inverted.
+        // Assert <50% dark — an inverted page is ~95%, a correct one ~5-15%.
+        for (i, png) in pages.iter().enumerate() {
+            assert_eq!(
+                &png[0..8],
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "page {} is not a PNG",
+                i + 1
+            );
+            let img = image::load_from_memory(png).expect("decode PNG");
+            let g = img.to_luma8();
+            let total = (g.width() as usize) * (g.height() as usize);
+            let dark = g.pixels().filter(|p| p.0[0] < 128).count();
+            let pct = dark as f32 * 100.0 / total as f32;
+            assert!(
+                pct < 50.0,
+                "page {} looks inverted ({pct:.1}% dark) — BlackIs1 handling regressed",
                 i + 1
             );
         }
