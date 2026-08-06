@@ -1101,6 +1101,52 @@ mod extract_tests {
         }
     }
 
+    /// Render-path regression for JBIG2: hayro's renderer applies its own
+    /// internal JBIG2 filter (a separate copy of hayro-jbig2 pulled by
+    /// hayro-syntax). Before we patched that copy to our vendored build, the
+    /// unpatched MAX_INSTANCES = 10_000 silently failed and rendered every
+    /// JBIG2 page blank. Renders the first page and asserts it's not empty —
+    /// catches both a total render failure and a blank-output regression.
+    /// Skipped when the sample dir isn't present (not bundled in CI).
+    #[test]
+    fn renders_jbig2_page_not_blank() {
+        use super::{ImageMode, render_pages};
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/tmp_2.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/tmp_2.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read tmp_2.pdf");
+        // Render just the first page at a small height to keep the test fast.
+        // hayro doesn't expose per-page selection, so render and check page 1.
+        let pages = render_pages(&bytes, 400, |_, _| {}, ImageMode::Gray).expect("render succeeds");
+        assert!(!pages.is_empty(), "render produced no pages");
+        let png = &pages[0];
+        assert_eq!(
+            &png[0..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            "rendered page 1 is not a PNG"
+        );
+
+        // Decode the PNG and assert it isn't blank/white. A text-bearing scan
+        // is ~5-20% dark; a blank render (the failure mode) is ~0%. Use a low
+        // bar (>1%) to stay robust across content.
+        let img = image::load_from_memory(png).expect("decode rendered PNG");
+        let rgb = img.to_rgb8();
+        let total = (rgb.width() as usize) * (rgb.height() as usize);
+        let dark = rgb
+            .pixels()
+            .filter(|p| p.0[0] < 128 || p.0[1] < 128 || p.0[2] < 128)
+            .count();
+        let pct = dark as f32 * 100.0 / total as f32;
+        assert!(
+            pct > 1.0,
+            "rendered page 1 looks blank ({dark}/{total} = {pct:.1}% dark) — \
+             JBIG2 render path likely regressed"
+        );
+    }
+
     #[test]
     fn rejects_garbage_bytes() {
         let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray).unwrap_err();
