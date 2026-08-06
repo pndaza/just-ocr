@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "just-ocr"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clipper2-rust",
