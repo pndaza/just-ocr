@@ -116,28 +116,34 @@ pub(crate) fn extract_pages(
             // Heavy, independent work: decode to RGB8, convert to the requested
             // color mode, then re-encode as PNG.
             let png = match best {
-                Some(img) => match decode_image(img) {
-                    Ok((rgb, w, h)) => {
-                        let dyn_img = match image::RgbImage::from_raw(w, h, rgb) {
-                            Some(b) => image::DynamicImage::ImageRgb8(b),
-                            None => {
-                                eprintln!("Warning: page {page_num} RGB buffer size mismatch");
-                                return None;
-                            }
-                        };
-                        match reencode_png(&to_target(dyn_img, image_mode)) {
-                            Ok(png) => Some(png),
-                            Err(e) => {
-                                eprintln!("Warning: page {page_num} re-encode: {e}");
-                                None
+                Some(img) => {
+                    // For JBIG2 images, resolve the optional /JBIG2Globals
+                    // shared-stream now — decode_image can't (no &Document).
+                    // Cheap no-op for every non-JBIG2 image.
+                    let globals = jbig2_globals(&doc, img);
+                    match decode_image(img, globals.as_deref()) {
+                        Ok((rgb, w, h)) => {
+                            let dyn_img = match image::RgbImage::from_raw(w, h, rgb) {
+                                Some(b) => image::DynamicImage::ImageRgb8(b),
+                                None => {
+                                    eprintln!("Warning: page {page_num} RGB buffer size mismatch");
+                                    return None;
+                                }
+                            };
+                            match reencode_png(&to_target(dyn_img, image_mode)) {
+                                Ok(png) => Some(png),
+                                Err(e) => {
+                                    eprintln!("Warning: page {page_num} re-encode: {e}");
+                                    None
+                                }
                             }
                         }
+                        Err(e) => {
+                            eprintln!("Warning: page {page_num} decode: {e}");
+                            None
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Warning: page {page_num} decode: {e}");
-                        None
-                    }
-                },
+                }
                 None => None,
             };
 
@@ -236,7 +242,16 @@ pub(crate) fn render_pages(
 
 /// Decode one PDF image XObject into RGB8 pixels (plus its dimensions),
 /// dispatching on the stream's /Filter chain.
-fn decode_image(img: &lopdf::xobject::PdfImage) -> Result<(Vec<u8>, u32, u32), String> {
+///
+/// `jbig2_globals` carries the optional `/JBIG2Globals` stream bytes for the
+/// JBIG2Decode path. It's resolved by the caller (`extract_pages`), which has
+/// the `&Document` needed to dereference the indirect object — `PdfImage`
+/// exposes only the image dict + content, not the document. `None` for every
+/// non-JBIG2 image (zero overhead) and for JBIG2 images with no globals.
+fn decode_image(
+    img: &lopdf::xobject::PdfImage,
+    jbig2_globals: Option<&[u8]>,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let width = img.width as u32;
     let height = img.height as u32;
     if width == 0 || height == 0 {
@@ -277,7 +292,16 @@ fn decode_image(img: &lopdf::xobject::PdfImage) -> Result<(Vec<u8>, u32, u32), S
                 Ok((rgb, width, height))
             }
             "JPXDecode" => Err("JPEG2000 not supported".into()),
-            "JBIG2Decode" => Err("JBIG2 not supported".into()),
+            // JBIG2 — 1-bit bilevel scans (the standard compression for
+            // scanned documents). Optional shared symbol dictionary bytes
+            // (`/JBIG2Globals`) precede the page stream per T.88 §7.5.
+            // Dimensions come from the decoded image (region dims in the
+            // codestream can differ from the image dict's W/H).
+            "JBIG2Decode" => {
+                let (gray, w, h) = decode_jbig2(&data, jbig2_globals, width, height)?;
+                let rgb = gray.iter().flat_map(|&v| [v, v, v]).collect();
+                Ok((rgb, w, h))
+            }
             // CCITT (fax) — black & white scans. Result is grayscale 8-bit.
             "CCITTFaxDecode" => {
                 let dp = img.origin_dict.get(b"DecodeParms").ok();
@@ -600,6 +624,148 @@ fn scale_gray(data: &[u8], bpc: u32) -> Vec<u8> {
         .collect()
 }
 
+/// Resolve the optional `/JBIG2Globals` shared-stream for a JBIG2 image.
+///
+/// JBIG2 images in scanned PDFs commonly reference a separate stream holding
+/// a shared symbol dictionary (one dict reused across every page). The
+/// reference lives in the image dict's `/DecodeParms << /JBIG2Globals N 0 R
+/// >>`. Returns `None` for non-JBIG2 images (cheap filter-name check first)
+/// and for JBIG2 images with no globals entry — both are normal.
+///
+/// `PdfImage` exposes the image dict but not the `Document`, so this runs in
+/// `extract_pages` (where `&Document` is in scope) and the bytes are threaded
+/// into `decode_image`. The globals stream may itself be Flate-compressed;
+/// `all_content` applies its own `/Filter` chain, matching what poppler/mupdf
+/// feed their decoders. A resolve failure logs and returns `None` rather than
+/// failing the whole page — a missing dict usually still decodes the generic
+/// regions, just without text-symbol reuse.
+fn jbig2_globals(doc: &Document, img: &lopdf::xobject::PdfImage) -> Option<Vec<u8>> {
+    // Cheap fast path: nothing to do unless this image uses JBIG2Decode.
+    let is_jbig2 = img
+        .filters
+        .as_ref()
+        .map(|fs| fs.iter().any(|f| f == "JBIG2Decode"))
+        .unwrap_or(false);
+    if !is_jbig2 {
+        return None;
+    }
+
+    // /DecodeParms may be a single dict or an array (one per filter, aligned
+    // to the /Filter array). Locate the JBIG2Globals entry in either shape.
+    let dp = img.origin_dict.get(b"DecodeParms").ok()?;
+    let dp_dict = match dp {
+        Object::Dictionary(d) => d,
+        Object::Array(arr) => {
+            // Prefer the entry at the JBIG2 filter's index; fall back to the
+            // first dict in the array that actually carries a JBIG2Globals key.
+            let jbig2_idx = img
+                .filters
+                .as_ref()
+                .and_then(|fs| fs.iter().position(|f| f == "JBIG2Decode"));
+            jbig2_idx
+                .and_then(|i| match arr.get(i)? {
+                    Object::Dictionary(d) => Some(d),
+                    _ => None,
+                })
+                .or_else(|| {
+                    arr.iter().filter_map(|o| match o {
+                        Object::Dictionary(d) => Some(d),
+                        _ => None,
+                    }).find(|d| d.get(b"JBIG2Globals").is_ok())
+                })?
+        }
+        _ => return None,
+    };
+
+    let globals_ref = match dp_dict.get(b"JBIG2Globals").ok()? {
+        Object::Reference(id) => *id,
+        _ => return None,
+    };
+
+    // Dereference the stream and return its fully-decoded content. The globals
+    // stream may itself be Flate-compressed; decompressed_content applies its
+    // /Filter chain, matching what poppler/mupdf feed their decoders. A
+    // resolve/decode failure logs and returns None — decode then proceeds
+    // without the dict.
+    let stream = match doc.get_object(globals_ref).and_then(|o| o.as_stream()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[pdf] JBIG2Globals {:?} resolve failed: {e}", globals_ref);
+            return None;
+        }
+    };
+    match stream.decompressed_content() {
+        Ok(content) => Some(content),
+        Err(e) => {
+            log::warn!("[pdf] JBIG2Globals {:?} decode failed: {e}", globals_ref);
+            None
+        }
+    }
+}
+
+/// Decode a JBIG2-encoded image to 8-bit grayscale (0 = black, 255 = white).
+///
+/// `globals` is the optional `/JBIG2Globals` stream bytes (resolved by the
+/// caller). Backed by `hayro-jbig2` (pure Rust, T.88). JBIG2 is `black=1`,
+/// the opposite of PDF/Tesseract, so the `Decoder` impl writes `0x00` for
+/// black and leaves the default `0xFF` for white — matching the reference
+/// implementation in hayro's own `jbig2` filter.
+///
+/// Returns the decoded pixels along with the image's *actual* dimensions
+/// (`image.width()`/`image.height()`), NOT the caller-supplied dict W/H.
+/// JBIG2 region dimensions live inside the codestream and can disagree with
+/// the image dict (e.g. trailing padding rows); sizing the output buffer by
+/// the dict would panic. The returned dimensions keep `RgbImage::from_raw`
+/// consistent with the pixel count.
+fn decode_jbig2(
+    data: &[u8],
+    globals: Option<&[u8]>,
+    _dict_width: u32,
+    _dict_height: u32,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    let image = hayro_jbig2::Image::new_embedded(data, globals)
+        .map_err(|e| format!("JBIG2: {e:?}"))?;
+    let (width, height) = (image.width(), image.height());
+
+    // 8-bit grayscale output buffer, defaulting to white (0xFF). The Decoder
+    // impl only writes black pixels, so untouched areas (rare) read as white.
+    let mut out = vec![0xFFu8; (width as usize) * (height as usize)];
+
+    // Row-major writer, one byte per pixel. The pixel stream is contiguous
+    // (width == stride for 8-bit gray), so next_line is a no-op — matching
+    // the Luma8 path in hayro's own reference filter.
+    struct Gray8Writer<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl hayro_jbig2::Decoder for Gray8Writer<'_> {
+        fn push_pixel(&mut self, black: bool) {
+            if black && self.pos < self.buf.len() {
+                self.buf[self.pos] = 0x00;
+            }
+            self.pos += 1;
+        }
+        fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
+            let n = (chunk_count as usize) * 8;
+            if black {
+                let end = (self.pos + n).min(self.buf.len());
+                if self.pos < end {
+                    self.buf[self.pos..end].fill(0x00);
+                }
+            }
+            self.pos += n;
+        }
+        fn next_line(&mut self) {}
+    }
+
+    let mut writer = Gray8Writer { buf: &mut out, pos: 0 };
+    image
+        .decode(&mut writer)
+        .map_err(|e| format!("JBIG2 decode: {e:?}"))?;
+
+    Ok((out, width, height))
+}
+
 /// Decode a CCITT (fax) encoded image to 8-bit grayscale. Tries Group 4 then
 /// Group 3 based on /DecodeParms /K, falling back sensibly when absent.
 fn decode_ccitt(
@@ -889,6 +1055,39 @@ mod extract_tests {
             pages.len(),
             5,
             "all 5 pages should extract, got {}",
+            pages.len()
+        );
+        for (i, png) in pages.iter().enumerate() {
+            assert!(!png.is_empty(), "page {} PNG empty", i + 1);
+            assert_eq!(
+                &png[0..8],
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "page {} is not a PNG",
+                i + 1
+            );
+        }
+    }
+
+    /// Regression for JBIG2-compressed scanned PDFs: previously every JBIG2
+    /// page was dropped with "JBIG2 not supported". `tmp_2.pdf` is 135 pages
+    /// of which 126 are JBIG2 (1-bpc bilevel, with a shared /JBIG2Globals
+    /// stream) and 9 are JPEG — so a working extractor gets all 135. We
+    /// assert a high bar (>= 130) rather than exactly 135 to tolerate a
+    /// handful of edge-case decode failures from the young hayro-jbig2 crate.
+    /// Skipped when the sample dir isn't present (not bundled in CI).
+    #[test]
+    fn extracts_jbig2_pages() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/tmp_2.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/tmp_2.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read tmp_2.pdf");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        assert!(
+            pages.len() >= 130,
+            "expected >=130 of 135 pages, got {}",
             pages.len()
         );
         for (i, png) in pages.iter().enumerate() {
