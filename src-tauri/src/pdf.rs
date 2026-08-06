@@ -317,6 +317,18 @@ fn apply_filter(
             out
         }
         "RunLengthDecode" => decode_runlength(data)?,
+        "LZWDecode" => {
+            // PDF defaults to EarlyChange=1 (Adobe PDF Ref §7.4.4.1): the code
+            // width increases one code *earlier* than "original" LZW — i.e. the
+            // "switch one symbol sooner" behavior. In weezl that is
+            // `with_tiff_size_switch`; `Decoder::new` is EarlyChange=0 and
+            // corrupts silently once the table grows past 9-bit codes. Streams
+            // that explicitly declare `/EarlyChange 0` (DecodeParms) are not
+            // honored — vanishingly rare in practice. TODO if one ever shows up.
+            use weezl::{decode::Decoder, BitOrder};
+            let mut dec = Decoder::with_tiff_size_switch(BitOrder::Msb, 8);
+            dec.decode(data).map_err(|e| format!("LZWDecode: {e:?}"))?
+        }
         other => return Err(format!("filter {other} not implemented")),
     };
     // A PNG predictor (DecodeParms /Predictor >= 10) reverses per-row filtering
@@ -665,6 +677,99 @@ mod tests {
 mod extract_tests {
     use super::{extract_pages, ImageMode};
     use std::path::PathBuf;
+
+    #[test]
+    fn lzw_round_trips_through_apply_filter() {
+        // weezl's encoder is a dev-only use here (weezl is already a direct
+        // dep). Both sides use with_tiff_size_switch so the round trip
+        // exercises the PDF EarlyChange=1 code-width transition that's the
+        // whole point of the LZWDecode arm — a new()/new() pair would pass
+        // this test without actually validating the PDF path.
+        use weezl::{BitOrder, encode::Encoder};
+        use super::apply_filter;
+        use lopdf::Dictionary;
+
+        // Enough repetition to grow the code table past 9 bits (where an
+        // EarlyChange mismatch would corrupt the output).
+        let original = b"ABCDABCDABCDABCD".repeat(64);
+        let compressed = Encoder::with_tiff_size_switch(BitOrder::Msb, 8)
+            .encode(&original)
+            .expect("encode");
+        // No DecodeParms → empty dict, predictor block is skipped.
+        let out = apply_filter(&compressed, &Dictionary::new(), "LZWDecode", 0)
+            .expect("decode");
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn lzw_with_png_predictor_round_trips() {
+        // LZWDecode + /Predictor 15: the post-decode depngify step must run
+        // after LZW decompression. Build a 2-row RGB image, PNG-predict it,
+        // LZW-compress, then hand apply_filter a dict carrying DecodeParms.
+        use weezl::{BitOrder, encode::Encoder};
+        use super::{apply_filter, depngify};
+        use lopdf::{Dictionary, Object};
+
+        let columns = 4u32; // 4 pixels
+        let colors = 3u32; // RGB
+        let bpc = 8u32;
+        let row_bytes = (columns * colors) as usize;
+        // Two distinct rows so the Up/Sub filters do real work.
+        let row0: Vec<u8> = (0..row_bytes).map(|i| i as u8).collect();
+        let row1: Vec<u8> = (0..row_bytes).map(|i| (i as u8).wrapping_add(50)).collect();
+        let raw: Vec<u8> = [row0.as_slice(), row1.as_slice()].concat();
+
+        // PNG-filter the raw pixels the way a producer would (Paeth filter),
+        // matching depngify's inverse. We reuse depngify on a None-filtered
+        // image to avoid re-implementing the forward pass: forward None filter
+        // = prepend a 0 filter byte per row, which depngify inverts trivially.
+        // To actually exercise a non-trivial filter, encode row1 with Up(2).
+        let stride = row_bytes + 1;
+        let mut filtered = vec![0u8; 2 * stride];
+        // Row 0: None filter (0), raw bytes.
+        filtered[0] = 0;
+        filtered[1..1 + row_bytes].copy_from_slice(&raw[..row_bytes]);
+        // Row 1: Up filter (2), byte = raw - prev_row.
+        filtered[stride] = 2;
+        for i in 0..row_bytes {
+            filtered[stride + 1 + i] =
+                raw[row_bytes + i].wrapping_sub(raw[i]);
+        }
+
+        let compressed = Encoder::with_tiff_size_switch(BitOrder::Msb, 8)
+            .encode(&filtered)
+            .expect("encode");
+
+        // Sanity: depngify alone inverts the filtering correctly.
+        let direct = depngify(&filtered, colors, bpc, columns).expect("depngify");
+        assert_eq!(direct, raw);
+
+        // Build the image dict: /DecodeParms { /Predictor 15 /Colors 3
+        // /BitsPerComponent 8 /Columns 4 }. apply_filter reads it via
+        // read_predictor at filter_index 0.
+        let mut dp = Dictionary::new();
+        dp.set("Predictor", Object::Integer(15));
+        dp.set("Colors", Object::Integer(colors as i64));
+        dp.set("BitsPerComponent", Object::Integer(bpc as i64));
+        dp.set("Columns", Object::Integer(columns as i64));
+        let mut dict = Dictionary::new();
+        dict.set("DecodeParms", Object::Dictionary(dp));
+
+        let out = apply_filter(&compressed, &dict, "LZWDecode", 0).expect("decode");
+        assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn lzw_rejects_garbage() {
+        use super::apply_filter;
+        use lopdf::Dictionary;
+        let err = apply_filter(b"not lzw data at all", &Dictionary::new(), "LZWDecode", 0)
+            .unwrap_err();
+        assert!(
+            err.contains("LZWDecode"),
+            "expected an LZWDecode error, got: {err}"
+        );
+    }
 
     fn fixture() -> Option<PathBuf> {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny.pdf");

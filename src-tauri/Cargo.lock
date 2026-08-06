@@ -3313,6 +3313,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tesseract-rs",
  "tokio",
+ "weezl 0.2.1",
 ]
 
 [[package]]
