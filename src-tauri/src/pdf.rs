@@ -399,12 +399,26 @@ fn read_predictor(dict: &Dictionary, filter_index: usize) -> Option<(u32, u32, u
 
 /// Reverse PNG prediction on a decoded stream. Each row carries a 1-byte
 /// filter type (None/Sub/Up/Average/Paeth) followed by the filtered pixels.
+///
+/// PNG filters operate on bytes, not samples. The "bytes per pixel" used as
+/// the Sub/Average/Paeth left-neighbor distance is `ceil(colors * bpc / 8)`
+/// (PNG spec §7, "filter byte 0"); for the common 8-bpc case that's just
+/// `colors`. Each row is `ceil(columns * colors * bpc / 8)` bytes wide —
+/// sub-byte samples (bpc 1/2/4) pack left-to-right within each row and every
+/// row begins on a byte boundary, exactly matching what `expand_samples`
+/// expects downstream. Without this packing the decoded bytes drift relative
+/// to `expand_samples`' per-row walk and the image comes out skewed.
 fn depngify(data: &[u8], colors: u32, bpc: u32, columns: u32) -> Result<Vec<u8>, String> {
-    if bpc != 8 {
+    if !(1..=16).contains(&bpc) {
         return Err(format!("PNG predictor with BitsPerComponent {bpc} not supported"));
     }
-    let bpp = colors as usize;
-    let row_bytes = columns as usize * bpp;
+    let bits_per_pixel = colors.checked_mul(bpc).ok_or("colors*bpc overflow")? as usize;
+    // ceil — a 1-bpc grayscale pixel is 1 bit, bpp rounds up to 1 byte.
+    let bpp = bits_per_pixel.div_ceil(8);
+    let row_bytes = (columns as usize)
+        .checked_mul(bits_per_pixel)
+        .ok_or("columns*bits overflow")?
+        .div_ceil(8);
     let stride = row_bytes + 1; // 1 filter byte per row
     if data.len() % stride != 0 {
         return Err(format!(
@@ -771,6 +785,43 @@ mod extract_tests {
         );
     }
 
+    /// depngify must handle sub-byte sample depths (bpc 1/2/4): row width is
+    /// the byte-packed width and bpp is ceil(colors*bpc/8). This is the
+    /// `sample_png.pdf` (1-bpc grayscale + Predictor 15) failure, distilled
+    /// to a tiny self-contained case so it runs in CI without the fixture.
+    #[test]
+    fn depngify_handles_sub_byte_bpc() {
+        use super::depngify;
+        // 1-bpc grayscale, 16 pixels/row → 2 bytes/row packed.
+        // Two rows, Paeth(4) filter on row 1 to exercise the left/up/upleft
+        // path at sub-byte bpp (=1 here).
+        let columns = 16u32;
+        let colors = 1u32;
+        let bpc = 1u32;
+        let row_bytes = (columns as usize * colors as usize * bpc as usize).div_ceil(8); // 2
+        let row0 = [0b1010_1010, 0b1100_1100]; // raw row 0
+        let row1 = [0b0000_0000, 0b0000_0000]; // raw row 1 (all black, say)
+        let raw: Vec<u8> = [row0.as_slice(), row1.as_slice()].concat();
+
+        // PNG-predict: row 0 = None(0), row 1 = Up(2) so enc = raw - prev.
+        let stride = row_bytes + 1;
+        let mut filtered = vec![0u8; 2 * stride];
+        filtered[0] = 0;
+        filtered[1..1 + row_bytes].copy_from_slice(&raw[..row_bytes]);
+        filtered[stride] = 2; // Up
+        for i in 0..row_bytes {
+            filtered[stride + 1 + i] = raw[row_bytes + i].wrapping_sub(raw[i]);
+        }
+
+        let out = depngify(&filtered, colors, bpc, columns).expect("depngify 1bpc");
+        assert_eq!(out, raw);
+
+        // And the data-length check keys off the packed stride, not columns.
+        // A 1-byte-short buffer must be rejected, not silently misdecode.
+        let short = &filtered[..filtered.len() - 1];
+        assert!(depngify(short, colors, bpc, columns).is_err());
+    }
+
     fn fixture() -> Option<PathBuf> {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny.pdf");
         if p.exists() { Some(p) } else { None }
@@ -808,6 +859,38 @@ mod extract_tests {
         let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
         // tmp.pdf has 5 pages, every one a FlateDecode→DCTDecode image.
         assert_eq!(pages.len(), 5, "all 5 pages should extract, got {}", pages.len());
+        for (i, png) in pages.iter().enumerate() {
+            assert!(!png.is_empty(), "page {} PNG empty", i + 1);
+            assert_eq!(
+                &png[0..8],
+                &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "page {} is not a PNG",
+                i + 1
+            );
+        }
+    }
+
+    /// Regression for 1-bpc grayscale images with a PNG predictor (`/Filter
+    /// /FlateDecode /DecodeParms { /Predictor 15 /BitsPerComponent 1 ... }`):
+    /// depngify used to hard-reject bpc != 8, dropping every page. Reproduced
+    /// by `sample_pdf/sample_png.pdf` (5 pages, 3904×4976 @ 1bpc). Skipped
+    /// when the sample dir isn't present (not bundled in CI).
+    #[test]
+    fn extracts_1bpc_png_predictor_pages() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/sample_png.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/sample_png.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read sample_png.pdf");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        assert_eq!(
+            pages.len(),
+            5,
+            "all 5 pages should extract, got {}",
+            pages.len()
+        );
         for (i, png) in pages.iter().enumerate() {
             assert!(!png.is_empty(), "page {} PNG empty", i + 1);
             assert_eq!(
