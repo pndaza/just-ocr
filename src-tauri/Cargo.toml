@@ -126,3 +126,11 @@ strip = true
 # Upstream PR: TODO (track once filed against cafercangundogdu/tesseract-rs).
 [patch.crates-io]
 tesseract-rs = { git = "https://github.com/pndaza/tesseract-rs.git", tag = "v0.3.0-macos-fix" }
+# Redirect hayro's transitive hayro-jbig2/hayro-ccitt (pulled by hayro-syntax
+# for the render path's JBIG2 filter) to our vendored, patched copies in
+# vendor/. Without this, the PDF render path (hayro::render) uses the
+# crates.io versions with the hardcoded MAX_INSTANCES = 10_000 limit, which
+# silently fails on dense text pages and renders them blank. Patches must
+# match the versions hayro-syntax requires (both 0.3.x here).
+hayro-jbig2 = { path = "vendor/hayro-jbig2" }
+hayro-ccitt = { path = "vendor/hayro-ccitt" }
