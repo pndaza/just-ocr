@@ -22,11 +22,16 @@ export type ImageMode = "color" | "gray";
 export type Engine = "tesseract" | "kraken";
 
 /** Segmentation stage for the Myanmar path (line-box detection). Ignored for
- * other languages. PP-OCR (tiny detector + quad postprocess) is the default;
- * PP-OCR (poly) opts into the wider small detector + multi-point polygon
- * postprocess + curvature-gated dewarp, which helps dense/curved Burmese;
- * Kraken is the baseline-aware alternative. */
+ * other languages. PP-OCR (quad postprocess) is the default;
+ * PP-OCR (poly) opts into multi-point polygon postprocess + curvature-gated
+ * dewarp, which helps dense/curved Burmese; Kraken is the baseline-aware
+ * alternative. */
 export type Segmenter = "kraken" | "ppocr" | "ppocr-poly";
+
+/** PP-OCR detector variant (Myanmar path only). "small" (default) is
+ * accuracy-oriented; "tiny" is faster/smaller but less accurate on dense text.
+ * Ignored when `segmenter` is "kraken". */
+export type DetVariant = "small" | "tiny";
 
 export interface OcrOpts {
   engine: Engine;
@@ -35,9 +40,12 @@ export interface OcrOpts {
    * (full-page Tesseract); ignored for Myanmar, where Kraken segments. */
   psm: number;
   /** Myanmar path only. Which line-box detector runs before recognition:
-   * "ppocr" (PP-OCRv6 tiny + quad, default), "ppocr-poly" (PP-OCRv6 small +
-   * polygon), or "kraken". */
+   * "ppocr" (PP-OCRv6 + quad, default), "ppocr-poly" (PP-OCRv6 + polygon),
+   * or "kraken". */
   segmenter: Segmenter;
+  /** Myanmar path only. PP-OCR detector backbone width: "small" (default,
+   * accuracy-oriented) or "tiny" (faster). Ignored when segmenter is "kraken". */
+  detVariant: DetVariant;
   /** Whether to apply the Burmese post-OCR spelling fix (curated wrong→right
    * word list, backend-side). Myanmar-only in effect — the list is Burmese.
    * Unlike `mergeParagraphs`, this changes what the OCR engine returns, so it
@@ -412,6 +420,7 @@ export async function deleteLanguage(code: string): Promise<void> {
 const LAST_LANG_KEY = "just-ocr:language";
 const LAST_ENGINE_KEY = "just-ocr:engine";
 const LAST_SEGMENTER_KEY = "just-ocr:segmenter";
+const LAST_DET_VARIANT_KEY = "just-ocr:det-variant";
 const MERGE_PARAGRAPHS_KEY = "just-ocr:merge-paragraphs";
 
 /** Read the last-used OCR language from localStorage, or null if unset. */
@@ -471,6 +480,30 @@ export function lastSegmenter(): Segmenter {
 export function saveSegmenter(segmenter: Segmenter): void {
   try {
     localStorage.setItem(LAST_SEGMENTER_KEY, segmenter);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the last-used PP-OCR detector variant from localStorage; defaults to
+ * "small" (the accuracy-oriented backbone). Validates the stored value —
+ * anything stale or missing falls back to "small". Only affects the Myanmar
+ * path, and is ignored when the segmenter is Kraken. */
+export function lastDetVariant(): DetVariant {
+  const KNOWN: DetVariant[] = ["small", "tiny"];
+  try {
+    const v = localStorage.getItem(LAST_DET_VARIANT_KEY);
+    return (v && KNOWN.includes(v as DetVariant) ? v : "small") as DetVariant;
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return "small";
+  }
+}
+
+/** Persist the chosen detector variant so it is pre-selected on next launch. */
+export function saveDetVariant(variant: DetVariant): void {
+  try {
+    localStorage.setItem(LAST_DET_VARIANT_KEY, variant);
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

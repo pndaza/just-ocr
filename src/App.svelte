@@ -24,6 +24,8 @@
     saveEngine,
     lastSegmenter,
     saveSegmenter,
+    lastDetVariant,
+    saveDetVariant,
     lastMergeParagraphs,
     saveMergeParagraphs,
     lastFixBurmeseSpelling,
@@ -72,6 +74,7 @@
     language: lastLanguage() ?? "mya",
     psm: 3,
     segmenter: lastSegmenter(),
+    detVariant: lastDetVariant(),
     fixBurmeseSpelling: lastFixBurmeseSpelling(),
   });
 
@@ -94,6 +97,12 @@
   // dropdown value is sticky across launches.
   $effect(() => {
     saveSegmenter(opts.segmenter);
+  });
+  // PP-OCR detector variant (small/tiny) is persisted so the chosen Det
+  // value is sticky across launches. Only affects the PP-OCR segmenters;
+  // ignored when segmenter is Kraken.
+  $effect(() => {
+    saveDetVariant(opts.detVariant);
   });
   $effect(() => {
     saveMergeParagraphs(mergeParagraphs);

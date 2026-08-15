@@ -68,13 +68,20 @@ static BUNDLED_SEG: &[u8] = include_bytes!("../../kraken-models/bur_segment.safe
 static BUNDLED_REC: &[u8] = include_bytes!("../../kraken-models/bur_recog.safetensors");
 
 /// Bundled PP-OCRv6 **small** detector (~9.9MB, 2.4M params). Wider channels
-/// than the old tiny (PPLCNetV4-Large stem [48,96,192,384] vs [32,48,64,160],
-/// neck 96 vs 64) → a much more accurate score map on dense/curved text.
-/// Measured: tiny over-detects 44 vs small's correct 27 on heavy_curve_02
-/// (ground truth 27), so small is now the sole bundled detector feeding BOTH
-/// the quad and poly segmenters. Same `include_bytes!` pattern as the Kraken
-/// models; path relative to `src-tauri/src/` (this file's dir).
-static BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/small-det.safetensors");
+/// than tiny (PPLCNetV4-Large stem [48,96,192,384] vs [32,48,64,160], neck 96
+/// vs 64) → a more accurate score map on dense/curved text. Measured: tiny
+/// over-detects 44 vs small's correct 27 on heavy_curve_02 (ground truth 27),
+/// so small is the recommended default for accuracy-sensitive use. Same
+/// `include_bytes!` pattern as the Kraken models; path relative to
+/// `src-tauri/src/` (this file's dir).
+static BUNDLED_PPOCR_DET_SMALL: &[u8] = include_bytes!("../../ppocr-models/small-det.safetensors");
+
+/// Bundled PP-OCRv6 **tiny** detector (~1.8MB, 0.4M params). Narrower channels
+/// ([32,48,64,160] stem, neck 64) → faster but noticeably less accurate on
+/// dense/curved Burmese. Offered as a user-selectable variant for the
+/// Myanmar/PP-OCR path (faster on low-end machines, or where small's accuracy
+/// gain isn't needed). Loads via `DetectorConfig::tiny()`.
+static BUNDLED_PPOCR_DET_TINY: &[u8] = include_bytes!("../../ppocr-models/tiny-det.safetensors");
 
 /// Process-wide lazily-loaded kraken engine, wrapped in `Arc` so it can be
 /// shared with `KrakenSegmenter` (which holds `Arc<Engine>` to satisfy the
@@ -84,10 +91,73 @@ static BUNDLED_PPOCR_DET: &[u8] = include_bytes!("../../ppocr-models/small-det.s
 /// across the blocking-thread calls Tauri spawns per OCR request.
 static KRAKEN: OnceCell<std::sync::Arc<kraken_engine::Engine>> = OnceCell::new();
 
-/// Process-wide lazily-loaded PP-OCR detector, same Arc-wrapped shape. Loads
-/// the bundled small-det; both segmenters share this single instance via the
-/// `Arc<Detector>` they hold as `'static` trait objects.
-static PPOCR: OnceCell<std::sync::Arc<ppocr_engine::Detector>> = OnceCell::new();
+/// PP-OCR detector variant selectable by the user from Settings. `Small` is
+/// the accuracy-oriented default (wider backbone); `Tiny` is the fast/compact
+/// alternative. The variant only matters for the PP-OCR segmenters; Kraken
+/// ignores it. Both weights are bundled (see `BUNDLED_PPOCR_DET_*`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetVariant {
+    Small,
+    Tiny,
+}
+
+impl DetVariant {
+    /// Parse the frontend-supplied option string. `None`/unrecognized →
+    /// `Small` (the default) with a warning, so a stale/old frontend still
+    /// gets the recommended variant rather than failing.
+    fn from_opt_str(s: &Option<String>) -> Self {
+        match s.as_deref() {
+            Some("tiny") => DetVariant::Tiny,
+            Some("small") => DetVariant::Small,
+            Some(other) => {
+                log::warn!("[ocr] unknown detVariant {other:?}, falling back to small");
+                DetVariant::Small
+            }
+            None => DetVariant::Small,
+        }
+    }
+
+    /// Bundled weights bytes for this variant.
+    const fn bundled(&self) -> &'static [u8] {
+        match self {
+            DetVariant::Small => BUNDLED_PPOCR_DET_SMALL,
+            DetVariant::Tiny => BUNDLED_PPOCR_DET_TINY,
+        }
+    }
+
+    /// Matching `DetectorConfig` (channel widths) for this variant's weights.
+    const fn config(&self) -> ppocr_engine::DetectorConfig {
+        match self {
+            DetVariant::Small => ppocr_engine::DetectorConfig::small(),
+            DetVariant::Tiny => ppocr_engine::DetectorConfig::tiny(),
+        }
+    }
+
+    /// Override filename in the app-data `ppocr-models/` dir.
+    const fn override_filename(&self) -> &'static str {
+        match self {
+            DetVariant::Small => "small-det.safetensors",
+            DetVariant::Tiny => "tiny-det.safetensors",
+        }
+    }
+
+    const fn as_str(&self) -> &'static str {
+        match self {
+            DetVariant::Small => "small",
+            DetVariant::Tiny => "tiny",
+        }
+    }
+}
+
+/// Process-wide lazily-loaded PP-OCR detectors, one per variant. A single
+/// `OnceCell` is write-once, so to let the user switch variants at runtime
+/// without an app restart we keep one cell per variant — each lazy-loaded on
+/// first use, both able to coexist. The active variant is chosen per OCR call
+/// from `opts.det_variant`; the other only loads if/when selected. Both the
+/// quad and poly segmenters borrow whichever `Arc<Detector>` matches the
+/// selected variant.
+static PPOCR_SMALL: OnceCell<std::sync::Arc<ppocr_engine::Detector>> = OnceCell::new();
+static PPOCR_TINY: OnceCell<std::sync::Arc<ppocr_engine::Detector>> = OnceCell::new();
 
 /// Borrow the shared kraken engine, loading it on first call.
 ///
@@ -134,60 +204,76 @@ fn resolve_override_models(app: &tauri::AppHandle) -> Option<(PathBuf, PathBuf)>
     }
 }
 
-/// Load the PP-OCR **small** detector (bundled or override), built with
-/// [`DetectorConfig::small`] so the wider PPLCNetV4-Large backbone is
-/// constructed. Returns `Arc<Detector>`, shared by both the quad and poly
-/// segmenters via a single `PPOCR` `OnceCell`.
+/// Load the requested PP-OCR detector variant (bundled or override), built
+/// with the matching [`DetectorConfig`] (`small()`/`tiny()`) so the backbone
+/// widths match the weights. Returns `Arc<Detector>`, shared by both the quad
+/// and poly segmenters via the variant's dedicated `OnceCell`.
 ///
-/// The override file is `small-det.safetensors` in the platform app-data dir's
-/// `ppocr-models/` subdir (one-file override — unlike Kraken's two-file rule).
-fn load_ppocr(app: &tauri::AppHandle) -> Result<std::sync::Arc<ppocr_engine::Detector>, String> {
+/// Override resolution is per-variant: the override file is
+/// `small-det.safetensors` / `tiny-det.safetensors` in the platform app-data
+/// dir's `ppocr-models/` subdir (one-file override — unlike Kraken's
+/// two-file rule). A user can drop in either or both.
+fn load_ppocr(
+    app: &tauri::AppHandle,
+    variant: DetVariant,
+) -> Result<std::sync::Arc<ppocr_engine::Detector>, String> {
     let t = Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let det = match resolve_override_ppocr(app) {
+    let det = match resolve_override_ppocr(app, variant) {
         Some(path) => {
-            log::info!("[ppocr] using override model from {}", path.display());
+            log::info!(
+                "[ppocr] using {} override model from {}",
+                variant.as_str(),
+                path.display()
+            );
             let bytes = std::fs::read(&path)
                 .map_err(|e| format!("PP-OCR override read failed: {e}"))?;
             ppocr_engine::Detector::load_from_buffer_with_config(
                 &bytes,
                 threads,
-                ppocr_engine::DetectorConfig::small(),
+                variant.config(),
             )
             .map_err(|e| format!("PP-OCR override load failed: {e}"))?
         }
         None => ppocr_engine::Detector::load_from_buffer_with_config(
-            BUNDLED_PPOCR_DET,
+            variant.bundled(),
             threads,
-            ppocr_engine::DetectorConfig::small(),
+            variant.config(),
         )
         .map_err(|e| format!("PP-OCR bundled load failed: {e}"))?,
     };
-    log::info!("[ppocr] small det loaded in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
+    log::info!(
+        "[ppocr] {} det loaded in {:.0} ms",
+        variant.as_str(),
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     Ok(std::sync::Arc::new(det))
 }
 
-/// User-supplied PP-OCR override: a single `small-det.safetensors` in the
-/// platform app-data dir's `ppocr-models/` subdir. Returns `Some(path)` only
-/// if the file exists. (Unlike kraken's two-file rule, PP-OCR is one file.)
-fn resolve_override_ppocr(app: &tauri::AppHandle) -> Option<PathBuf> {
+/// User-supplied PP-OCR override for a specific variant: a single
+/// `small-det.safetensors` / `tiny-det.safetensors` in the platform app-data
+/// dir's `ppocr-models/` subdir. Returns `Some(path)` only if the file
+/// exists. (Unlike kraken's two-file rule, PP-OCR is one file per variant.)
+fn resolve_override_ppocr(app: &tauri::AppHandle, variant: DetVariant) -> Option<PathBuf> {
     let dir = app.path().app_local_data_dir().ok()?.join("ppocr-models");
-    let det = dir.join("small-det.safetensors");
+    let det = dir.join(variant.override_filename());
     if det.exists() { Some(det) } else { None }
 }
 
 /// Resolve the segmenter for this OCR call. Choices:
-///   - `"kraken"` → `KrakenSegmenter` (lazy-loads Kraken)
-///   - `"ppocr-poly"` → `PPOcrPolySegmenter` backed by the **small** PP-OCR
-///     detector + multi-point polygon postprocess (contour → simplify → unclip)
-///   - `"ppocr"` or `None` → `PPOcrSegmenter` backed by the **tiny** PP-OCR
-///     detector + rigid 4-corner quad postprocess
+///   - `"kraken"` → `KrakenSegmenter` (lazy-loads Kraken; ignores `det_variant`)
+///   - `"ppocr-poly"` → `PPOcrPolySegmenter` backed by the PP-OCR detector
+///     selected via `opts.det_variant` + multi-point polygon postprocess
+///     (contour → simplify → unclip)
+///   - `"ppocr"` or `None` → `PPOcrSegmenter` backed by the PP-OCR detector
+///     selected via `opts.det_variant` + rigid 4-corner quad postprocess
 ///
-/// PP-OCR (small, quad) is the default — fast and generalizes well. PP-OCR
-/// (small, poly) is the opt-in for dense/curved Burmese where the polygon mask
-/// + curvature-gated dewarp help. Both share the SAME small-detector instance
-/// (`PPOCR`); only the postprocess differs (rigid quad vs multi-point polygon).
-/// Unknown strings warn and fall back to the PP-OCR default.
+/// PP-OCR (quad) is the default segmenter; PP-OCR (poly) is the opt-in for
+/// dense/curved Burmese where the polygon mask + curvature-gated dewarp help.
+/// Both PP-OCR paths honor `det_variant` (`small` default / `tiny`) — each
+/// variant has its own `OnceCell`, so switching variants at runtime lazily
+/// loads the other without unloading the first. Unknown segmenter strings
+/// warn and fall back to the PP-OCR quad default.
 ///
 /// Returns `Arc<dyn Segmenter>` so `run_myanmar` holds a uniform type.
 fn resolve_segmenter(
@@ -201,21 +287,37 @@ fn resolve_segmenter(
             Ok(std::sync::Arc::new(KrakenSegmenter::new(eng)))
         }
         Some("ppocr-poly") => {
-            // Same small detector as the quad path; multi-point polygon
-            // postprocess + curvature-gated dewarp (see recognize_line_poly).
-            let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
+            // Multi-point polygon postprocess + curvature-gated dewarp
+            // (see recognize_line_poly). Detector variant is user-selectable.
+            let det = ppocr_detector(app, opts)?;
             Ok(std::sync::Arc::new(PPOcrPolySegmenter::new(det)))
         }
         Some("ppocr") | None => {
-            let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
+            let det = ppocr_detector(app, opts)?;
             Ok(std::sync::Arc::new(PPOcrSegmenter::new(det)))
         }
         Some(other) => {
             log::warn!("[ocr] unknown segmenter {other:?}, falling back to ppocr");
-            let det = PPOCR.get_or_try_init(|| load_ppocr(app))?.clone();
+            let det = ppocr_detector(app, opts)?;
             Ok(std::sync::Arc::new(PPOcrSegmenter::new(det)))
         }
     }
+}
+
+/// Borrow the PP-OCR detector for the variant selected in `opts.det_variant`,
+/// lazy-loading (bundled or override) on first use of that variant. Each
+/// variant lives in its own `OnceCell` so both can coexist and the active one
+/// is chosen per call without rebuilding. Returns a fresh `Arc` clone (cheap).
+fn ppocr_detector(
+    app: &tauri::AppHandle,
+    opts: &OcrOpts,
+) -> Result<std::sync::Arc<ppocr_engine::Detector>, String> {
+    let variant = DetVariant::from_opt_str(&opts.det_variant);
+    let cell = match variant {
+        DetVariant::Small => &PPOCR_SMALL,
+        DetVariant::Tiny => &PPOCR_TINY,
+    };
+    Ok(cell.get_or_try_init(|| load_ppocr(app, variant))?.clone())
 }
 
 /// Entry point invoked by the `ocr_from_bytes` Tauri command.
@@ -593,24 +695,38 @@ mod tests {
         );
     }
 
-    /// Confirm the bundled PP-OCR small-det bytes are non-empty and load into
-    /// a `Detector` with the small config. Mirrors `bundled_models_load_from_buffers`
-    /// for kraken. Uses `load_from_buffer_with_config` + `small()` because the
-    /// bundled bytes are now small-det (the default `load_from_buffer` builds
-    /// the tiny architecture, which won't match small weights).
+    /// Confirm the bundled PP-OCR detector bytes are non-empty and load into a
+    /// `Detector` with the matching config, for BOTH variants. Uses
+    /// `load_from_buffer_with_config` + the variant's config because the
+    /// default `load_from_buffer` hard-codes the tiny architecture, which won't
+    /// match the small weights. Mirrors `bundled_models_load_from_buffers` for
+    /// kraken.
     #[test]
     fn bundled_ppocr_det_loads_from_buffer() {
         assert!(
-            super::BUNDLED_PPOCR_DET.len() > 1_000_000,
-            "ppocr det too small: {}",
-            super::BUNDLED_PPOCR_DET.len()
+            super::BUNDLED_PPOCR_DET_SMALL.len() > 1_000_000,
+            "ppocr small-det too small: {}",
+            super::BUNDLED_PPOCR_DET_SMALL.len()
         );
         let det = ppocr_engine::Detector::load_from_buffer_with_config(
-            super::BUNDLED_PPOCR_DET,
+            super::BUNDLED_PPOCR_DET_SMALL,
             1,
             ppocr_engine::DetectorConfig::small(),
         )
         .expect("bundled ppocr small-det loads with small config");
+        let _ = det;
+
+        assert!(
+            super::BUNDLED_PPOCR_DET_TINY.len() > 1_000_000,
+            "ppocr tiny-det too small: {}",
+            super::BUNDLED_PPOCR_DET_TINY.len()
+        );
+        let det = ppocr_engine::Detector::load_from_buffer_with_config(
+            super::BUNDLED_PPOCR_DET_TINY,
+            1,
+            ppocr_engine::DetectorConfig::tiny(),
+        )
+        .expect("bundled ppocr tiny-det loads with tiny config");
         let _ = det;
     }
 

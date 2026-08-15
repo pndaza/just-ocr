@@ -48,6 +48,12 @@ pub struct OcrOpts {
     /// `None`/unrecognized → PP-OCR. Ignored for non-Myanmar (full-page Tesseract).
     #[serde(default)]
     pub segmenter: Option<String>,
+    /// PP-OCR detector variant for the Myanmar path: `"small"` (default,
+    /// accuracy-oriented) or `"tiny"` (faster, smaller, less accurate on dense
+    /// text). `None`/unrecognized → small. Ignored when `segmenter` is `"kraken"`
+    /// and for non-Myanmar. Each variant lazy-loads its own bundled weights.
+    #[serde(default)]
+    pub det_variant: Option<String>,
     /// Whether the user wants Burmese spelling-fix applied. NOTE: the backend
     /// no longer applies this at OCR time — `ocr_from_bytes` always returns
     /// raw text, and the frontend drives the fix as a display-time projection

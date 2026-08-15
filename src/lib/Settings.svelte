@@ -118,6 +118,36 @@
         </div>
       </section>
 
+      {#if opts.language === "mya" && opts.segmenter !== "kraken"}
+        <!-- Myanmar + PP-OCR only: the PP-OCR line-box detector backbone width.
+             Small = accuracy-oriented (default); Tiny = faster/smaller but less
+             accurate on dense/curved Burmese. Hidden for Kraken (own segmenter
+             model) and for non-Myanmar (full-page Tesseract, no PP-OCR). -->
+        <section class="sec">
+          <span class="lbl">PP-OCR detection</span>
+          <div class="seg" role="radiogroup" aria-label="PP-OCR detection model">
+            <button
+              class="seg-btn"
+              class:active={opts.detVariant === "small"}
+              onclick={() => (opts.detVariant = "small")}
+              role="radio"
+              aria-checked={opts.detVariant === "small"}
+            >Small</button>
+            <button
+              class="seg-btn"
+              class:active={opts.detVariant === "tiny"}
+              onclick={() => (opts.detVariant = "tiny")}
+              role="radio"
+              aria-checked={opts.detVariant === "tiny"}
+            >Tiny</button>
+          </div>
+          <p class="hint">
+            Small is more accurate on dense or curved Burmese. Tiny is faster
+            and lighter, at the cost of detection precision.
+          </p>
+        </section>
+      {/if}
+
       <section class="sec">
         <span class="lbl">Updates {appVersion ? `· v${appVersion}` : ""}</span>
 
@@ -216,6 +246,12 @@
     letter-spacing: 0.06em;
     color: var(--text-faint);
     margin-bottom: 8px;
+  }
+  .hint {
+    margin: 6px 0 0;
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.4;
   }
   .seg {
     display: flex;
