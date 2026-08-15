@@ -10,6 +10,11 @@
     doneCount: number;
     /** Merge-paragraphs view toggle (display + export projection). */
     mergeParagraphs: boolean;
+    /** Burmese post-OCR spelling-fix toggle. Myanmar-only in effect; shown
+     *  only when Myanmar is selected so the toolbar doesn't carry a no-op
+     *  toggle for other languages. Changes what the engine returns (not just
+     *  the display projection). */
+    fixBurmeseSpelling: boolean;
     /** Current/total counter shown beside "Processing" during a batch run.
      *  Null for single runs (Run Current) so no counter appears. */
     batchProgress: { current: number; total: number } | null;
@@ -26,6 +31,7 @@
     /** When non-null, a newer version exists — shows a badge on the gear. */
     updateAvailable: string | null;
     onchangemerge: (v: boolean) => void;
+    onchangefix: (v: boolean) => void;
   }
   let {
     opts,
@@ -34,6 +40,7 @@
     pending,
     doneCount,
     mergeParagraphs,
+    fixBurmeseSpelling,
     batchProgress,
     canRunCurrent,
     hasSelection,
@@ -47,6 +54,7 @@
     onsettings,
     updateAvailable,
     onchangemerge,
+    onchangefix,
   }: Props = $props();
 
   const psmOptions = [
@@ -145,6 +153,20 @@
     />
     Merge lines
   </label>
+
+  {#if isMyanmar}
+    <!-- Burmese post-OCR spelling fix (curated wrong→right word list, applied
+         in the backend before the result reaches the UI). Myanmar-only: the
+         dict is Burmese, so hiding it for other languages avoids a no-op toggle. -->
+    <label class="check" title="Correct common Burmese recognizer errors (word list)">
+      <input
+        type="checkbox"
+        checked={fixBurmeseSpelling}
+        onchange={(e) => onchangefix(e.currentTarget.checked)}
+      />
+      Fix spelling
+    </label>
+  {/if}
 
   <div class="spacer"></div>
 

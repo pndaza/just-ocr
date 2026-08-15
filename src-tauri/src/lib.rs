@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime;
@@ -10,6 +11,7 @@ mod languages;
 mod pdf;
 mod segmentation;
 mod segmenter_adapters;
+mod spelling;
 mod tesseract_line;
 mod tesseract_page;
 
@@ -46,6 +48,14 @@ pub struct OcrOpts {
     /// `None`/unrecognized → PP-OCR. Ignored for non-Myanmar (full-page Tesseract).
     #[serde(default)]
     pub segmenter: Option<String>,
+    /// Whether the user wants Burmese spelling-fix applied. NOTE: the backend
+    /// no longer applies this at OCR time — `ocr_from_bytes` always returns
+    /// raw text, and the frontend drives the fix as a display-time projection
+    /// via the separate `fix_burmese_spelling` command. Kept on `OcrOpts` so
+    /// the toggle state round-trips for forward-compat and potential future
+    /// "fix-at-OCR" modes; ignored by `run_ocr`.
+    #[serde(default)]
+    pub fix_burmese_spelling: bool,
 }
 
 /// Return the list of languages available for OCR: embedded + user-installed.
@@ -145,6 +155,52 @@ fn run_ocr(
     opts: OcrOpts,
 ) -> Result<OcrResult, String> {
     engine::run_ocr(app, image_bytes, &opts)
+}
+
+/// One line's spell-fix result: the corrected text plus how many
+/// substitutions the two stages applied to that line. The frontend totals
+/// `fixes` across the returned vec to populate the per-result fix count.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixResult {
+    pub text: String,
+    pub fixes: u32,
+}
+
+/// Apply Burmese spelling normalization + dictionary correction to a list of
+/// raw recognized line texts. This is a **display-time projection**, not part
+/// of OCR: the backend always returns raw text from `ocr_from_bytes`, and the
+/// frontend calls this lazily when the "Fix spelling" toggle is on, caching
+/// the result per job so toggling back is instant. Keeping the fix logic in
+/// Rust (rather than porting to JS) because the rule set includes 9
+/// lookbehind/lookahead regexes that older macOS WKWebView doesn't support.
+///
+/// Runs on a blocking thread; the regex+dict passes are cheap but not free,
+/// and big multi-page batches shouldn't tie up the async runtime.
+#[tauri::command]
+async fn fix_burmese_spelling(lines: Vec<String>) -> Result<Vec<FixResult>, String> {
+    async_runtime::spawn_blocking(move || {
+        let t = Instant::now();
+        let n = lines.len();
+        let out: Vec<FixResult> = lines
+            .into_iter()
+            .map(|text| {
+                let (fixed, fixes) = spelling::fix(&text);
+                FixResult { text: fixed, fixes }
+            })
+            .collect();
+        let total: u32 = out.iter().map(|r| r.fixes).sum();
+        log::info!(
+            "[spelling] fix command: {:.0} ms ({} substitution{} across {} lines)",
+            t.elapsed().as_secs_f64() * 1000.0,
+            total,
+            if total == 1 { "" } else { "s" },
+            n
+        );
+        out
+    })
+    .await
+    .map_err(|e| format!("Spell-fix task failed: {e}"))
 }
 
 /// How to turn a PDF page into an image. "extract" pulls the embedded raster
@@ -327,6 +383,7 @@ pub fn run() {
             default_save_dir,
             ocr_from_bytes,
             render_pdf,
+            fix_burmese_spelling,
             languages::list_languages,
             languages::downloadable_languages,
             languages::download_language,

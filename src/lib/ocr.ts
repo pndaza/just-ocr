@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { plainText, type OcrResult } from "./result";
+import { plainText, plainTextWithFix, type OcrResult } from "./result";
 
 export type { OcrResult, LineBox } from "./result";
 
@@ -38,6 +38,11 @@ export interface OcrOpts {
    * "ppocr" (PP-OCRv6 tiny + quad, default), "ppocr-poly" (PP-OCRv6 small +
    * polygon), or "kraken". */
   segmenter: Segmenter;
+  /** Whether to apply the Burmese post-OCR spelling fix (curated wrong→right
+   * word list, backend-side). Myanmar-only in effect — the list is Burmese.
+   * Unlike `mergeParagraphs`, this changes what the OCR engine returns, so it
+   * crosses the IPC boundary inside `opts`. */
+  fixBurmeseSpelling: boolean;
 }
 
 /** A single file in the batch queue. */
@@ -57,6 +62,12 @@ export interface Job {
   result: OcrResult | null;
   confidence: number;
   elapsedMs: number;
+  /** Lazily-computed spell-fix projection of `result`, cached so toggling the
+   *  "Fix spelling" switch back on is instant. Null until first computed;
+   *  `fixedLines` parallels `result.lines`, `fixes` is the total substitution
+   *  count across all lines. Owned by the job so it survives selection /
+   *  toggle changes. */
+  spellFix: { fixedLines: string[]; fixes: number } | null;
   error: string | null;
 }
 
@@ -72,6 +83,7 @@ export function makeJob(file: File): Promise<Job> {
     result: null,
     confidence: -1,
     elapsedMs: 0,
+    spellFix: null,
     error: null,
   }));
 }
@@ -94,6 +106,7 @@ export function makeJobsFromReadFiles(
         result: null,
         confidence: -1,
         elapsedMs: 0,
+        spellFix: null,
         error: null,
       };
     }
@@ -110,6 +123,7 @@ export function makeJobsFromReadFiles(
       result: null,
       confidence: -1,
       elapsedMs: 0,
+      spellFix: null,
       error: null,
     };
   });
@@ -222,24 +236,73 @@ export async function ocrFromBytes(
   });
 }
 
+/** One line's spell-fix result from the backend. */
+export interface FixResult {
+  text: string;
+  fixes: number;
+}
+
+/**
+ * Apply Burmese spelling normalization + dictionary correction to a list of
+ * raw recognized line texts. This is a **display-time projection**: the OCR
+ * result always holds raw text; the frontend calls this lazily when the
+ * "Fix spelling" toggle is on and caches the result per job. Each returned
+ * `{ text, fixes }` parallels the input line, with `fixes` counting the
+ * substitutions applied to that line.
+ */
+export async function fixBurmeseSpelling(
+  lines: string[],
+): Promise<FixResult[]> {
+  return invoke<FixResult[]>("fix_burmese_spelling", { lines });
+}
+
 /**
  * Write all completed jobs to a single .txt file via a native save dialog.
  *
  * Each completed job becomes a block:
  *
  *     === filename  (90% conf, 120 ms) ===
- *     <recognized text, with merge-paragraphs projection applied>
+ *     <recognized text, with merge-paragraphs + spell-fix projection applied>
  *
  * Blocks are separated by a blank line. `mergeParagraphs` (default false)
- * is the same projection used by the Output panel, so the exported file
- * matches what the user sees on screen.
+ * and `fixSpelling` (default false) are the same projections used by the
+ * Output panel, so the exported file matches what the user sees on screen.
  */
 export async function exportResults(
   jobs: Job[],
-  opts?: { mergeParagraphs?: boolean },
+  opts?: {
+    mergeParagraphs?: boolean;
+    fixSpelling?: boolean;
+  },
 ): Promise<void> {
   const done = jobs.filter((j) => j.status === "done" && j.result);
   if (!done.length) return;
+
+  // If spell-fix is on, ensure every done job has its cached projection
+  // BEFORE building text. The cache is normally populated lazily by App's
+  // toggle-watching effect, but that's fire-and-forget — a user who flips the
+  // toggle on and immediately hits Export could race the in-flight compute and
+  // silently get RAW text in the file despite the toggle being on. Awaiting
+  // here guarantees the exported content matches what's on screen. Jobs with a
+  // populated cache skip the IPC call; the await is a no-op for them.
+  if (opts?.fixSpelling) {
+    await Promise.all(
+      done.map(async (j) => {
+        if (j.spellFix) return;
+        if (!j.result || j.result.lines.length === 0) return;
+        try {
+          const fixed = await fixBurmeseSpelling(j.result.lines.map((l) => l.text));
+          j.spellFix = {
+            fixedLines: fixed.map((r) => r.text),
+            fixes: fixed.reduce((sum, r) => sum + r.fixes, 0),
+          };
+        } catch {
+          // Backend call failed — leave spellFix null; the body builder below
+          // falls back to raw text for this job. Non-fatal.
+        }
+      }),
+    );
+  }
 
   // Resolve a concrete default directory from the backend (~/Documents, with
   // a home-dir fallback) and join it with the default filename. A bare
@@ -268,8 +331,14 @@ export async function exportResults(
 
   const textOpts = opts?.mergeParagraphs ? { mergeParagraphs: true } : undefined;
   const blocks = done.map((j) => {
+    // When spell-fix is on and the job has a cached projection, export the
+    // fixed text; otherwise export raw. Honors mergeParagraphs in both cases.
+    const body =
+      opts?.fixSpelling && j.spellFix
+        ? plainTextWithFix(j.result!, j.spellFix.fixedLines, textOpts)
+        : plainText(j.result!, textOpts);
     const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
-    return `=== ${j.name}${conf} ===\n` + plainText(j.result!, textOpts).replace(/\s+$/, "");
+    return `=== ${j.name}${conf} ===\n` + body.replace(/\s+$/, "");
   });
   const content = blocks.join("\n\n") + "\n";
 
@@ -425,6 +494,33 @@ export function lastMergeParagraphs(): boolean {
 export function saveMergeParagraphs(on: boolean): void {
   try {
     localStorage.setItem(MERGE_PARAGRAPHS_KEY, on ? "true" : "false");
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+// ── Burmese spelling fix (persisted) ─────────────────────────────────────────
+// Unlike mergeParagraphs (display-only), this changes what the OCR engine
+// returns, so it crosses the IPC boundary inside `opts.fixBurmeseSpelling`.
+// Persisted the same way so the toggle is sticky across launches. Default
+// off: the user opts in, so they can compare raw vs corrected output.
+
+const FIX_BURMESE_SPELLING_KEY = "just-ocr:fix-burmese-spelling";
+
+/** Read the spelling-fix preference; defaults to false (off). */
+export function lastFixBurmeseSpelling(): boolean {
+  try {
+    return localStorage.getItem(FIX_BURMESE_SPELLING_KEY) === "true";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return false;
+  }
+}
+
+/** Persist the spelling-fix preference so it is sticky across launches. */
+export function saveFixBurmeseSpelling(on: boolean): void {
+  try {
+    localStorage.setItem(FIX_BURMESE_SPELLING_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

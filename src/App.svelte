@@ -12,6 +12,7 @@
     makeJob,
     makeJobsFromReadFiles,
     ocrFromBytes,
+    fixBurmeseSpelling,
     readFiles,
     renderPdf,
     exportResults,
@@ -25,6 +26,8 @@
     saveSegmenter,
     lastMergeParagraphs,
     saveMergeParagraphs,
+    lastFixBurmeseSpelling,
+    saveFixBurmeseSpelling,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -69,6 +72,7 @@
     language: lastLanguage() ?? "mya",
     psm: 3,
     segmenter: lastSegmenter(),
+    fixBurmeseSpelling: lastFixBurmeseSpelling(),
   });
 
   // Merge-paragraphs is a display-only preference (it does not change what the
@@ -93,6 +97,24 @@
   });
   $effect(() => {
     saveMergeParagraphs(mergeParagraphs);
+  });
+  // Spelling fix is sticky across launches, like the other OcrOpts fields.
+  $effect(() => {
+    saveFixBurmeseSpelling(opts.fixBurmeseSpelling);
+  });
+  // When the spell-fix toggle flips ON, lazily compute the projection for
+  // every done Myanmar job (cache hit skips already-computed ones). Flipping
+  // OFF needs no work: Output reads raw text again when job.spellFix isn't
+  // surfaced (the toggle gates display in Output). The cache stays, so a
+  // later ON-flip is instant. Reading opts.fixBurmeseSpelling + jobs here is
+  // what makes this re-run on toggle / job-list changes.
+  $effect(() => {
+    if (!opts.fixBurmeseSpelling) return;
+    for (const job of jobs) {
+      if (opts.language === "mya" && job.status === "done") {
+        void applySpellFixToJob(job);
+      }
+    }
   });
 
   let jobs = $state<Job[]>([]);
@@ -385,10 +407,42 @@
       job.result = res;
       job.confidence = res.confidence;
       job.elapsedMs = res.elapsedMs;
+      job.spellFix = null; // reset any stale cache from a prior run
       job.status = "done";
+      // If the spell-fix toggle is on for a Myanmar result, pre-compute the
+      // projection now so the count + fixed text show immediately in Output,
+      // without waiting for the toggle-watching effect below to pick it up.
+      if (opts.fixBurmeseSpelling && opts.language === "mya") {
+        void applySpellFixToJob(job);
+      }
     } catch (e: any) {
       job.error = typeof e === "string" ? e : e?.message ?? String(e);
       job.status = "error";
+    }
+  }
+
+  /**
+   * Compute (or return cached) spell-fix projection for a job. The result is
+   * stored on `job.spellFix` so the Output panel can read fixed text + count
+   * reactively, and so toggling the switch off-then-on is instant after the
+   * first compute. No-op for jobs that aren't done, aren't Myanmar, or have
+   * no recognized lines. Safe to call concurrently — duplicate calls just
+   * overwrite the cache with the same value.
+   */
+  async function applySpellFixToJob(job: Job): Promise<void> {
+    if (job.spellFix) return; // cache hit
+    if (job.status !== "done" || !job.result || job.result.lines.length === 0) return;
+    try {
+      const fixed = await fixBurmeseSpelling(job.result.lines.map((l) => l.text));
+      job.spellFix = {
+        fixedLines: fixed.map((r) => r.text),
+        fixes: fixed.reduce((sum, r) => sum + r.fixes, 0),
+      };
+    } catch (e) {
+      // Backend call failed (older build, model error) — leave spellFix null
+      // so the Output panel falls back to raw text. Non-fatal: the user still
+      // sees recognized text, just uncorrected.
+      console.warn(`Spell-fix failed for "${job.name}":`, e);
     }
   }
 
@@ -430,7 +484,10 @@
   }
 
   async function exportAll() {
-    await exportResults(jobs, { mergeParagraphs });
+    await exportResults(jobs, {
+      mergeParagraphs,
+      fixSpelling: opts.fixBurmeseSpelling,
+    });
   }
 
   // Silent startup update check. Fire-and-forget, never blocks startup.
@@ -465,6 +522,8 @@
     onsettings={() => (showSettings = true)}
     updateAvailable={updateAvailable}
     onchangemerge={(v: boolean) => (mergeParagraphs = v)}
+    fixBurmeseSpelling={opts.fixBurmeseSpelling}
+    onchangefix={(v: boolean) => (opts.fixBurmeseSpelling = v)}
   />
   <main id="main-area">
     <section class="col left" style="width:{leftW}px">
@@ -497,7 +556,7 @@
       aria-orientation="vertical"
     ></div>
     <section class="col right" style="width:{rightW}px">
-      <Output job={selected} {mergeParagraphs} />
+      <Output job={selected} {mergeParagraphs} fixSpelling={opts.fixBurmeseSpelling} />
     </section>
   </main>
   {#if dropping}
