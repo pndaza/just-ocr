@@ -98,6 +98,12 @@ clipper2-rust = "1"
 # `box_score_fast` mask. Same version kraken-engine uses, so the workspace
 # resolves a single copy.
 imageproc = { version = "0.25", default-features = false }
+# Regex engine with lookahead/lookbehind support, used by the Burmese
+# spelling-fix post-processing stage (spelling.rs). The std `regex` crate
+# deliberately omits lookaround; the ported JS rule set has 9 rules that use
+# `(?<=)`/`(?<!)`/`(?=`/`(?!)`, so we need fancy-regex. Patterns without
+# lookaround are forwarded to the faster std `regex` engine internally.
+fancy-regex = "0.14"
 
 # Polygon overlay debug examples (overlay_ppocr.rs, expand_compare_ppocr.rs)
 # use imageproc — already a real dependency above, listed here for clarity.

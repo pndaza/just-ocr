@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Job } from "./ocr";
-  import { plainText } from "./result";
+  import { plainText, plainTextWithFix } from "./result";
 
   interface Props {
     job: Job | null;
@@ -8,17 +8,33 @@
      *  in result.ts. Mirrors the toolbar toggle so the panel reflects the
      *  same projection used for export. */
     mergeParagraphs: boolean;
+    /** When true AND the job has a cached spell-fix projection, the panel
+     *  shows fixed text instead of raw. The toggle is a prop (not read from
+     *  localStorage) so App remains the single source of truth for opts. */
+    fixSpelling: boolean;
   }
-  let { job, mergeParagraphs }: Props = $props();
+  let { job, mergeParagraphs, fixSpelling }: Props = $props();
 
   // The recognized text is a projection of the structured `OcrResult`. With
   // mergeParagraphs off, lines join with "\n" (legacy behaviour); with it on,
   // close lines join with a space and paragraphs are separated by "\n\n".
-  // Falls back to "" until the job is done.
+  // When spell-fix is on and the job's cache is populated, fixed line text is
+  // substituted in (geometry unchanged). Falls back to "" until done.
   let displayText = $derived.by(() => {
     if (!job || job.status !== "done" || !job.result) return "";
-    return plainText(job.result, { mergeParagraphs }).replace(/\s+$/, "");
+    const textOpts = mergeParagraphs ? { mergeParagraphs: true } : undefined;
+    const body =
+      fixSpelling && job.spellFix
+        ? plainTextWithFix(job.result, job.spellFix.fixedLines, textOpts)
+        : plainText(job.result, textOpts);
+    return body.replace(/\s+$/, "");
   });
+
+  // Fix count shows only when spell-fix is on and the cache is populated.
+  // `null` otherwise (toggle off, or cache not yet computed) → no badge.
+  let fixCount = $derived(
+    fixSpelling && job?.spellFix ? job.spellFix.fixes : null,
+  );
 
   let copied = $state(false);
 
@@ -35,6 +51,14 @@
     <span class="title">Text</span>
     {#if job?.status === "done"}
       <span class="meta">{job.elapsedMs} ms</span>
+      {#if fixCount !== null}
+        <span
+          class="meta fixes"
+          title="Total Burmese spelling fixes applied (regex + dictionary)"
+        >{fixCount === 0
+          ? "no fixes"
+          : `${fixCount} ${fixCount === 1 ? "fix" : "fixes"}`}</span>
+      {/if}
       <button class="copy" onclick={copy} disabled={!displayText.trim()}>
         {copied ? "Copied ✓" : "Copy"}
       </button>
@@ -86,6 +110,11 @@
     font-size: 11px;
     font-family: var(--mono);
     color: var(--text-faint);
+  }
+  /* Spelling-fix count: accent-colored so a non-zero count reads as a
+     "something happened" signal, distinct from the neutral timing meta. */
+  .meta.fixes {
+    color: var(--accent);
   }
   .copy {
     font-size: 11px;

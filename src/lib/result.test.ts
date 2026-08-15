@@ -1,4 +1,4 @@
-import { plainText, type LineBox, type OcrResult } from "./result";
+import { plainText, plainTextWithFix, type LineBox, type OcrResult } from "./result";
 import { describe, it, expect } from "vitest";
 
 /** Build a LineBox with the geometry the paragraph heuristic reasons about. */
@@ -146,5 +146,56 @@ describe("plainText — mergeParagraphs", () => {
       line("y", 100, 20, 100, 40),
     ]);
     expect(plainText(r, { mergeParagraphs: true })).toBe("x y");
+  });
+});
+
+describe("plainTextWithFix — substitutes fixed line text", () => {
+  it("uses fixed text in line-by-line mode", () => {
+    // Two raw lines; the fix swaps each line's text. Geometry unchanged.
+    const r = result([
+      line("rawA", 100, 0, FULL, 20),
+      line("rawB", 100, 20, FULL, 40),
+    ]);
+    expect(plainTextWithFix(r, ["fixA", "fixB"])).toBe("fixA\nfixB");
+  });
+
+  it("uses fixed text but keeps paragraph grouping from geometry", () => {
+    // Three tight body lines (one paragraph) + one short last line that
+    // triggers a paragraph break (the geometry heuristic, not the text).
+    // The fix swaps text content; the paragraph break still fires because it
+    // keys off the unchanged bboxes.
+    const r = result([
+      line("p1a", 100, 0, FULL, 20),
+      line("p1b", 100, 20, FULL, 40),
+      line("p1c", 100, 40, FULL, 60),
+      line("p1end", 100, 60, 300, 80),
+      line("p2a", 100, 80, FULL, 100),
+    ]);
+    const fixed = ["FA", "FB", "FC", "FEND", "F2"];
+    expect(plainTextWithFix(r, fixed, { mergeParagraphs: true })).toBe(
+      "FA FB FC FEND\n\nF2",
+    );
+  });
+
+  it("falls back to raw text when fixedLines is shorter than lines", () => {
+    // Defensive: a partial fixedLines array must not drop lines or throw —
+    // missing entries fall through to the raw line text.
+    const r = result([
+      line("rawA", 100, 0, FULL, 20),
+      line("rawB", 100, 20, FULL, 40),
+    ]);
+    expect(plainTextWithFix(r, ["fixA"])).toBe("fixA\nrawB");
+  });
+
+  it("matches plainText when fixedLines equals raw text", () => {
+    // If the fix is a no-op (fixed text == raw text), the projection must be
+    // byte-identical to plainText — confirms the swap is transparent.
+    const r = result([
+      line("a", 100, 0, FULL, 20),
+      line("b", 100, 20, FULL, 40),
+    ]);
+    expect(plainTextWithFix(r, ["a", "b"], { mergeParagraphs: true })).toBe(
+      plainText(r, { mergeParagraphs: true }),
+    );
   });
 });

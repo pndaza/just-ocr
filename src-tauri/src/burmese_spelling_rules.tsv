@@ -1,0 +1,117 @@
+# Burmese OCR spelling normalization rules (regex + substring passes).
+#
+# Ported from a JS post-processing script. 128 raw rules
+# collapsed to 90 unique rules, grouped by category. Rules within
+# a category run in their original source order; categories run dedup ->
+# char-class -> lookaround -> literal (independence assumed: each is a
+# global replace_all over the current text; none of the literal/char-class
+# rules feed each other).
+#
+# Format:  <regex-pattern>	<replacement>   (tab-separated)
+#   - '#'-prefixed and blank lines are skipped.
+#   - Patterns use fancy-regex syntax (lookahead/lookbehind/char-classes).
+#   - Replacements are LITERAL (no $N backreferences).
+#   - Trailing whitespace in a pattern or replacement IS significant
+#     (one rule intentionally matches a trailing space).
+#
+# Conflict note: source had /ရယ်ရွင်/ -> ရယ်ရွှင်ခြင်း AND -> ရယ်ရွှင်;
+# kept the shorter form (ရယ်ရွှင်) — the -ခြင်း gerund would corrupt
+# non-gerund contexts under a global substring replace.
+
+# --- Dedup doubled vowel marks ---
+ာာ	ာ
+ိိ	ိ
+ီီ	ီ
+ုု	ု
+ူူ	ူ
+ေေ	ေ
+
+# --- Stacked-consonant + char-class fixes ---
+က္[ဃဆဏတထဘယလသဟ]	က္က
+က္[ဂငစဇဒဓနပဖဗမ]	က္ခ
+ဂ္[ငစဇဒဓနပဖဗမ]	ဂ္ဂ
+ဂ္[ကဆဏတထဘယလသဟ]	ဂ္ဃ
+စ္[ခဂငဇဒဓနပဖဗမ]	စ္စ
+စ္[ကဏတထဘယလသဟ]	စ္ဆ
+ဇ္[ခဂငဒဓနပဖဗမ]	ဇ္ဇ
+ဏ္[ကဃဆတထဘယလသဟ]	ဏ္ဏ
+တ္[ကဏဘဟ]	တ္တ
+တ္[ဃဆယ]	တ္ထ
+ဒ္[ခ]	ဒ္ဒ
+ဒ္[စဖဗမ]	ဒ္ဓ
+န္[ခဇဗမ]	န္ဓ
+န္[ခမ]	န္ဓ
+ပ္[ဗမ]	ပ္ပ
+ပ္[စဓ]	ပ္ဖ
+ဗ္[ခဂစဇဒဓနပဖမ]	ဗ္ဗ
+ဗ္[ကဃဆတထယလသ]	ဗ္ဘ
+မ္[ကဃဆတထယလသဟ]	မ္ဘ
+မင်[\s,၊၊]?ဖိုလ်	မဂ်ဖိုလ်
+ကြ[ံိ]?း	ကြီး
+
+# --- Context-sensitive fixes (lookahead / lookbehind) ---
+(?<![ငညဏနမ])(ူ|ု|ှု)ာ	ွာ
+(?<=[ငညဏနမ])(ူ|ု|ှု)ာ	ှာ
+ီ(?=[က-လ]္)	ိ
+ူ(?=[က-လ]္)	ု
+ီ(?=[က-လ]်)	ိ
+ူ(?=[က-လ]်)	ု
+(?<!သံ)သရာ	ဆရာ
+(?<!ပု)ထ်	တ်
+ဂန္တ(?![ွဗ])	ဂန္ထ
+
+# --- Literal substring fixes (Pali + Myanmar words) ---
+ထို့ကြော\s	ထို့ကြောင့်
+ကထွာ	ကတွာ
+ဥဿာတ	ဥဿာဟ
+ဟန္ဓ	ဟန္ဒ
+အာတံသု	အာဟံသု
+ပဗ္ဗဒိ	ပဗ္ဗဇိ
+ပါဠ်	ပါဠိ
+သာဋု	သာဓု
+ပိဋဏ	ပိဋက
+ညှ	ညှိ
+ဓမ္ပ	ဓမ္မ
+နီဿ	နိဿ
+သူည	သုည
+အသဝ	အာသဝ
+သောဠဃ	သောဠသ
+ခိမောက္ခ	ဝိမောက္ခ
+၁င်	ဝင်
+ပါဋ်	ပါဌ်
+ဝယ်ပိုး	ဝယ်ဖိုး
+ကွံ	ကွဲ
+ယှတ်	ယုတ်
+မျံ့	ပျံ့
+ူု	ှု
+ံ်	်
+တုနိ	တုန်
+ငှကံ	ငှက်
+မီည	ဒီည
+ကြညံ	ကြည့်
+သံ့သော်	သို့သော်
+စွေ့ပြိုး	စွေဖြိုး
+စှို	စို့
+နှစ်လို	နှစ်လှို
+ပြောင့်	ငြောင့်
+မနေး	မနှေး
+ရှိးဆော်	နှိုးဆော်
+ပမ်းမိ	ဖမ်းမိ
+ပ်း	မ်း
+ပြုး	ပြုံး
+ထရား	တရား
+ပုံနိပ်	ပုံနှိပ်
+ကျမ်၊	ကျမ်း
+ချွဖွင့်	ချဲ့ဖွင့်
+ဝေပုစ်	ဝေဝုစ်
+ရှွာ	ရွာ
+အင့်	ဆင့်
+တသားဏည်း	တသားတည်း
+ဖြထ်	ဖြတ်
+ထူးခြားခုက် 	ထူးခြားချက် 
+ရိုက်နှိမ်	ရိုက်နှိပ်
+မေပါ	စေပါ
+ပုံနှိင်	ပုံနှိပ်
+ခြုက်	ခြိုက်
+အနှင်	အနှစ်
+ရယ်ရွင်	ရယ်ရွှင်

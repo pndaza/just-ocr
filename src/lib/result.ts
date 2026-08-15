@@ -53,6 +53,35 @@ export function plainText(result: OcrResult, opts?: PlainTextOpts): string {
     .join("\n\n");
 }
 
+/**
+ * Like {@link plainText}, but substitutes each line's text with its
+ * spell-fixed counterpart from `fixedLines` before joining. Geometry (the
+ * `LineBox` bboxes that drive paragraph grouping) is unchanged — only the
+ * text content swaps, so the merge-paragraphs projection stays identical.
+ *
+ * `fixedLines` parallels `result.lines`; if it's shorter, missing entries
+ * fall back to the raw line text (defensive — should not normally happen).
+ */
+export function plainTextWithFix(
+  result: OcrResult,
+  fixedLines: string[],
+  opts?: PlainTextOpts,
+): string {
+  // Build a view of result.lines with text swapped in. We don't mutate the
+  // underlying OcrResult; we map to a shallow copy carrying the fixed text.
+  const swapped: LineBox[] = result.lines.map((l, i) => ({
+    ...l,
+    text: i < fixedLines.length ? fixedLines[i] : l.text,
+  }));
+  if (!opts?.mergeParagraphs) {
+    return swapped.map((l) => l.text).join("\n");
+  }
+  return groupParagraphs(swapped)
+    .map((para) => para.map((l) => l.text.trim()).filter((t) => t.length > 0).join(" "))
+    .filter((p) => p.length > 0)
+    .join("\n\n");
+}
+
 // ── Paragraph grouping heuristic ─────────────────────────────────────────────
 //
 // Pure geometry — no ML, no font/baseline analysis. Uses only the per-line
