@@ -134,41 +134,65 @@
     return basisLines(job).join("\n");
   }
 
-  /**
-   * Check every completed page: batch the jobs (the user-chosen
-   * `batchSize` pages per request, sequentially so Stop takes effect between
-   * batches) and ask Gemini to proofread them. In "review" mode the model
-   * returns wrong→correct word pairs; in "rewrite" mode it returns each
-   * page's corrected text, which we diff per line into change rows (old →
-   * new) — the review UI and apply path stay uniform. A batch failure keeps
-   * the already-collected pages reviewable — the error shows alongside the
-   * results rather than discarding them.
-   */
-  async function startCheck() {
+  // Batch plan for the in-flight check plus a resume cursor: `nextBatch` is
+  // the first batch whose results have NOT landed. Kept as plain variables
+  // (nothing renders from them directly) so an interrupted check can resume
+  // from the failure instead of restarting: each request burns free-tier
+  // quota, and a restart would also drop the checkbox edits the user
+  // already made on the collected pages.
+  let batchPlan: Job[][] = [];
+  let nextBatch = 0;
+
+  /** Start a fresh check: rebuild the plan from the currently checkable
+   *  pages and discard any previously collected results. */
+  function startCheck() {
     if (!checkable.length || !hasKey) return;
-    cancelRequested = false;
-    checkMode = mode;
-    appliedJobIds = [];
-    phase = "checking";
-    error = null;
-    applied = null;
-    suggestions = [];
-    const batches: Job[][] = [];
+    batchPlan = [];
     for (let i = 0; i < checkable.length; i += batchSize) {
-      batches.push(checkable.slice(i, i + batchSize));
+      batchPlan.push(checkable.slice(i, i + batchSize));
     }
-    progress = { current: 0, total: batches.length };
+    nextBatch = 0;
+    suggestions = [];
+    appliedJobIds = [];
+    checkMode = mode;
+    applied = null;
+    void runBatches();
+  }
+
+  /** Resume an interrupted check from the first unfinished batch, keeping
+   *  the pages already collected (and any edits made to them). */
+  function retryCheck() {
+    if (!batchPlan.length || !hasKey) return;
+    void runBatches();
+  }
+
+  /**
+   * Run the remaining batches (the user-chosen `batchSize` pages per
+   * request, sequentially so Stop takes effect between batches) and ask
+   * Gemini to proofread them. In "review" mode the model returns wrong→
+   * correct word pairs; in "rewrite" mode it returns each page's corrected
+   * text, which we diff per line into change rows (old → new) — the review
+   * UI and apply path stay uniform. A batch failure keeps the
+   * already-collected pages reviewable — the error shows alongside the
+   * results rather than discarding them, and Retry resumes from the failed
+   * batch instead of re-sending them.
+   */
+  async function runBatches() {
+    cancelRequested = false;
+    error = null;
+    phase = "checking";
+    progress = { current: nextBatch, total: batchPlan.length };
     let cancelled = false;
     try {
-      for (let b = 0; b < batches.length; b++) {
+      for (let b = nextBatch; b < batchPlan.length; b++) {
         if (cancelRequested) {
           cancelled = true;
           break;
         }
         // Tick before the request so progress reflects work starting, not
         // finishing (same convention as the batch Run All counter).
-        progress = { current: b + 1, total: batches.length };
-        const batch = batches[b];
+        progress = { current: b + 1, total: batchPlan.length };
+        const batch = batchPlan[b];
         const texts = batch.map(pageText);
         if (checkMode === "rewrite") {
           const result = await llmRewritePages(apiKey, model, texts);
@@ -223,6 +247,8 @@
             suggestions.push({ jobId: batch[i].id, name: batch[i].name, fixes });
           }
         }
+        // Batch landed — a later Retry resumes after it, not at it.
+        nextBatch = b + 1;
       }
     } catch (e: any) {
       error = typeof e === "string" ? e : e?.message ?? String(e);
@@ -258,14 +284,22 @@
   function revertFix(s: PageReview, i: number) {
     const f = s.fixes[i];
     if (f.reverted) return;
-    f.reverted = true;
     const job = jobs.find((j) => j.id === s.jobId);
+    // Nothing applied left to revert (Undo all already ran, or the job went
+    // away) — bail before marking the row so it doesn't dim for a no-op.
     if (!job?.result || !job.llmFix || f.line == null) return;
     const fixed = job.llmFix.fixedLines;
     if (f.line < 1 || f.line > fixed.length) return;
+    f.reverted = true;
     fixed[f.line - 1] = f.wrong;
     const remaining = s.fixes.filter((x) => !x.reverted).length;
     job.llmFix = remaining === 0 ? null : { fixedLines: fixed, fixes: remaining };
+  }
+
+  /** Whether this page still has its rewrite corrections applied — drives
+   *  the per-row revert buttons (after Undo all there's nothing to revert). */
+  function pageApplied(s: PageReview): boolean {
+    return jobs.find((j) => j.id === s.jobId)?.llmFix != null;
   }
 
   /**
@@ -440,9 +474,14 @@
 
   // Publish the flagged wrong words per page so the Text panel can
   // highlight them while reviewing. Review mode only — rewrite mode applies
-  // instantly, so the old text (and its highlights) is already replaced.
+  // instantly, so the old text (and its highlights) is already replaced;
+  // publishing {} then clears any highlights left over from a previous
+  // review-mode check.
   $effect(() => {
-    if (checkMode !== "review") return;
+    if (checkMode !== "review") {
+      onsuggestions({});
+      return;
+    }
     const map: Record<number, string[]> = {};
     for (const s of suggestions) {
       if (s.fixes.length) {
@@ -664,7 +703,11 @@
             <p class="hint">Pages already checked are listed below — you can still review and apply their fixes.</p>
           {/if}
           {#if !quotaError}
-            <button class="btn ghost" onclick={startCheck}>Retry</button>
+            <button
+              class="btn ghost"
+              onclick={retryCheck}
+              title="Continue from where the check stopped — pages already collected aren't re-sent"
+            >Retry</button>
           {/if}
         </div>
       {/if}
@@ -769,10 +812,12 @@
                               e.stopPropagation();
                               revertFix(s, i);
                             }}
-                            disabled={f.reverted}
+                            disabled={f.reverted || !pageApplied(s)}
                             title={f.reverted
                               ? "Original kept"
-                              : "Keep the original — revert this line's correction"}
+                              : pageApplied(s)
+                                ? "Keep the original — revert this line's correction"
+                                : "Corrections were undone"}
                             aria-label="Keep original line"
                           >↺</button>
                           <span class="line-chip" title="Line on the page">L{f.line}</span>
