@@ -118,11 +118,12 @@
   </label>
 
   {#if isMyanmar}
-    <!-- Myanmar: Seg picks the line-box detector, Rec picks the recognizer. -->
+    <!-- Myanmar: Seg picks the line-box detector, Rec picks the recognizer.
+         Kraken-as-segmenter is hidden from the UI (not accurate enough yet);
+         its code path + type variant are retained for when it improves. -->
     <label class="field">
       <span class="lbl">Seg</span>
       <select bind:value={opts.segmenter}>
-        <option value="kraken">Kraken</option>
         <option value="ppocr">PP-OCR (quad)</option>
         <option value="ppocr-poly">PP-OCR (poly)</option>
       </select>
