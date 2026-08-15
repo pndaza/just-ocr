@@ -194,6 +194,57 @@ function percentile(values: number[], p: number): number {
   return sorted[idx];
 }
 
+// ── AI word-fix projection ───────────────────────────────────────────────────
+
+/** One wrong→correct word pair proposed by the LLM spell check. The `wrong`
+ *  side is an exact substring of the OCR text (the backend filters pairs
+ *  whose `wrong` doesn't occur), so replacement is a plain find/replace.
+ *  `line`, when set, scopes the replacement to that 1-based line index —
+ *  the AI check addresses fixes per line so short substrings (easy in
+ *  unspaced Burmese) only touch the flagged line. */
+export interface WordFix {
+  wrong: string;
+  correct: string;
+  line?: number;
+}
+
+/**
+ * Replace every occurrence of each fix's `wrong` with its `correct` and
+ * report how many replacements were made. Pure — returns new strings, never
+ * mutates the inputs — so the caller can cache the result as a display-time
+ * projection (same shape as the offline spell-fix).
+ *
+ * A fix with a `line` replaces only within that line (out-of-range line →
+ * no-op); without one, across all lines. Plain substring replacement rather
+ * than word-boundary matching: Burmese and other complex scripts don't
+ * separate words with spaces, so regex `\b` boundaries would silently skip
+ * most fixes there. Overlapping pairs are applied in the given order (first
+ * fix wins on a shared substring).
+ */
+export function applyWordFixes(
+  lines: string[],
+  fixes: WordFix[],
+): { lines: string[]; count: number } {
+  const usable = fixes.filter((f) => f.wrong.length > 0 && f.wrong !== f.correct);
+  let count = 0;
+  const out = [...lines];
+  for (const f of usable) {
+    // Line-addressed fix → that one line only; otherwise the whole page.
+    const targets =
+      f.line != null && f.line >= 1 && f.line <= out.length
+        ? [f.line - 1]
+        : f.line != null
+          ? [] // invalid line index — apply nowhere (the review UI unchecks it)
+          : out.map((_, i) => i);
+    for (const i of targets) {
+      if (!out[i].includes(f.wrong)) continue;
+      count += out[i].split(f.wrong).length - 1;
+      out[i] = out[i].split(f.wrong).join(f.correct);
+    }
+  }
+  return { lines: out, count };
+}
+
 // ── Duration formatting ──────────────────────────────────────────────────────
 
 /**

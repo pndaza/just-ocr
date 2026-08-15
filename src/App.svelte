@@ -6,6 +6,7 @@
   import Output from "./lib/Output.svelte";
   import LanguageManager from "./lib/LanguageManager.svelte";
   import Settings from "./lib/Settings.svelte";
+  import AiCheck from "./lib/AiCheck.svelte";
   import {
     availableLanguages,
     isPdf,
@@ -32,6 +33,19 @@
     saveFixBurmeseSpelling,
     lastExportIncludePageName,
     saveExportIncludePageName,
+    lastLlmApiKey,
+    saveLlmApiKey,
+    lastLlmModel,
+    saveLlmModel,
+    lastLlmBatchSize,
+    saveLlmBatchSize,
+    lastAiCheckMode,
+    saveAiCheckMode,
+    lastShowFixSpelling,
+    saveShowFixSpelling,
+    type AiCheckMode,
+    type LlmBatchSize,
+    type LlmModel,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -91,6 +105,27 @@
   // choice, not a per-run toggle. Default false = body-only export.
   let exportIncludePageName = $state(lastExportIncludePageName());
 
+  // Google AI Studio (Gemini) credentials for the AI Check tool. The app's
+  // only online feature — kept opt-in and configured in Settings; the key is
+  // stored locally and passed to the backend per request.
+  let llmApiKey = $state(lastLlmApiKey());
+  let llmModel = $state<LlmModel>(lastLlmModel());
+  // Pages per Gemini request — chosen in the AI Check panel (10-50) rather
+  // than Settings, since it tunes the run the user is about to start.
+  let llmBatchSize = $state<LlmBatchSize>(lastLlmBatchSize());
+  // AI Check fix mode: "review" (word pairs) or "rewrite" (corrected page
+  // text, diffed per line). Chosen in the panel, sticky across launches.
+  let aiCheckMode = $state<AiCheckMode>(lastAiCheckMode());
+  // The AI spell-check panel is a 4th main column (image · text · fixes side
+  // by side), not a modal. Session-only: closed on each launch.
+  let aiPanelOpen = $state(false);
+  // Wrong words flagged by the AI check, per jobId — published by the panel
+  // so the Text panel can highlight them while reviewing.
+  let aiWrongWords = $state<Record<number, string[]>>({});
+  // Whether the toolbar shows the "Fix spelling" checkbox (Myanmar only).
+  // The toggle's own state is independent and stays sticky when hidden.
+  let showFixSpelling = $state(lastShowFixSpelling());
+
   // Remember the chosen engine + language so they are pre-selected on the next
   // launch. loadLanguages() validates the language against available models,
   // so a value removed in the meantime is corrected automatically.
@@ -116,6 +151,21 @@
   });
   $effect(() => {
     saveExportIncludePageName(exportIncludePageName);
+  });
+  $effect(() => {
+    saveLlmApiKey(llmApiKey);
+  });
+  $effect(() => {
+    saveLlmModel(llmModel);
+  });
+  $effect(() => {
+    saveLlmBatchSize(llmBatchSize);
+  });
+  $effect(() => {
+    saveAiCheckMode(aiCheckMode);
+  });
+  $effect(() => {
+    saveShowFixSpelling(showFixSpelling);
   });
   // Spelling fix is sticky across launches, like the other OcrOpts fields.
   $effect(() => {
@@ -206,14 +256,17 @@
   }
 
   // ── Resizable panels ──────────────────────────────────────────────────────
-  // Widths are pixel values; the middle/right columns split the remaining space
-  // proportionally. Two drag handles sit between the three panels.
+  // Widths are pixel values; the middle column splits the remaining space
+  // proportionally. Drag handles sit between the panels. The AI Check panel
+  // is an optional 4th column; when open, the Output|AI handle joins the
+  // other two and the preview keeps its minimum width.
   let leftW = $state(200);
   let rightW = $state(460); // middle is flexible (flex: 1)
+  let aiW = $state(380);
 
-  let draggingHandle = $state<null | "left" | "right">(null);
+  let draggingHandle = $state<null | "left" | "right" | "ai">(null);
 
-  function startDrag(which: "left" | "right") {
+  function startDrag(which: "left" | "right" | "ai") {
     draggingHandle = which;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
@@ -227,9 +280,17 @@
     if (draggingHandle === "left") {
       // Left panel width = cursor x relative to main's left edge.
       leftW = Math.max(150, Math.min(250, e.clientX - rect.left));
+    } else if (draggingHandle === "right") {
+      // Cursor sits at the preview|output boundary. With the AI panel open,
+      // the space right of the cursor covers BOTH right columns — subtract
+      // the AI width so dragging only resizes Output.
+      const aiSpace = aiPanelOpen ? aiW + 5 : 0;
+      const avail = rect.right - e.clientX - aiSpace;
+      rightW = Math.max(200, Math.min(rect.width - leftW - 200 - aiSpace, avail));
     } else {
-      // Right panel width = distance from cursor to main's right edge.
-      rightW = Math.max(200, Math.min(rect.width - leftW - 200, rect.right - e.clientX));
+      // AI panel width = distance from cursor to main's right edge, keeping
+      // the preview at its 200px minimum.
+      aiW = Math.max(240, Math.min(rect.right - e.clientX, rect.width - leftW - rightW - 205));
     }
   }
 
@@ -256,7 +317,7 @@
   // Reads happen inside the handler, so this effect registers exactly once.
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (pdfDialog || showLangManager || showSettings) return;
+      if (pdfDialog || showLangManager || showSettings || aiPanelOpen) return;
       const t = e.target as HTMLElement | null;
       if (
         t &&
@@ -427,6 +488,8 @@
       job.confidence = res.confidence;
       job.elapsedMs = res.elapsedMs;
       job.spellFix = null; // reset any stale cache from a prior run
+      job.llmFix = null; // AI fixes applied to the old text no longer apply
+      job.manualText = null; // manual edits referred to the old text too
       job.status = "done";
       // If the spell-fix toggle is on for a Myanmar result, pre-compute the
       // projection now so the count + fixed text show immediately in Output,
@@ -538,12 +601,15 @@
     onruncurrent={runCurrent}
     onrunall={runAll}
     onexport={exportAll}
+    onaicheck={() => (aiPanelOpen = !aiPanelOpen)}
+    aiOpen={aiPanelOpen}
     onmanagelanguages={openLangManager}
     onsettings={() => (showSettings = true)}
     updateAvailable={updateAvailable}
     onchangemerge={(v: boolean) => (mergeParagraphs = v)}
     fixBurmeseSpelling={opts.fixBurmeseSpelling}
     onchangefix={(v: boolean) => (opts.fixBurmeseSpelling = v)}
+    {showFixSpelling}
   />
   <main id="main-area">
     <section class="col left" style="width:{leftW}px">
@@ -576,8 +642,45 @@
       aria-orientation="vertical"
     ></div>
     <section class="col right" style="width:{rightW}px">
-      <Output job={selected} {jobs} {mergeParagraphs} fixSpelling={opts.fixBurmeseSpelling} />
+      <Output
+        job={selected}
+        {jobs}
+        {mergeParagraphs}
+        fixSpelling={opts.fixBurmeseSpelling}
+        highlights={selected ? aiWrongWords[selected.id] ?? [] : []}
+      />
     </section>
+    {#if aiPanelOpen}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="divider"
+        class:active={draggingHandle === "ai"}
+        onmousedown={() => startDrag("ai")}
+        role="separator"
+        aria-orientation="vertical"
+      ></div>
+      <section class="col ai" style="width:{aiW}px">
+        <AiCheck
+          {jobs}
+          apiKey={llmApiKey}
+          bind:model={llmModel}
+          bind:batchSize={llmBatchSize}
+          bind:mode={aiCheckMode}
+          onclose={() => {
+            aiPanelOpen = false;
+            // Drop the highlights with the panel — they're meaningless
+            // without the review list they belong to.
+            aiWrongWords = {};
+          }}
+          onopensettings={() => {
+            aiPanelOpen = false;
+            showSettings = true;
+          }}
+          onselectpage={select}
+          onsuggestions={(m) => (aiWrongWords = m)}
+        />
+      </section>
+    {/if}
   </main>
   {#if dropping}
     <div class="drop-overlay" aria-hidden="true">
@@ -605,6 +708,10 @@
     {updateAvailable}
     {exportIncludePageName}
     onchangeexportpage={(v: boolean) => (exportIncludePageName = v)}
+    {llmApiKey}
+    onchangeapikey={(v: string) => (llmApiKey = v)}
+    {showFixSpelling}
+    onchangeShowfixspelling={(v: boolean) => (showFixSpelling = v)}
   />
 {/if}
 
@@ -650,6 +757,9 @@
     min-width: 200px;
   }
   .col.right {
+    flex-shrink: 0;
+  }
+  .col.ai {
     flex-shrink: 0;
   }
   .divider {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { OcrOpts } from "./ocr";
+  import { llmTestKey } from "./ocr";
   import type { Theme } from "../theme";
   import {
     checkForUpdate,
@@ -24,6 +25,14 @@
     exportIncludePageName: boolean;
     /** Called when the user toggles the export page-name preference. */
     onchangeexportpage: (on: boolean) => void;
+    /** Stored Google AI Studio API key for the AI Check tool. */
+    llmApiKey: string;
+    /** Called when the user edits the API key. */
+    onchangeapikey: (key: string) => void;
+    /** Whether the toolbar shows the "Fix spelling" checkbox. */
+    showFixSpelling: boolean;
+    /** Called when the user toggles toolbar "Fix spelling" visibility. */
+    onchangeShowfixspelling: (on: boolean) => void;
   }
   let {
     opts,
@@ -33,6 +42,10 @@
     updateAvailable,
     exportIncludePageName,
     onchangeexportpage,
+    llmApiKey,
+    onchangeapikey,
+    showFixSpelling,
+    onchangeShowfixspelling,
   }: Props = $props();
 
   // Current app version, fetched once on mount for the Updates section header.
@@ -82,6 +95,32 @@
       e.preventDefault();
       onclose();
     }
+  }
+
+  // ── API key test ──────────────────────────────────────────────────────────
+  // The Test button makes a minimal backend call (gemma-4-31b-it) to prove
+  // the key authenticates before the user relies on AI Check. Editing the
+  // key resets the verdict so a stale ✓ can't mislead.
+  let testState = $state<"idle" | "testing" | "ok" | "error">("idle");
+  let testError = $state("");
+
+  async function onTestKey() {
+    if (testState === "testing") return;
+    testState = "testing";
+    testError = "";
+    try {
+      await llmTestKey(llmApiKey);
+      testState = "ok";
+    } catch (e: any) {
+      testError = typeof e === "string" ? e : e?.message ?? String(e);
+      testState = "error";
+    }
+  }
+
+  function onApiKeyInput(v: string) {
+    testState = "idle";
+    testError = "";
+    onchangeapikey(v);
   }
 </script>
 
@@ -143,6 +182,58 @@
         <p class="hint">
           When on, each page in the exported file is headed with its filename
           and OCR stats. Turn off to export recognized text only.
+        </p>
+      </section>
+
+      <section class="sec">
+        <span class="lbl">AI spell check</span>
+        <div class="key-row">
+          <input
+            class="key-input"
+            type="password"
+            placeholder="Google AI Studio API key"
+            spellcheck="false"
+            autocomplete="off"
+            value={llmApiKey}
+            oninput={(e) => onApiKeyInput(e.currentTarget.value)}
+          />
+          <button
+            class="upd-btn test-btn"
+            onclick={onTestKey}
+            disabled={testState === "testing" || !llmApiKey.trim()}
+            title="Verify the key with a minimal Gemini request (gemma-4-31b-it)"
+          >
+            {testState === "testing" ? "Testing…" : "Test"}
+          </button>
+        </div>
+        {#if testState === "ok"}
+          <p class="test-result ok">✓ API key works.</p>
+        {:else if testState === "error"}
+          <p class="test-result err">{testError}</p>
+        {/if}
+        <p class="hint">
+          Powers the "AI Check" toolbar tool, which sends recognized text to
+          Gemini to find spelling errors — the model is chosen in the AI Check
+          dialog. This is the app's only online feature — get a free key at
+          aistudio.google.com. The key stays on this machine and is sent only
+          to Google's API.
+        </p>
+      </section>
+
+      <section class="sec">
+        <span class="lbl">Toolbar</span>
+        <label class="row">
+          <input
+            type="checkbox"
+            checked={showFixSpelling}
+            onchange={(e) => onchangeShowfixspelling(e.currentTarget.checked)}
+          />
+          <span>Show "Fix spelling" toggle</span>
+        </label>
+        <p class="hint">
+          The Burmese spelling-fix checkbox appears in the toolbar only for
+          Myanmar. Hide it here if you don't use the offline fix — the AI
+          Check panel works either way, and the toggle's last state is kept.
         </p>
       </section>
 
@@ -226,6 +317,11 @@
   }
   .modal {
     width: min(420px, 100%);
+    /* Cap the modal so tall stacks of sections never outgrow the window;
+     * the header stays pinned and the body scrolls. */
+    max-height: min(85vh, 640px);
+    display: flex;
+    flex-direction: column;
     background: var(--bg-elev);
     border: 1px solid var(--border-strong);
     border-radius: 14px;
@@ -238,6 +334,7 @@
     justify-content: space-between;
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
   h2 {
     margin: 0;
@@ -258,6 +355,9 @@
   }
   .body {
     padding: 8px 20px 20px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
   .sec {
     padding: 14px 0;
@@ -292,6 +392,30 @@
     color: var(--text-faint);
     line-height: 1.4;
   }
+  .key-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .key-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    font-family: var(--mono);
+    padding: 6px 9px;
+    border-radius: 6px;
+  }
+  .test-btn {
+    flex-shrink: 0;
+  }
+  .test-result {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .test-result.ok { color: var(--ok); }
+  .test-result.err { color: var(--danger); }
   .seg {
     display: flex;
     background: var(--bg-inset);

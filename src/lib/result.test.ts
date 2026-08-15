@@ -1,4 +1,4 @@
-import { plainText, plainTextWithFix, formatDuration, type LineBox, type OcrResult } from "./result";
+import { plainText, plainTextWithFix, formatDuration, applyWordFixes, type LineBox, type OcrResult } from "./result";
 import { describe, it, expect } from "vitest";
 
 /** Build a LineBox with the geometry the paragraph heuristic reasons about. */
@@ -222,5 +222,109 @@ describe("formatDuration — adaptive ms → human string", () => {
   it("rolls 59.6s up to the next minute rather than '0m 60s'", () => {
     // 59.95s rounds to 60s — must bump the minute, not print "0m 60s".
     expect(formatDuration(59950)).toBe("1m 00s");
+  });
+});
+
+// ── applyWordFixes (AI spell-check projection) ─────────────────────────────
+
+describe("applyWordFixes", () => {
+  it("replaces every occurrence of each wrong word across all lines", () => {
+    const { lines, count } = applyWordFixes(
+      ["teh cat", "teh dog and teh bone"],
+      [{ wrong: "teh", correct: "the" }],
+    );
+    expect(lines).toEqual(["the cat", "the dog and the bone"]);
+    expect(count).toBe(3);
+  });
+
+  it("applies multiple fixes and counts each separately", () => {
+    const { lines, count } = applyWordFixes(
+      ["recogntion is haard"],
+      [
+        { wrong: "recogntion", correct: "recognition" },
+        { wrong: "haard", correct: "hard" },
+      ],
+    );
+    expect(lines).toEqual(["recognition is hard"]);
+    expect(count).toBe(2);
+  });
+
+  it("replaces unspaced substrings (Burmese-style, no word boundaries)", () => {
+    const { lines, count } = applyWordFixes(["အတာတ်ကို"], [
+      { wrong: "တာတ်", correct: "ထာတ်" },
+    ]);
+    expect(lines).toEqual(["အထာတ်ကို"]);
+    expect(count).toBe(1);
+  });
+
+  it("stacks on pre-fixed basis lines without mutating the input", () => {
+    const basis = ["teh cat"];
+    const { lines } = applyWordFixes(basis, [{ wrong: "cat", correct: "dog" }]);
+    expect(lines).toEqual(["teh dog"]);
+    expect(basis).toEqual(["teh cat"]); // pure — input untouched
+  });
+
+  it("ignores empty and no-op fixes", () => {
+    const { lines, count } = applyWordFixes(
+      ["same text"],
+      [
+        { wrong: "", correct: "x" }, // empty wrong — would replace everywhere
+        { wrong: "same", correct: "same" }, // identical pair — no-op
+        { wrong: "absent", correct: "missing" }, // not present
+      ],
+    );
+    expect(lines).toEqual(["same text"]);
+    expect(count).toBe(0);
+  });
+
+  it("leaves lines without any match unchanged", () => {
+    const { lines, count } = applyWordFixes(["clean", "also clean"], [
+      { wrong: "dirty", correct: "clean" },
+    ]);
+    expect(lines).toEqual(["clean", "also clean"]);
+    expect(count).toBe(0);
+  });
+});
+
+describe("applyWordFixes — line-addressed fixes", () => {
+  it("replaces only on the addressed line, leaving other lines untouched", () => {
+    // The exact Burmese-substring case: the word occurs on both lines, but
+    // only line 2's occurrence is flagged.
+    const { lines, count } = applyWordFixes(
+      ["တို ပထမ", "တို ဒုတိယ"],
+      [{ wrong: "တို", correct: "တို့", line: 2 }],
+    );
+    expect(lines).toEqual(["တို ပထမ", "တို့ ဒုတိယ"]);
+    expect(count).toBe(1);
+  });
+
+  it("allows the same word on different lines to get different corrections", () => {
+    const { lines, count } = applyWordFixes(
+      ["teh first", "teh second"],
+      [
+        { wrong: "teh", correct: "the", line: 1 },
+        { wrong: "teh", correct: "ten", line: 2 },
+      ],
+    );
+    expect(lines).toEqual(["the first", "ten second"]);
+    expect(count).toBe(2);
+  });
+
+  it("treats an out-of-range line as a no-op", () => {
+    const { lines, count } = applyWordFixes(
+      ["same"],
+      [{ wrong: "same", correct: "other", line: 7 }],
+    );
+    expect(lines).toEqual(["same"]);
+    expect(count).toBe(0);
+  });
+
+  it("falls back to page-wide replacement when line is absent", () => {
+    const { lines, count } = applyWordFixes(
+      ["teh one", "teh two"],
+      [{ wrong: "teh", correct: "the" }],
+    );
+    expect(lines).toEqual(["the one", "the two"]);
+    expect(count).toBe(2);
   });
 });

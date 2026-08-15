@@ -1,0 +1,1225 @@
+<script lang="ts">
+  import {
+    llmSpellCheck,
+    llmRewritePages,
+    LLM_MODELS,
+    LLM_BATCH_SIZES,
+    type AiCheckMode,
+    type Job,
+    type LlmBatchSize,
+    type LlmModel,
+    type LlmWordFix,
+  } from "./ocr";
+  import { applyWordFixes } from "./result";
+  import { diffWords } from "./diff";
+
+  interface Props {
+    /** The full batch (only done jobs with recognized lines are checked). */
+    jobs: Job[];
+    /** Google AI Studio API key from Settings ("" = not configured). */
+    apiKey: string;
+    /** Chosen Gemini flash model id — picked here via two-way binding,
+     *  persisted globally by App. Bindable (not value+callback) so the
+     *  <select> never desyncs from the state. */
+    model: LlmModel;
+    /** Pages per Gemini request, picked here via two-way binding. */
+    batchSize: LlmBatchSize;
+    /** Fix mode: "review" (wrong→correct word pairs) or "rewrite" (the model
+     *  returns each page's corrected text). Picked here, persisted by App. */
+    mode: AiCheckMode;
+    /** Hide the panel (✕ or Esc). */
+    onclose: () => void;
+    /** Open the Settings modal (from the no-key notice). */
+    onopensettings: () => void;
+    /** Select a page's job so the Preview/thumbnail panels track it —
+     *  called as the review cursor moves, keeping the image, text and fix
+     *  list pointed at the same page. */
+    onselectpage: (jobId: number) => void;
+    /** Reports the current suggestions (jobId → wrong words) so the Text
+     *  panel can highlight flagged words in the page text. Called whenever
+     *  the suggestion set changes (new results, re-check). */
+    onsuggestions: (wrong: Record<number, string[]>) => void;
+  }
+  let {
+    jobs,
+    apiKey,
+    model = $bindable(),
+    batchSize = $bindable(),
+    mode = $bindable(),
+    onclose,
+    onopensettings,
+    onselectpage,
+    onsuggestions,
+  }: Props = $props();
+
+  /** A reviewable wrong→correct pair plus its checkbox state. */
+  interface FixItem extends LlmWordFix {
+    checked: boolean;
+  }
+
+  /** All suggestions for one page, in batch order. Pages the model found no
+   *  errors on get an empty `fixes` list so the user sees they were checked. */
+  interface PageReview {
+    jobId: number;
+    name: string;
+    fixes: FixItem[];
+  }
+
+  type Phase = "ready" | "checking" | "review" | "applied";
+
+  let phase = $state<Phase>("ready");
+  let suggestions = $state<PageReview[]>([]);
+  let progress = $state<{ current: number; total: number } | null>(null);
+  let error = $state<string | null>(null);
+  let cancelRequested = $state(false);
+  let applied = $state<{ pages: number; fixes: number } | null>(null);
+  // The mode the CURRENT results were produced with — captured at check
+  // start so validation/apply/display stay correct even if the user flips
+  // the toggle mid-review.
+  let checkMode = $state<AiCheckMode>("review");
+  // Jobs whose llmFix was set by THIS rewrite-mode check — drives the
+  // "Undo all" control (instant apply needs an escape hatch).
+  let appliedJobIds = $state<number[]>([]);
+
+  let hasKey = $derived(apiKey.trim().length > 0);
+  // Quota/rate-limit errors (parsed + phrased by the backend from Gemini's
+  // QuotaFailure details). A daily free-tier cap can't be retried today, so
+  // the banner swaps to a neutral tone and hides Retry.
+  let quotaError = $derived(!!error && /daily limit|quota/i.test(error));
+  let modelLabel = $derived(
+    LLM_MODELS.find((m) => m.value === model)?.label ?? model,
+  );
+  // Pages eligible for checking: completed with at least one recognized line.
+  let checkable = $derived(
+    jobs.filter(
+      (j) => j.status === "done" && j.result && j.result.lines.length > 0,
+    ),
+  );
+
+  let selectedCount = $derived(
+    suggestions.reduce((n, s) => n + s.fixes.filter((f) => f.checked).length, 0),
+  );
+  let totalFixCount = $derived(
+    suggestions.reduce((n, s) => n + s.fixes.length, 0),
+  );
+  let pagesWithFixes = $derived(
+    suggestions.filter((s) => s.fixes.length > 0).length,
+  );
+
+  /**
+   * The basis lines for a page: whatever the user currently sees — the
+   * spell-fix projection when that toggle is on, raw lines otherwise.
+   * Reviewing and fixing the displayed text keeps the review honest and
+   * lets AI fixes stack on top of the offline spell-fix.
+   */
+  function basisLines(job: Job): string[] {
+    return job.spellFix?.fixedLines ?? job.result!.lines.map((l) => l.text);
+  }
+
+  function pageText(job: Job): string {
+    return basisLines(job).join("\n");
+  }
+
+  /**
+   * Check every completed page: batch the jobs (the user-chosen
+   * `batchSize` pages per request, sequentially so Stop takes effect between
+   * batches) and ask Gemini to proofread them. In "review" mode the model
+   * returns wrong→correct word pairs; in "rewrite" mode it returns each
+   * page's corrected text, which we diff per line into change rows (old →
+   * new) — the review UI and apply path stay uniform. A batch failure keeps
+   * the already-collected pages reviewable — the error shows alongside the
+   * results rather than discarding them.
+   */
+  async function startCheck() {
+    if (!checkable.length || !hasKey) return;
+    cancelRequested = false;
+    checkMode = mode;
+    appliedJobIds = [];
+    phase = "checking";
+    error = null;
+    applied = null;
+    suggestions = [];
+    const batches: Job[][] = [];
+    for (let i = 0; i < checkable.length; i += batchSize) {
+      batches.push(checkable.slice(i, i + batchSize));
+    }
+    progress = { current: 0, total: batches.length };
+    let cancelled = false;
+    try {
+      for (let b = 0; b < batches.length; b++) {
+        if (cancelRequested) {
+          cancelled = true;
+          break;
+        }
+        // Tick before the request so progress reflects work starting, not
+        // finishing (same convention as the batch Run All counter).
+        progress = { current: b + 1, total: batches.length };
+        const batch = batches[b];
+        const texts = batch.map(pageText);
+        if (checkMode === "rewrite") {
+          const result = await llmRewritePages(apiKey, model, texts);
+          for (let i = 0; i < batch.length; i++) {
+            const job = batch[i];
+            const newLines =
+              result.find((p) => p.page === i + 1)?.lines ?? null;
+            const basis = basisLines(job);
+            const fixes: FixItem[] = [];
+            if (newLines) {
+              // Diff per line; a short/long response degrades gracefully
+              // (extra lines ignored, missing lines stay original).
+              const n = Math.min(newLines.length, basis.length);
+              let changed = 0;
+              const out = [...basis];
+              for (let l = 0; l < n; l++) {
+                if (newLines[l] !== basis[l]) {
+                  // Whitespace-only differences (trailing spaces, line-number
+                  // echo remnants) are noise — don't create ghost rows.
+                  if (newLines[l].trim() === basis[l].trim()) continue;
+                  fixes.push({
+                    wrong: basis[l],
+                    correct: newLines[l],
+                    line: l + 1,
+                    checked: true,
+                  });
+                  out[l] = newLines[l];
+                  changed += 1;
+                }
+              }
+              // Rewrite mode applies instantly — the corrected text lands in
+              // the Text panel the moment the batch returns. The diff rows
+              // below are an audit view; "Undo all" reverts.
+              if (changed > 0) {
+                job.llmFix = { fixedLines: out, fixes: changed };
+                appliedJobIds = [...appliedJobIds, job.id];
+              }
+            }
+            // Only pages with actual diffs enter the list — clean pages
+            // aren't shown at all in this mode (the "No changes needed"
+            // notice covers the all-clean case).
+            if (fixes.length) {
+              suggestions.push({ jobId: job.id, name: job.name, fixes });
+            }
+          }
+        } else {
+          const result = await llmSpellCheck(apiKey, model, texts);
+          for (let i = 0; i < batch.length; i++) {
+            const fixes = (result.find((p) => p.page === i + 1)?.fixes ?? []).map(
+              (f) => ({ ...f, checked: true }),
+            );
+            suggestions.push({ jobId: batch[i].id, name: batch[i].name, fixes });
+          }
+        }
+      }
+    } catch (e: any) {
+      error = typeof e === "string" ? e : e?.message ?? String(e);
+    }
+    progress = null;
+    // A stop before anything came back just returns to the start screen.
+    if (cancelled && !suggestions.length && !error) {
+      phase = "ready";
+      return;
+    }
+    phase = "review";
+  }
+
+  /** Stop after the in-flight batch; collected pages stay reviewable. */
+  function stopCheck() {
+    cancelRequested = true;
+  }
+
+  /** Revert every llmFix this rewrite-mode check applied. The diff rows stay
+   *  as a reference of what the model proposed. */
+  function undoAll() {
+    for (const id of appliedJobIds) {
+      const job = jobs.find((j) => j.id === id);
+      if (job) job.llmFix = null;
+    }
+    appliedJobIds = [];
+  }
+
+  /**
+   * Apply the checked items. For each page with ≥1 checked item, transform
+   * that job's basis lines (spell-fixed when present, raw otherwise) and
+   * cache the result on `job.llmFix` — a display-time projection exactly
+   * like the offline spell-fix; `job.result` is never mutated. The Text
+   * panel and exports pick the projection up reactively.
+   *
+   * Review mode replaces wrong→correct word pairs (line-scoped when the
+   * model addressed a line). Rewrite mode replaces whole lines: `correct` is
+   * the model's new line text, `line` picks the slot.
+   */
+  function applyFixes() {
+    let pages = 0;
+    let fixes = 0;
+    for (const s of suggestions) {
+      // Invalid rows (edited wrong-word no longer in the page) are excluded —
+      // they're unchecked automatically, this is belt-and-braces.
+      const checked = s.fixes.filter(
+        (f, i) => f.checked && !invalidKeys.has(`${s.jobId}:${i}`),
+      );
+      if (!checked.length) continue;
+      const job = jobs.find((j) => j.id === s.jobId);
+      if (!job?.result) continue; // job was removed mid-review — skip
+      const base = basisLines(job);
+      let fixedLines: string[];
+      let jobCount: number;
+      if (checkMode === "rewrite") {
+        // Direct line replacement; the count is changed lines.
+        const out = [...base];
+        let count = 0;
+        for (const f of checked) {
+          if (f.line == null || f.line < 1 || f.line > out.length) continue;
+          out[f.line - 1] = f.correct;
+          count += 1;
+        }
+        fixedLines = out;
+        jobCount = count;
+      } else {
+        const { lines, count } = applyWordFixes(base, checked);
+        fixedLines = lines;
+        jobCount = count;
+      }
+      job.llmFix = { fixedLines, fixes: jobCount };
+      pages += 1;
+      fixes += jobCount;
+    }
+    applied = { pages, fixes };
+    phase = "applied";
+  }
+
+  function pageCheckedCount(s: PageReview): number {
+    return s.fixes.filter((f) => f.checked).length;
+  }
+
+  // ── Keyboard review ────────────────────────────────────────────────────────
+  // Focus-independent cursor over the flattened list of checkbox rows (each
+  // page's select-all row + its fix rows). Window-level keys drive it so
+  // ↑/↓/Space/Enter work no matter where — or whether — DOM focus sits; the
+  // cursor is rendered as a highlight rather than relying on native focus.
+  // Clicking a row also moves the cursor (see the onclick handlers), so mouse
+  // and keyboard share one selection instead of two competing highlights.
+  let pagesEl = $state<HTMLElement | null>(null);
+
+  interface CursorRow {
+    /** Stable per-row key: "<jobId>:all" for a page select-all, "<jobId>:<i>" for fix i. */
+    key: string;
+    s: PageReview;
+    /** Fix index within the page; -1 for the page select-all row. */
+    i: number;
+  }
+
+  let flatRows = $derived.by(() => {
+    const rows: CursorRow[] = [];
+    for (const s of suggestions) {
+      if (s.fixes.length) rows.push({ key: `${s.jobId}:all`, s, i: -1 });
+      s.fixes.forEach((_, i) => rows.push({ key: `${s.jobId}:${i}`, s, i }));
+    }
+    return rows;
+  });
+
+  let cursorKey = $state("");
+
+  // ── Inline correction editing ──────────────────────────────────────────────
+  // Both words read as plain text; double-click turns either into an input.
+  // Enter or blur commits, Escape reverts to the pre-edit value. editKey uses
+  // the cursor's "<jobId>:<i>" scheme plus a field suffix (":w" / ":c").
+  let editKey = $state<string | null>(null);
+  let editOriginal = $state("");
+
+  function startEdit(key: string, value: string) {
+    editOriginal = value;
+    editKey = key;
+  }
+
+  /** Focus + select the freshly-opened editor so typing replaces the word. */
+  function autofocusSelect(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+    return {};
+  }
+
+  // ── Edited-wrong-word validation ───────────────────────────────────────────
+  // A fix needs its `wrong` to occur where it's addressed: on its `line`
+  // when the model gave one, anywhere on the page otherwise. The backend
+  // pre-validates what the model returned, but a user EDIT can break the
+  // match — so track invalid rows live, dim them, and exclude them from
+  // Apply. Rewrite-mode rows replace the whole line by index, so only the
+  // line index needs to be in range there (`wrong` is just the old-line
+  // snapshot for display and may legitimately be an empty line).
+  let invalidKeys = $derived.by(() => {
+    const invalid = new Set<string>();
+    for (const s of suggestions) {
+      const job = jobs.find((j) => j.id === s.jobId);
+      if (!job?.result) continue;
+      const lines = basisLines(job);
+      s.fixes.forEach((f, i) => {
+        let ok: boolean;
+        if (checkMode === "rewrite") {
+          ok = f.line != null && f.line >= 1 && f.line <= lines.length;
+        } else {
+          ok =
+            f.line != null
+              ? f.line >= 1 &&
+                f.line <= lines.length &&
+                lines[f.line - 1].includes(f.wrong)
+              : !!f.wrong && lines.some((l) => l.includes(f.wrong));
+        }
+        if (!ok) invalid.add(`${s.jobId}:${i}`);
+      });
+    }
+    return invalid;
+  });
+
+  // Uncheck invalid rows as they become invalid — a checked-but-unappliable
+  // fix would silently vanish at Apply and read as a bug.
+  $effect(() => {
+    for (const s of suggestions) {
+      s.fixes.forEach((f, i) => {
+        if (f.checked && invalidKeys.has(`${s.jobId}:${i}`)) f.checked = false;
+      });
+    }
+  });
+
+  // Keep the cursor valid: point it at the first row when the review list
+  // appears (or when its row disappears because suggestions were replaced).
+  $effect(() => {
+    if (phase === "review" && flatRows.length && !flatRows.some((r) => r.key === cursorKey)) {
+      cursorKey = flatRows[0].key;
+    }
+  });
+
+  function moveCursor(delta: number) {
+    if (!flatRows.length) return;
+    let idx = flatRows.findIndex((r) => r.key === cursorKey);
+    idx = Math.min(flatRows.length - 1, Math.max(0, (idx === -1 ? 0 : idx) + delta));
+    cursorKey = flatRows[idx].key;
+    pagesEl
+      ?.querySelector(`[data-key="${cursorKey}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }
+
+  // Sync the Preview/thumbnail panels with the review cursor: whatever row
+  // the cursor sits on (after ↑/↓ or a click), that page gets selected so
+  // its image shows beside the fixes being reviewed.
+  $effect(() => {
+    if (phase !== "review" || !cursorKey) return;
+    const row = flatRows.find((r) => r.key === cursorKey);
+    if (row) onselectpage(row.s.jobId);
+  });
+
+  // Publish the flagged wrong words per page so the Text panel can
+  // highlight them while reviewing. Review mode only — rewrite mode applies
+  // instantly, so the old text (and its highlights) is already replaced.
+  $effect(() => {
+    if (checkMode !== "review") return;
+    const map: Record<number, string[]> = {};
+    for (const s of suggestions) {
+      if (s.fixes.length) {
+        map[s.jobId] = [...new Set(s.fixes.map((f) => f.wrong))];
+      }
+    }
+    onsuggestions(map);
+  });
+
+  /** Toggle the row under the cursor (a single fix, or a page's select-all). */
+  function toggleCursor() {
+    const row = flatRows.find((r) => r.key === cursorKey);
+    if (!row) return;
+    if (row.i === -1) togglePage(row.s, !pageAllChecked(row.s));
+    else row.s.fixes[row.i].checked = !row.s.fixes[row.i].checked;
+  }
+
+  function pageAllChecked(s: PageReview): boolean {
+    return s.fixes.length > 0 && s.fixes.every((f) => f.checked);
+  }
+
+  function togglePage(s: PageReview, on: boolean) {
+    for (const f of s.fixes) f.checked = on;
+  }
+
+  function setAll(on: boolean) {
+    for (const s of suggestions) togglePage(s, on);
+  }
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (phase !== "checking") onclose();
+      return;
+    }
+    if (phase !== "review" || !flatRows.length) return;
+
+    // When a real control has focus, let the browser handle its keys
+    // natively (Space clicks a focused button, Enter opens a select) and
+    // skip our global handling so actions never double-fire. Checkboxes are
+    // exempt: native arrows do nothing there, so the cursor stays ours.
+    // Text inputs (the editable corrections) and the Text panel's textarea
+    // are also exempt — typing must reach the field, not toggle rows.
+    const t = e.target as HTMLElement | null;
+    const onNativeControl =
+      !!t &&
+      (t.tagName === "BUTTON" ||
+        t.tagName === "SELECT" ||
+        t.tagName === "TEXTAREA" ||
+        (t.tagName === "INPUT" && (t as HTMLInputElement).type === "text"));
+
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (onNativeControl) return;
+      e.preventDefault();
+      moveCursor(e.key === "ArrowDown" ? 1 : -1);
+    } else if (e.key === " " || e.code === "Space") {
+      if (onNativeControl || checkMode === "rewrite") return; // nothing to toggle
+      e.preventDefault(); // keep the panel from scrolling
+      toggleCursor();
+    } else if (e.key === "Enter" && selectedCount > 0 && checkMode === "review") {
+      if (onNativeControl) return;
+      e.preventDefault();
+      applyFixes();
+    }
+  }
+</script>
+
+<svelte:window onkeydown={onKey} />
+
+<section class="panel" role="region" aria-label="AI spell check">
+  <div class="head">
+    <span class="title">AI Check</span>
+    <!-- Model chip only when the model selector isn't on screen (checking /
+         review / applied). In the ready phase it would sit right above the
+         selector and crowd it in a narrow panel. -->
+    {#if phase !== "ready"}
+      <span class="model-chip" title="Gemini model — change on the start screen">{modelLabel}</span>
+    {/if}
+    <button class="close" onclick={onclose} aria-label="Close AI check panel">✕</button>
+  </div>
+
+  <div class="body">
+    {#if phase === "ready"}
+      {#if !hasKey}
+        <div class="notice">
+          <p><strong>No API key configured.</strong></p>
+          <p class="hint">
+            The AI check sends recognized text to Gemini (Google AI Studio)
+            to find spelling errors. Add your free API key in Settings —
+            this is the app's only online feature.
+          </p>
+          <button class="btn primary" onclick={onopensettings}>
+            Open Settings
+          </button>
+        </div>
+      {:else if checkable.length === 0}
+        <div class="notice">
+          <p>No pages with recognized text yet.</p>
+          <p class="hint">Run OCR on at least one image, then check it here.</p>
+        </div>
+      {:else}
+          <div class="intro">
+            <p>
+              {checkable.length}
+              {checkable.length === 1 ? "page" : "pages"} will be proofread by
+              Gemini.
+            </p>
+            <div class="seg" role="radiogroup" aria-label="Fix mode">
+              <button
+                class="seg-btn"
+                class:active={mode === "review"}
+                onclick={() => (mode = "review")}
+                role="radio"
+                aria-checked={mode === "review"}
+                title="The model returns wrong→correct word pairs you pick from"
+              >Review fixes</button>
+              <button
+                class="seg-btn"
+                class:active={mode === "rewrite"}
+                onclick={() => (mode = "rewrite")}
+                role="radio"
+                aria-checked={mode === "rewrite"}
+                title="The model returns each page's corrected text; changed lines are listed for review"
+              >Rewrite text</button>
+            </div>
+            <p class="hint">
+              {#if mode === "review"}
+                Gemini returns only the words it believes are wrong, with a
+                suggested correction — you review and pick which to apply.
+              {:else}
+                Gemini rewrites each page's text — catches punctuation,
+                spacing and phrasing too. Changed lines are listed for review
+                before applying; this uses more output tokens, so prefer a
+                smaller batch size.
+              {/if}
+            </p>
+            <div class="opts">
+            <label class="opt">
+              <span class="opt-lbl">Model</span>
+              <select bind:value={model}>
+                {#each LLM_MODELS as m}
+                  <option value={m.value}>{m.label}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="opt">
+              <span class="opt-lbl">Pages/req</span>
+              <select
+                bind:value={batchSize}
+                title="Fewer pages per request is steadier; more is faster but risks output limits"
+              >
+                {#each LLM_BATCH_SIZES as s}<option value={s}>{s}</option>{/each}
+              </select>
+            </label>
+            <span class="hint req-hint">
+              → {Math.ceil(checkable.length / batchSize)}
+              {Math.ceil(checkable.length / batchSize) === 1 ? "request" : "requests"}
+            </span>
+          </div>
+          <button class="btn primary" onclick={startCheck}>
+            Start Check
+          </button>
+        </div>
+      {/if}
+    {:else if phase === "checking"}
+      <div class="checking">
+        <span class="spin" aria-hidden="true"></span>
+        <div class="check-progress">
+          <p>
+            Checking batch {progress?.current ?? 0} of {progress?.total ?? 0}…
+          </p>
+          <div
+            class="bar"
+            role="progressbar"
+            aria-valuenow={progress?.current ?? 0}
+            aria-valuemin={0}
+            aria-valuemax={progress?.total ?? 1}
+          >
+            <div
+              class="fill"
+              style="width:{progress && progress.total ? (progress.current / progress.total) * 100 : 0}%"
+            ></div>
+          </div>
+          <button class="btn ghost" onclick={stopCheck} disabled={cancelRequested}>
+            {cancelRequested ? "Stopping…" : "Stop"}
+          </button>
+        </div>
+      </div>
+    {:else if phase === "review"}
+      {#if error}
+        <div class="error" class:quota={quotaError}>
+          <strong>
+            {quotaError ? "Gemini quota reached." : "The check didn't finish."}
+          </strong>
+          <p>{error}</p>
+          {#if suggestions.length}
+            <p class="hint">Pages already checked are listed below — you can still review and apply their fixes.</p>
+          {/if}
+          {#if !quotaError}
+            <button class="btn ghost" onclick={startCheck}>Retry</button>
+          {/if}
+        </div>
+      {/if}
+
+      {#if suggestions.length}
+        {#if checkMode === "rewrite"}
+          <div class="controls">
+            <span class="summary">
+              {pagesWithFixes}
+              {pagesWithFixes === 1 ? "page" : "pages"} ·
+              <strong>{totalFixCount}</strong>
+              {totalFixCount === 1 ? "line" : "lines"} corrected — applied automatically
+            </span>
+            <span class="kbd-hint">↑↓ move</span>
+            <span class="spacer"></span>
+            <button class="btn ghost" onclick={startCheck}>Re-check</button>
+            <button
+              class="btn danger"
+              onclick={undoAll}
+              disabled={appliedJobIds.length === 0}
+              title="Revert every correction this check applied"
+            >Undo all</button>
+          </div>
+        {:else}
+          <div class="controls">
+            <span class="summary">
+              {pagesWithFixes}
+              {pagesWithFixes === 1 ? "page" : "pages"} ·
+              <strong>{selectedCount}</strong>/{totalFixCount} selected
+            </span>
+            <span class="kbd-hint">↑↓ move · space toggle · ⏎ apply</span>
+            <span class="spacer"></span>
+            <button class="btn ghost" onclick={() => setAll(true)}>All</button>
+            <button class="btn ghost" onclick={() => setAll(false)}>None</button>
+            <button
+              class="btn primary"
+              onclick={applyFixes}
+              disabled={selectedCount === 0}
+            >
+              Apply {selectedCount} {selectedCount === 1 ? "Fix" : "Fixes"}
+            </button>
+          </div>
+        {/if}
+
+        <div class="bind-pages" bind:this={pagesEl}>
+          <!-- Rewrite mode: only pages with actual changes — the "no changes"
+               filler sections are noise when the corrections are already
+               applied. Review mode keeps them as confirmation of coverage. -->
+          {#each checkMode === "rewrite"
+            ? suggestions.filter((s) => s.fixes.length > 0)
+            : suggestions as s (s.jobId)}
+            <section class="page">
+              <label
+                class="page-head"
+                class:muted={!s.fixes.length}
+                class:cursor={cursorKey === `${s.jobId}:all` && checkMode === "review"}
+                data-key={`${s.jobId}:all`}
+                onclick={() =>
+                  s.fixes.length && checkMode === "review" && (cursorKey = `${s.jobId}:all`)}
+              >
+                {#if s.fixes.length && checkMode === "review"}
+                  <input
+                    type="checkbox"
+                    checked={pageAllChecked(s)}
+                    onchange={(e) => togglePage(s, e.currentTarget.checked)}
+                  />
+                {:else if !s.fixes.length}
+                  <span class="ok-dot" aria-hidden="true">✓</span>
+                {/if}
+                <span class="page-name">{s.name}</span>
+                {#if s.fixes.length}
+                  <span class="page-count">
+                    {checkMode === "rewrite"
+                      ? `${s.fixes.length} ${s.fixes.length === 1 ? "line" : "lines"}`
+                      : `${pageCheckedCount(s)}/${s.fixes.length}`}
+                  </span>
+                {:else}
+                  <span class="page-ok">no changes</span>
+                {/if}
+              </label>
+              {#if s.fixes.length}
+                <ul class="fix-list">
+                  {#each s.fixes as f, i (i)}
+                    <li>
+                      {#if checkMode === "rewrite"}
+                        <!-- Audit view: corrections already applied; the row
+                             shows a word-level inline diff of old → new. -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div
+                          class="fix diffline"
+                          class:cursor={cursorKey === `${s.jobId}:${i}`}
+                          data-key={`${s.jobId}:${i}`}
+                          onclick={() => (cursorKey = `${s.jobId}:${i}`)}
+                        >
+                          <span class="line-chip" title="Line on the page">L{f.line}</span>
+                          <!-- Whole line with an inline word diff: unchanged
+                               words render plain, removed words on the danger
+                               tint, corrected words on the ok tint. -->
+                          <div class="diff-body">
+                            {#each diffWords(f.wrong, f.correct) as seg, k (k)}
+                              {#if seg.type === "del"}
+                                <span class="d-del" title="removed">{seg.text}</span>
+                              {:else if seg.type === "add"}
+                                <span class="d-add" title="corrected">{seg.text}</span>
+                              {:else if seg.type !== "gap"}
+                                <span>{seg.text}</span>
+                              {/if}
+                            {/each}
+                          </div>
+                        </div>
+                      {:else}
+                        <label
+                          class="fix"
+                          class:cursor={cursorKey === `${s.jobId}:${i}`}
+                          class:invalid={invalidKeys.has(`${s.jobId}:${i}`)}
+                          data-key={`${s.jobId}:${i}`}
+                          onclick={() => (cursorKey = `${s.jobId}:${i}`)}
+                        >
+                          <input type="checkbox" bind:checked={f.checked} />
+                          {#if f.line != null}
+                            <span class="line-chip" title="Line on the page the word appears on">L{f.line}</span>
+                          {/if}
+                          {#if editKey === `${s.jobId}:${i}:w`}
+                            <input
+                              class="word-input wrong-edit"
+                              type="text"
+                              bind:value={f.wrong}
+                              spellcheck="false"
+                              aria-label="Wrong word"
+                              use:autofocusSelect
+                              onkeydown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  editKey = null; // commit
+                                } else if (e.key === "Escape") {
+                                  e.stopPropagation();
+                                  f.wrong = editOriginal;
+                                  editKey = null;
+                                }
+                              }}
+                              onblur={() => (editKey = null)}
+                            />
+                          {:else}
+                            <span
+                              class="wrong"
+                              title="Double-click to edit — must match the page text exactly"
+                              ondblclick={() => startEdit(`${s.jobId}:${i}:w`, f.wrong)}
+                            >{f.wrong}</span>
+                          {/if}
+                          <span class="arrow" aria-hidden="true">→</span>
+                          {#if editKey === `${s.jobId}:${i}:c`}
+                            <input
+                              class="word-input correct-edit"
+                              type="text"
+                              bind:value={f.correct}
+                              spellcheck="false"
+                              aria-label="Corrected word"
+                              use:autofocusSelect
+                              oninput={() => {
+                                // Editing an unchecked row signals intent to
+                                // apply the edited correction.
+                                if (!f.checked) f.checked = true;
+                              }}
+                              onkeydown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  editKey = null; // commit
+                                } else if (e.key === "Escape") {
+                                  // Cancel the edit — and stop the window-level
+                                  // Escape from closing the whole panel.
+                                  e.stopPropagation();
+                                  f.correct = editOriginal;
+                                  editKey = null;
+                                }
+                              }}
+                              onblur={() => (editKey = null)}
+                            />
+                          {:else}
+                            <span
+                              class="correct"
+                              title="Double-click to edit the correction"
+                              ondblclick={() => startEdit(`${s.jobId}:${i}:c`, f.correct)}
+                            >{f.correct}</span>
+                          {/if}
+                          {#if invalidKeys.has(`${s.jobId}:${i}`)}
+                            <span class="invalid-note" title="This word doesn't occur in the page text, so the fix can't apply">not in page</span>
+                          {/if}
+                        </label>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      {:else if !error}
+        <div class="notice">
+          <p>
+            {checkMode === "rewrite" ? "No changes needed. ✓" : "No spelling issues found. ✓"}
+          </p>
+        </div>
+      {/if}
+    {:else if phase === "applied"}
+      <div class="notice">
+        <p>
+          <strong>
+            {applied?.fixes ?? 0}
+            {applied?.fixes === 1 ? "fix" : "fixes"}
+            applied to {applied?.pages ?? 0}
+            {applied?.pages === 1 ? "page" : "pages"}.
+          </strong>
+        </p>
+        <p class="hint">
+          Corrected text now shows in the Text panel and is included in
+          exports. Re-run OCR on a page to discard its applied fixes.
+        </p>
+        <div class="row">
+          <button class="btn ghost" onclick={startCheck}>Check Again</button>
+        </div>
+      </div>
+    {/if}
+  </div>
+</section>
+
+<style>
+  /* Panel frame — mirrors Output.svelte so the two right-hand columns read
+     as a pair under the toolbar. */
+  .panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-width: 0;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-faint);
+    margin-right: auto;
+  }
+  .model-chip {
+    font-size: 10px;
+    font-family: var(--mono);
+    color: var(--text-faint);
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+  .close {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    line-height: 1;
+  }
+  .close:hover { color: var(--text); }
+  .body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px;
+    min-height: 0;
+  }
+  .notice,
+  .intro {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 4px 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .notice p,
+  .intro p {
+    margin: 0;
+  }
+  .hint {
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.5;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+  }
+  .btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 13px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+  }
+  .btn.ghost {
+    color: var(--text-dim);
+    background: var(--surface);
+    border-color: var(--border);
+  }
+  .btn.ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .btn.primary {
+    color: var(--bg);
+    background: var(--accent);
+  }
+  .btn.primary:hover:not(:disabled) { opacity: 0.9; }
+  .btn.danger {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-color: var(--danger);
+  }
+  .btn.danger:hover:not(:disabled) {
+    color: var(--bg);
+    background: var(--danger);
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  /* Run options (model + batch size) on the ready screen. */
+  .opts {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+  .opt {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .opt select {
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    max-width: 130px;
+  }
+  .opt-lbl {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+  .req-hint {
+    font-variant-numeric: tabular-nums;
+  }
+  /* Fix-mode segmented control (same visual language as Settings). */
+  .seg {
+    display: flex;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 2px;
+    gap: 1px;
+    align-self: stretch;
+  }
+  .seg-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 5px;
+    color: var(--text-faint);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .seg-btn:hover { color: var(--text-dim); }
+  .seg-btn.active {
+    background: var(--accent-dim);
+    color: var(--bg);
+  }
+  /* Checking phase: spinner + batch progress bar + stop. */
+  .checking {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    padding: 4px 0;
+  }
+  .check-progress {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .check-progress p { margin: 0; }
+  .bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-inset);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar .fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.15s;
+  }
+  .spin {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--accent-soft);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    display: inline-block;
+    margin-top: 3px;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Review phase. */
+  .error {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+  }
+  .error p { margin: 0; font-size: 12px; }
+  /* Quota errors aren't failures to fix — neutral accent tone, no Retry. */
+  .error.quota {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: var(--accent-dim);
+  }
+  .error.quota p { color: inherit; }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    position: sticky;
+    top: -14px;
+    /* cover scrolled content behind the sticky strip */
+    margin: -14px -14px 12px;
+    padding: 10px 14px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+    z-index: 1;
+  }
+  .summary {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-right: auto;
+  }
+  .kbd-hint {
+    font-size: 10px;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+  .pages {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .page {
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+  }
+  .page-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 12px;
+    background: var(--surface);
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .page-head.muted { cursor: default; }
+  .page-head input { accent-color: var(--accent-dim); }
+  .page-name {
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: auto;
+  }
+  .page-count {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .page-ok {
+    font-size: 11px;
+    color: var(--ok);
+  }
+  .ok-dot {
+    color: var(--ok);
+    font-size: 12px;
+    width: 13px;
+    text-align: center;
+  }
+  .fix-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+  }
+  .fix {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .fix input { accent-color: var(--accent-dim); }
+  /* Line address of the flagged word — makes the scoping visible: the fix
+     applies to this line only. */
+  .line-chip {
+    font-size: 10px;
+    font-family: var(--mono);
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .arrow { color: var(--text-faint); }
+  /* Both words read as plain colored text; a dotted underline hints they're
+     editable, and double-click opens the editor. */
+  .wrong,
+  .correct {
+    font-family: var(--mono);
+    word-break: break-word;
+    flex: 1;
+    min-width: 40px;
+    border-bottom: 1px dotted var(--border-strong);
+  }
+  .wrong { color: var(--danger); }
+  .correct { color: var(--ok); }
+  /* Editor opened by double-click on either word. Field color echoes the
+     word it replaces. Clearing the correction makes "apply" delete the wrong
+     word (applyWordFixes allows an empty replacement). */
+  .word-input {
+    flex: 1;
+    min-width: 40px;
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--bg-elev);
+    border: 1px solid var(--accent-dim);
+    border-radius: 4px;
+    padding: 1px 4px;
+    outline: none;
+    color: var(--text);
+  }
+  .word-input.wrong-edit { border-color: var(--danger); }
+  /* Row whose (edited) wrong word no longer occurs in the page — dimmed and
+     excluded from Apply until the word matches the page text again. */
+  .fix.invalid { opacity: 0.55; }
+  .invalid-note {
+    font-size: 10px;
+    color: var(--danger);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  /* Rewrite-mode audit rows: word-level inline diff of the old line vs the
+     corrected one (already applied). Removed words get the danger tint,
+     corrected words the ok tint — backgrounds, not strike/underline, to keep
+     complex-script glyphs readable. */
+  .diffline { align-items: flex-start; cursor: default; }
+  .diff-body {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+  }
+  .d-del {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-radius: 3px;
+  }
+  .d-add {
+    background: var(--ok-soft);
+    color: var(--ok);
+    border-radius: 3px;
+  }
+  /* No hover highlight by design: the accent cursor (click or ↑/↓) is the
+     only row highlight, so the pointer passing over rows doesn't flash. */
+  .fix.cursor,
+  .page-head.cursor {
+    background: var(--accent-soft);
+    outline: 1px solid var(--accent-dim);
+    outline-offset: -1px;
+  }
+</style>

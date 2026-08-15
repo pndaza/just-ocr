@@ -76,6 +76,18 @@ export interface Job {
    *  count across all lines. Owned by the job so it survives selection /
    *  toggle changes. */
   spellFix: { fixedLines: string[]; fixes: number } | null;
+  /** Word-level fixes the user accepted from the AI spell check (Gemini),
+   *  applied on top of the spell-fix basis lines (`spellFix.fixedLines` when
+   *  present, raw lines otherwise). Same non-destructive projection shape as
+   *  `spellFix`: `job.result` is never mutated, and re-running OCR clears
+   *  this. Null until the user applies fixes in the AI Check panel. */
+  llmFix: { fixedLines: string[]; fixes: number } | null;
+  /** Manual edits typed into the Text panel. When set, it REPLACES all
+   *  projections (raw/spell-fix/AI-fix) for display, copy and export — the
+   *  user's hand-edited text is authoritative. Kept as whole text (not
+   *  lines) since edits are free-form; geometry overlays are unaffected.
+   *  Null until the user types; Revert clears it; re-running OCR resets it. */
+  manualText: string | null;
   error: string | null;
 }
 
@@ -92,6 +104,8 @@ export function makeJob(file: File): Promise<Job> {
     confidence: -1,
     elapsedMs: 0,
     spellFix: null,
+    llmFix: null,
+    manualText: null,
     error: null,
   }));
 }
@@ -115,6 +129,8 @@ export function makeJobsFromReadFiles(
         confidence: -1,
         elapsedMs: 0,
         spellFix: null,
+        llmFix: null,
+        manualText: null,
         error: null,
       };
     }
@@ -132,6 +148,8 @@ export function makeJobsFromReadFiles(
       confidence: -1,
       elapsedMs: 0,
       spellFix: null,
+      llmFix: null,
+      manualText: null,
       error: null,
     };
   });
@@ -264,6 +282,73 @@ export async function fixBurmeseSpelling(
   return invoke<FixResult[]>("fix_burmese_spelling", { lines });
 }
 
+// ── AI spell check (Gemini via Google AI Studio) ─────────────────────────────
+
+/** One wrong→correct word pair proposed by the LLM for a page. Mirrors the
+ *  Rust `LlmWordFix` (camelCase field names on both sides). `line` is the
+ *  1-based line within the page the model flagged — the fix applies (and is
+ *  validated) only on that line, so a short Burmese substring can't ripple
+ *  into other paragraphs of the same page. Absent → page-wide matching. */
+export interface LlmWordFix {
+  wrong: string;
+  correct: string;
+  line?: number;
+}
+
+/** All proposed corrections for one page of the batch. `page` is 1-based,
+ *  indexing into the `pages` array sent with the request. Pages the model
+ *  found no errors on are simply absent from the response. */
+export interface LlmPageFix {
+  page: number;
+  fixes: LlmWordFix[];
+}
+
+/**
+ * Ask Gemini to proofread a batch of OCR'd page texts and return wrong→correct
+ * word pairs per page. One call = one HTTP request (the backend never splits
+ * or retries), so callers batch pages themselves — the AI Check panel sends
+ * at most PAGES_PER_LLM_BATCH per call. Errors are thrown as strings from
+ * the backend (invalid key, quota, model errors are user-actionable there).
+ */
+export async function llmSpellCheck(
+  apiKey: string,
+  model: string,
+  pages: string[],
+): Promise<LlmPageFix[]> {
+  return invoke<LlmPageFix[]>("llm_spell_check", { apiKey, model, pages });
+}
+
+/** One page's fully rewritten text (direct-fix mode). `lines` parallels the
+ *  page's input lines — the model is instructed to keep the exact line
+ *  structure so the frontend can diff line-by-line. */
+export interface LlmPageText {
+  page: number;
+  lines: string[];
+}
+
+/**
+ * Direct-fix counterpart of {@link llmSpellCheck}: the model returns each
+ * page's corrected text as an array of lines instead of word pairs. The
+ * frontend diffs the lines against the originals and still reviews changes
+ * per line. Same batching rules — one call per request, callers chunk.
+ */
+export async function llmRewritePages(
+  apiKey: string,
+  model: string,
+  pages: string[],
+): Promise<LlmPageText[]> {
+  return invoke<LlmPageText[]>("llm_rewrite_pages", { apiKey, model, pages });
+}
+
+/**
+ * Verify a Google AI Studio API key with a minimal request (backend uses the
+ * cheap gemma-4-31b-it model). Resolves when the key authenticates; rejects
+ * with the backend's user-facing message (invalid key, quota, network…).
+ */
+export async function llmTestKey(apiKey: string): Promise<void> {
+  return invoke<void>("llm_test_key", { apiKey });
+}
+
 /**
  * Write all completed jobs to a single .txt file via a native save dialog.
  *
@@ -348,12 +433,18 @@ export async function exportResults(
   // meaningful or the headers would clutter downstream processing.
   const includePageName = opts?.includePageName !== false;
   const blocks = done.map((j) => {
-    // When spell-fix is on and the job has a cached projection, export the
-    // fixed text; otherwise export raw. Honors mergeParagraphs in both cases.
+    // Projection precedence: manual edits are authoritative, then an applied
+    // AI fix (built on top of the spell-fix basis lines), then the offline
+    // spell-fix when toggled on, then raw. Honors mergeParagraphs where a
+    // line-based projection is used.
     const body =
-      opts?.fixSpelling && j.spellFix
-        ? plainTextWithFix(j.result!, j.spellFix.fixedLines, textOpts)
-        : plainText(j.result!, textOpts);
+      j.manualText != null
+        ? j.manualText
+        : j.llmFix
+          ? plainTextWithFix(j.result!, j.llmFix.fixedLines, textOpts)
+          : opts?.fixSpelling && j.spellFix
+            ? plainTextWithFix(j.result!, j.spellFix.fixedLines, textOpts)
+            : plainText(j.result!, textOpts);
     const bodyTrimmed = body.replace(/\s+$/, "");
     if (!includePageName) return bodyTrimmed;
     const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
@@ -596,6 +687,163 @@ export function lastExportIncludePageName(): boolean {
 export function saveExportIncludePageName(on: boolean): void {
   try {
     localStorage.setItem(EXPORT_INCLUDE_PAGE_NAME_KEY, on ? "true" : "false");
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+// ── AI spell check preferences (persisted) ───────────────────────────────────
+// Google AI Studio (Gemini) credentials for the AI Check tool. This is the
+// app's only online feature — everything else works fully offline. The key
+// lives in localStorage on the user's machine (like every other pref here;
+// not encrypted, never sent anywhere but Google's API) and is passed to the
+// backend per call.
+
+const LLM_API_KEY_KEY = "just-ocr:llm-api-key";
+const LLM_MODEL_KEY = "just-ocr:llm-model";
+const LLM_BATCH_SIZE_KEY = "just-ocr:llm-batch-size";
+
+/** Flash-family models offered in the AI Check dialog. The id is
+ *  interpolated into the Gemini REST path by the backend; keep the ids
+ *  exactly as Google names them. The first entry is the default (newest
+ *  flash at time of writing); "gemini-flash-latest" tracks whatever Google
+ *  ships as current. */
+export const LLM_MODELS = [
+  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
+  { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+  { value: "gemini-flash-latest", label: "Flash (latest)" },
+  { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
+  { value: "gemini-flash-lite-latest", label: "Flash Lite (latest)" },
+] as const;
+
+export type LlmModel = (typeof LLM_MODELS)[number]["value"];
+
+/** Batch sizes (pages per request) offered in the AI Check dialog. Bigger
+ *  batches mean fewer requests but risk output-token limits and make a
+ *  retry more expensive; the middle entry (30) is the default. */
+export const LLM_BATCH_SIZES = [10, 20, 30, 40, 50] as const;
+
+export type LlmBatchSize = (typeof LLM_BATCH_SIZES)[number];
+
+/** How the AI Check talks to Gemini. "review" (default) returns wrong→correct
+ *  word pairs the user picks from; "rewrite" returns each page's corrected
+ *  text, diffed per line for review — broader fixes (punctuation, spacing,
+ *  phrasing) at higher output-token cost, so smaller batches are wise. */
+export type AiCheckMode = "review" | "rewrite";
+
+/** Read the chosen batch size; defaults to 30 (LLM_BATCH_SIZES[2]).
+ * Validates the stored value so anything stale falls back to the default. */
+export function lastLlmBatchSize(): LlmBatchSize {
+  try {
+    const v = Number(localStorage.getItem(LLM_BATCH_SIZE_KEY));
+    return (
+      LLM_BATCH_SIZES.find((s) => s === v) ?? LLM_BATCH_SIZES[2]
+    );
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return LLM_BATCH_SIZES[2];
+  }
+}
+
+/** Persist the chosen batch size so it is pre-selected on next launch. */
+export function saveLlmBatchSize(size: LlmBatchSize): void {
+  try {
+    localStorage.setItem(LLM_BATCH_SIZE_KEY, String(size));
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+const AI_CHECK_MODE_KEY = "just-ocr:ai-check-mode";
+
+/** Read the AI Check mode preference; defaults to "review" (word pairs). */
+export function lastAiCheckMode(): AiCheckMode {
+  try {
+    return localStorage.getItem(AI_CHECK_MODE_KEY) === "rewrite"
+      ? "rewrite"
+      : "review";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return "review";
+  }
+}
+
+/** Persist the AI Check mode so it is pre-selected on next launch. */
+export function saveAiCheckMode(mode: AiCheckMode): void {
+  try {
+    localStorage.setItem(AI_CHECK_MODE_KEY, mode);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the stored Google AI Studio API key, or "" if unset. */
+export function lastLlmApiKey(): string {
+  try {
+    return localStorage.getItem(LLM_API_KEY_KEY) ?? "";
+  } catch {
+    // storage may be unavailable (private mode) — behave as unset
+    return "";
+  }
+}
+
+/** Persist the API key so the AI Check tool is usable on next launch. */
+export function saveLlmApiKey(key: string): void {
+  try {
+    localStorage.setItem(LLM_API_KEY_KEY, key);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+/** Read the chosen flash model; defaults to the first entry in LLM_MODELS.
+ * Validates the stored value so a retired model id falls back gracefully. */
+export function lastLlmModel(): LlmModel {
+  try {
+    const v = localStorage.getItem(LLM_MODEL_KEY);
+    return (
+      LLM_MODELS.find((m) => m.value === v)?.value ?? LLM_MODELS[0].value
+    );
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return LLM_MODELS[0].value;
+  }
+}
+
+/** Persist the chosen model so it is pre-selected on next launch. */
+export function saveLlmModel(model: LlmModel): void {
+  try {
+    localStorage.setItem(LLM_MODEL_KEY, model);
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+// ── Toolbar "Fix spelling" visibility (persisted) ────────────────────────────
+// Whether the Myanmar "Fix spelling" checkbox appears in the toolbar. Some
+// users never use the offline Burmese fix (or find the toolbar crowded), so
+// it can be tucked away here. Default true — the toggle's behavior itself is
+// unchanged and stays sticky independently.
+
+const SHOW_FIX_SPELLING_KEY = "just-ocr:show-fix-spelling";
+
+/** Read the toolbar "Fix spelling" visibility preference; defaults to true. */
+export function lastShowFixSpelling(): boolean {
+  try {
+    const v = localStorage.getItem(SHOW_FIX_SPELLING_KEY);
+    // Default true: null/absent → show. Explicit "false" → hide.
+    return v !== "false";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return true;
+  }
+}
+
+/** Persist the toolbar "Fix spelling" visibility preference. */
+export function saveShowFixSpelling(on: boolean): void {
+  try {
+    localStorage.setItem(SHOW_FIX_SPELLING_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

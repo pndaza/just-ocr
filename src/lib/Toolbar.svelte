@@ -15,6 +15,9 @@
      *  toggle for other languages. Changes what the engine returns (not just
      *  the display projection). */
     fixBurmeseSpelling: boolean;
+    /** Whether the "Fix spelling" checkbox appears here at all — controlled
+     *  from Settings. Hiding it doesn't change the toggle's own state. */
+    showFixSpelling: boolean;
     /** Current/total counter shown beside "Processing" during a batch run.
      *  Null for single runs (Run Current) so no counter appears. */
     batchProgress: { current: number; total: number } | null;
@@ -26,6 +29,11 @@
     onruncurrent: () => void;
     onrunall: () => void;
     onexport: () => void;
+    /** Toggles the AI spell-check panel (Gemini) — a 4th main column. The
+     *  panel itself handles the no-key case with a pointer to Settings. */
+    onaicheck: () => void;
+    /** True while the AI Check panel is open — styles the button active. */
+    aiOpen: boolean;
     onmanagelanguages: () => void;
     onsettings: () => void;
     /** When non-null, a newer version exists — shows a badge on the gear. */
@@ -41,6 +49,7 @@
     doneCount,
     mergeParagraphs,
     fixBurmeseSpelling,
+    showFixSpelling,
     batchProgress,
     canRunCurrent,
     hasSelection,
@@ -50,6 +59,8 @@
     onruncurrent,
     onrunall,
     onexport,
+    onaicheck,
+    aiOpen,
     onmanagelanguages,
     onsettings,
     updateAvailable,
@@ -155,10 +166,11 @@
     Merge lines
   </label>
 
-  {#if isMyanmar}
+  {#if isMyanmar && showFixSpelling}
     <!-- Burmese post-OCR spelling fix (curated wrong→right word list, applied
          in the backend before the result reaches the UI). Myanmar-only: the
-         dict is Burmese, so hiding it for other languages avoids a no-op toggle. -->
+         dict is Burmese, so hiding it for other languages avoids a no-op
+         toggle. Can also be hidden entirely from Settings. -->
     <label class="check" title="Correct common Burmese recognizer errors (word list)">
       <input
         type="checkbox"
@@ -192,6 +204,17 @@
   {#if doneCount > 0}
     <button class="btn ghost" onclick={onexport} disabled={running}>
       Export ({doneCount})
+    </button>
+  {/if}
+
+  {#if doneCount > 0}
+    <button
+      class="btn ghost"
+      class:active={aiOpen}
+      onclick={onaicheck}
+      title="Toggle the AI spell-check panel (Gemini) — configure the API key in Settings"
+    >
+      ✦ AI Check
     </button>
   {/if}
 
@@ -343,6 +366,12 @@
   .btn.ghost:hover:not(:disabled) {
     color: var(--text);
     border-color: var(--border-strong);
+  }
+  /* Active (toggled-open) state for panel-toggle buttons like AI Check. */
+  .btn.ghost.active {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
   }
   .btn.primary {
     color: var(--bg);
