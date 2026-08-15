@@ -17,6 +17,10 @@
     job?.status === "done" && job.result ? job.result : null,
   );
   let showBoxes = $derived(!!parsed && parsed.lines.length > 0);
+  // Whether the line boxes/polys are drawn. Independent of `showBoxes` (which
+  // just says boxes EXIST for this result) so hiding keeps zoom/pan state on
+  // the SVG intact — only the strokes disappear.
+  let overlayVisible = $state(true);
 
   // ── Zoom ──────────────────────────────────────────────────────────────────
   // null = "fit" (CSS caps the image to the stage). A number is an explicit
@@ -287,24 +291,26 @@
           width={parsed.width}
           height={parsed.height}
         />
-        {#each parsed.lines as b}
-          {#if b.polygon}
-            <polygon
-              points={b.polygon.map(([x, y]) => `${x},${y}`).join(" ")}
-              class="bbox"
-              vector-effect="non-scaling-stroke"
-            />
-          {:else}
-            <rect
-              x={b.x0}
-              y={b.y0}
-              width={b.x1 - b.x0}
-              height={b.y1 - b.y0}
-              class="bbox"
-              vector-effect="non-scaling-stroke"
-            />
-          {/if}
-        {/each}
+        {#if overlayVisible}
+          {#each parsed.lines as b}
+            {#if b.polygon}
+              <polygon
+                points={b.polygon.map(([x, y]) => `${x},${y}`).join(" ")}
+                class="bbox"
+                vector-effect="non-scaling-stroke"
+              />
+            {:else}
+              <rect
+                x={b.x0}
+                y={b.y0}
+                width={b.x1 - b.x0}
+                height={b.y1 - b.y0}
+                class="bbox"
+                vector-effect="non-scaling-stroke"
+              />
+            {/if}
+          {/each}
+        {/if}
       </svg>
     {:else if job}
       <img
@@ -335,6 +341,16 @@
         <span>Total <span class="sb-num">{job.elapsedMs}</span> ms</span>
       {:else if job.status === "done"}
         <span>Done in <span class="sb-num">{job.elapsedMs}</span> ms</span>
+      {/if}
+      {#if job.status === "done" && showBoxes}
+        <span class="sb-sep">·</span>
+        <button
+          class="sb-toggle"
+          class:off={!overlayVisible}
+          onclick={() => (overlayVisible = !overlayVisible)}
+          title="Show or hide the line boxes"
+          aria-pressed={overlayVisible}
+        >Boxes</button>
       {/if}
     </div>
   {/if}
@@ -469,6 +485,26 @@
   }
   .status-bar .sb-pulse {
     color: var(--accent);
+  }
+  /* Overlay visibility toggle — accent when boxes are shown, muted + struck
+     styling via the .off class so the state reads at a glance. */
+  .status-bar .sb-toggle {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 2px 8px;
+    line-height: 1;
+  }
+  .status-bar .sb-toggle:hover {
+    border-color: var(--accent-dim);
+  }
+  .status-bar .sb-toggle.off {
+    color: var(--text-faint);
+    background: var(--surface);
+    border-color: var(--border);
   }
   /* When zoomed in, allow panning and align to top-left so scroll origin is
      the image corner. Cursor is 'grab' here (and 'grabbing' while a drag is

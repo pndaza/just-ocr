@@ -8,6 +8,7 @@ use tesseract_rs::TesseractAPI;
 
 mod engine;
 mod languages;
+mod llm_fix;
 mod pdf;
 mod segmentation;
 mod segmenter_adapters;
@@ -390,6 +391,9 @@ pub fn run() {
             ocr_from_bytes,
             render_pdf,
             fix_burmese_spelling,
+            llm_fix::llm_spell_check,
+            llm_fix::llm_rewrite_pages,
+            llm_fix::llm_test_key,
             languages::list_languages,
             languages::downloadable_languages,
             languages::download_language,
