@@ -1,9 +1,13 @@
 <script lang="ts">
   import type { Job } from "./ocr";
-  import { plainText, plainTextWithFix } from "./result";
+  import { plainText, plainTextWithFix, formatDuration } from "./result";
 
   interface Props {
     job: Job | null;
+    /** All jobs in the batch (not just the selected one) — aggregated in the
+     *  bottom status bar for total processing time + spell-fixes across all
+     *  completed pages. */
+    jobs: Job[];
     /** When true, lines are grouped into paragraphs by the geometry heuristic
      *  in result.ts. Mirrors the toolbar toggle so the panel reflects the
      *  same projection used for export. */
@@ -13,7 +17,7 @@
      *  localStorage) so App remains the single source of truth for opts. */
     fixSpelling: boolean;
   }
-  let { job, mergeParagraphs, fixSpelling }: Props = $props();
+  let { job, jobs, mergeParagraphs, fixSpelling }: Props = $props();
 
   // The recognized text is a projection of the structured `OcrResult`. With
   // mergeParagraphs off, lines join with "\n" (legacy behaviour); with it on,
@@ -34,6 +38,21 @@
   // `null` otherwise (toggle off, or cache not yet computed) → no badge.
   let fixCount = $derived(
     fixSpelling && job?.spellFix ? job.spellFix.fixes : null,
+  );
+
+  // ── Batch aggregates for the bottom status bar ───────────────────────────
+  // Totals across all COMPLETED jobs (the whole batch, not just the selected
+  // page). Recomputed reactively as jobs finish or spell-fix caches populate.
+  // Mirrors the Preview panel's status bar styling so the two read as a pair.
+  let doneJobs = $derived(jobs.filter((j) => j.status === "done"));
+  let totalPages = $derived(doneJobs.length);
+  let totalMs = $derived(doneJobs.reduce((sum, j) => sum + j.elapsedMs, 0));
+  // Spell-fix total counts only when the toggle is on; otherwise the bar
+  // omits the fixes segment entirely (no point showing 0 for a disabled pass).
+  let totalFixes = $derived(
+    fixSpelling
+      ? doneJobs.reduce((sum, j) => sum + (j.spellFix?.fixes ?? 0), 0)
+      : null,
   );
 
   let copied = $state(false);
@@ -83,6 +102,21 @@
       <div class="placeholder">No text recognized. Try a different engine or image.</div>
     {/if}
   </div>
+
+  {#if totalPages > 0}
+    <!-- Batch totals across all completed pages. Mirrors the Preview status
+         bar's styling/typography so the two panels read as a pair. The fixes
+         segment appears only when spell-fix is on (otherwise omitted, not 0). -->
+    <div class="status-bar" role="status">
+      <span>{totalPages} {totalPages === 1 ? "page" : "pages"}</span>
+      <span class="sb-sep">·</span>
+      <span>Total <span class="sb-num">{formatDuration(totalMs)}</span></span>
+      {#if totalFixes !== null}
+        <span class="sb-sep">·</span>
+        <span>{totalFixes} {totalFixes === 1 ? "fix" : "fixes"}</span>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -126,6 +160,30 @@
   }
   .copy:hover:not(:disabled) { border-color: var(--accent-dim); }
   .copy:disabled { opacity: 0.4; cursor: not-allowed; }
+  /* Bottom status bar — batch totals across all completed pages. Mirrors the
+     Preview panel's status bar so the two read as a styled pair. */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .status-bar .sb-num {
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .status-bar .sb-sep {
+    color: var(--text-faint);
+    opacity: 0.6;
+  }
   .body {
     flex: 1;
     overflow-y: auto;

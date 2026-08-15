@@ -193,3 +193,36 @@ function percentile(values: number[], p: number): number {
   );
   return sorted[idx];
 }
+
+// ── Duration formatting ──────────────────────────────────────────────────────
+
+/**
+ * Format a millisecond duration for compact, human-friendly display. Adaptive
+ * so it reads well across the range OCR times span — a single page (~hundreds
+ * of ms) up through a large PDF batch (minutes):
+ *
+ *   < 1 s      → "823 ms"
+ *   1–59.9 s   → "12.3 s"
+ *   ≥ 60 s     → "2m 05s"  (minutes : zero-padded seconds)
+ *
+ * Used by the Output panel's batch status bar so a multi-minute total isn't
+ * rendered as an opaque "147000 ms".
+ */
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const s = ms / 1000;
+  // Sub-minute: one decimal (12.3 s). But the one-decimal rounding can itself
+  // roll over (59.95 → "60.0 s"), which would read as a nonsensical "sixty
+  // point zero seconds" — so if the formatted seconds are ≥ 60, fall through
+  // to the minute format instead.
+  if (s < 60) {
+    const dec = s.toFixed(1);
+    if (parseFloat(dec) < 60) return `${dec} s`;
+  }
+  // Minute-plus (or a sub-minute value that rounded up to 60s): whole seconds,
+  // "Mm SSs" with zero-padded seconds.
+  const totalSec = Math.round(s);
+  const m = Math.floor(totalSec / 60);
+  const rem = totalSec - m * 60;
+  return `${m}m ${String(rem).padStart(2, "0")}s`;
+}

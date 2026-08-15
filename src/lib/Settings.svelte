@@ -20,8 +20,20 @@
     /** Set by App's silent startup check. Pre-populates the Updates section so the
      *  user doesn't have to re-check after the badge drew them here. */
     updateAvailable: string | null;
+    /** Current value of the "include page name in export" preference. */
+    exportIncludePageName: boolean;
+    /** Called when the user toggles the export page-name preference. */
+    onchangeexportpage: (on: boolean) => void;
   }
-  let { opts, theme, onchangetheme, onclose, updateAvailable }: Props = $props();
+  let {
+    opts,
+    theme,
+    onchangetheme,
+    onclose,
+    updateAvailable,
+    exportIncludePageName,
+    onchangeexportpage,
+  }: Props = $props();
 
   // Current app version, fetched once on mount for the Updates section header.
   let appVersion = $state("");
@@ -116,6 +128,22 @@
             aria-checked={theme === "system"}
           >System</button>
         </div>
+      </section>
+
+      <section class="sec">
+        <span class="lbl">Export</span>
+        <label class="row">
+          <input
+            type="checkbox"
+            checked={exportIncludePageName}
+            onchange={(e) => onchangeexportpage(e.currentTarget.checked)}
+          />
+          <span>Include page name &amp; stats header</span>
+        </label>
+        <p class="hint">
+          When on, each page in the exported file is headed with its filename
+          and OCR stats. Turn off to export recognized text only.
+        </p>
       </section>
 
       {#if opts.language === "mya" && opts.segmenter !== "kraken"}
@@ -246,6 +274,17 @@
     letter-spacing: 0.06em;
     color: var(--text-faint);
     margin-bottom: 8px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .row input {
+    accent-color: var(--accent-dim);
   }
   .hint {
     margin: 6px 0 0;

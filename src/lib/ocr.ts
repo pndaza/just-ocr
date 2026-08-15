@@ -267,20 +267,25 @@ export async function fixBurmeseSpelling(
 /**
  * Write all completed jobs to a single .txt file via a native save dialog.
  *
- * Each completed job becomes a block:
+ * Each completed job becomes a block. With `includePageName` (default true),
+ * the block is headed:
  *
  *     === filename  (90% conf, 120 ms) ===
  *     <recognized text, with merge-paragraphs + spell-fix projection applied>
  *
- * Blocks are separated by a blank line. `mergeParagraphs` (default false)
- * and `fixSpelling` (default false) are the same projections used by the
- * Output panel, so the exported file matches what the user sees on screen.
+ * With `includePageName` false, the header line is omitted and only the
+ * recognized text is written (blocks still separated by a blank line).
+ *
+ * `mergeParagraphs` (default false) and `fixSpelling` (default false) are the
+ * same projections used by the Output panel, so the exported file matches
+ * what the user sees on screen.
  */
 export async function exportResults(
   jobs: Job[],
   opts?: {
     mergeParagraphs?: boolean;
     fixSpelling?: boolean;
+    includePageName?: boolean;
   },
 ): Promise<void> {
   const done = jobs.filter((j) => j.status === "done" && j.result);
@@ -338,6 +343,10 @@ export async function exportResults(
   if (!dest) return; // user cancelled
 
   const textOpts = opts?.mergeParagraphs ? { mergeParagraphs: true } : undefined;
+  // Default true: include the per-page `=== filename (conf, ms) ===` header.
+  // When false, export is body-only — useful when the page order isn't
+  // meaningful or the headers would clutter downstream processing.
+  const includePageName = opts?.includePageName !== false;
   const blocks = done.map((j) => {
     // When spell-fix is on and the job has a cached projection, export the
     // fixed text; otherwise export raw. Honors mergeParagraphs in both cases.
@@ -345,8 +354,10 @@ export async function exportResults(
       opts?.fixSpelling && j.spellFix
         ? plainTextWithFix(j.result!, j.spellFix.fixedLines, textOpts)
         : plainText(j.result!, textOpts);
+    const bodyTrimmed = body.replace(/\s+$/, "");
+    if (!includePageName) return bodyTrimmed;
     const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
-    return `=== ${j.name}${conf} ===\n` + body.replace(/\s+$/, "");
+    return `=== ${j.name}${conf} ===\n` + bodyTrimmed;
   });
   const content = blocks.join("\n\n") + "\n";
 
@@ -558,6 +569,33 @@ export function lastFixBurmeseSpelling(): boolean {
 export function saveFixBurmeseSpelling(on: boolean): void {
   try {
     localStorage.setItem(FIX_BURMESE_SPELLING_KEY, on ? "true" : "false");
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+// ── Export preferences (persisted) ───────────────────────────────────────────
+
+const EXPORT_INCLUDE_PAGE_NAME_KEY = "just-ocr:export-include-page-name";
+
+/** Read the export "include page name" preference; defaults to false (body-
+ *  only export — no per-page header line). When true, each block is headed
+ *  `=== filename (conf, ms) ===`. */
+export function lastExportIncludePageName(): boolean {
+  try {
+    const v = localStorage.getItem(EXPORT_INCLUDE_PAGE_NAME_KEY);
+    // Default false: null/absent → omit. Explicit "true" → include.
+    return v === "true";
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return false;
+  }
+}
+
+/** Persist the export "include page name" preference so it is sticky. */
+export function saveExportIncludePageName(on: boolean): void {
+  try {
+    localStorage.setItem(EXPORT_INCLUDE_PAGE_NAME_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }
