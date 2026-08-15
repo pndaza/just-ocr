@@ -5,6 +5,7 @@ import {
   lastLlmModel,
   saveLlmModel,
   lastLlmBatchSize,
+  llmDailyLimit,
   saveLlmBatchSize,
   type LlmModel,
 } from "./ocr";
@@ -95,5 +96,19 @@ describe("AI spell check prefs", () => {
     ls.clear();
     localStorage.setItem("just-ocr:llm-batch-size", "not-a-number");
     expect(lastLlmBatchSize()).toBe(30);
+  });
+});
+
+describe("llmDailyLimit", () => {
+  it("caps flash models at 20 requests/day", () => {
+    expect(llmDailyLimit("gemini-3.7-flash")).toBe(20);
+    expect(llmDailyLimit("gemini-3.6-flash")).toBe(20);
+    expect(llmDailyLimit("gemini-flash-latest")).toBe(20);
+  });
+  it("allows 500/day for flash-lite models", () => {
+    expect(llmDailyLimit("gemini-flash-lite-latest")).toBe(500);
+  });
+  it("assumes the stricter cap for unknown ids", () => {
+    expect(llmDailyLimit("some-new-model")).toBe(20);
   });
 });

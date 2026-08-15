@@ -25,11 +25,13 @@ use serde_json::json;
 /// no `/` or whitespace below so it can't be abused as a path escape).
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
-/// Model used by `llm_test_key`. A small, cheap model — the test only needs
-/// to prove the key authenticates, so it shouldn't burn flash quota or
-/// latency. Named here (not a parameter) so the test call stays stable even
-/// as the spell-check model list evolves.
-const TEST_MODEL: &str = "gemma-4-31b-it";
+/// Model used by `llm_test_key`. A cheap, generously-quoted model — the test
+/// only needs to prove the key authenticates, so it shouldn't burn flash
+/// quota or latency. flash-lite has a ~500 req/day free cap (vs ~20 for
+/// flash), making it ideal for repeated key checks. Named here (not a
+/// parameter) so the test call stays stable even as the spell-check model
+/// list evolves.
+const TEST_MODEL: &str = "gemini-flash-lite-latest";
 
 /// Whole-request timeout. A 30-page batch can take a while on flash models;
 /// 120s leaves headroom for slow generations without hanging forever on a
