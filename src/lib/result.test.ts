@@ -1,4 +1,4 @@
-import { plainText, plainTextWithFix, type LineBox, type OcrResult } from "./result";
+import { plainText, plainTextWithFix, formatDuration, type LineBox, type OcrResult } from "./result";
 import { describe, it, expect } from "vitest";
 
 /** Build a LineBox with the geometry the paragraph heuristic reasons about. */
@@ -197,5 +197,30 @@ describe("plainTextWithFix — substitutes fixed line text", () => {
     expect(plainTextWithFix(r, ["a", "b"], { mergeParagraphs: true })).toBe(
       plainText(r, { mergeParagraphs: true }),
     );
+  });
+});
+
+describe("formatDuration — adaptive ms → human string", () => {
+  it("renders sub-second durations as milliseconds", () => {
+    expect(formatDuration(0)).toBe("0 ms");
+    expect(formatDuration(823)).toBe("823 ms");
+  });
+
+  it("renders sub-minute durations as seconds with one decimal", () => {
+    expect(formatDuration(1000)).toBe("1.0 s");
+    expect(formatDuration(12345)).toBe("12.3 s");
+    expect(formatDuration(59900)).toBe("59.9 s");
+  });
+
+  it("renders minute-plus durations as 'Mm SSs' with zero-padded seconds", () => {
+    expect(formatDuration(60000)).toBe("1m 00s");
+    expect(formatDuration(65000)).toBe("1m 05s");
+    expect(formatDuration(125000)).toBe("2m 05s");
+    expect(formatDuration(147000)).toBe("2m 27s");
+  });
+
+  it("rolls 59.6s up to the next minute rather than '0m 60s'", () => {
+    // 59.95s rounds to 60s — must bump the minute, not print "0m 60s".
+    expect(formatDuration(59950)).toBe("1m 00s");
   });
 });

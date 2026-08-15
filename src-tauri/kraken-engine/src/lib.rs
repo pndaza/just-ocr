@@ -278,6 +278,115 @@ impl Engine {
     pub fn recognizer(&self) -> &RecognitionModel {
         &self.rec
     }
+
+    // ── strip-returning variants ───────────────────────────────────────
+    //
+    // Mirror the recognize_line_* methods but also return the dewarped GrayImage
+    // strip each one fed the recognizer. Used by the CLI's `--format gt` mode to
+    // emit the exact recognizer-input line image alongside its recognized text
+    // (paired training files). The strip is built with the same segmenter-
+    // specific dewarp logic as the recognize-only path; no behavior change.
+    //
+    // Each returns `(text, strip)`, where `strip` is the pre-Stage-2 image
+    // (before centerline-normalize/resize) — i.e. the dewarped, masked line as
+    // it exists right before the recognizer's internal preprocessing.
+
+    /// Like [`recognize_line_dewarped`](Self::recognize_line_dewarped) but also
+    /// returns the dewarped strip. For the kraken segmenter (baseline + boundary).
+    pub fn recognize_line_dewarped_strip(
+        &self,
+        image: &DynamicImage,
+        baseline: &[(f64, f64)],
+        boundary: &[(f64, f64)],
+    ) -> Result<(String, image::GrayImage)> {
+        let strip =
+            recognition::dewarp::extract_polygon_line(image, baseline, boundary).unwrap_or_else(
+                |_| {
+                    let crop = recognition::crop::crop_polygon_white_bg(image, boundary);
+                    crop.to_luma8()
+                },
+            );
+        let text = self.recognize_line(&DynamicImage::ImageLuma8(strip.clone()))?;
+        Ok((text, strip))
+    }
+
+    /// Like [`recognize_line_direct`](Self::recognize_line_direct) but also
+    /// returns the (cropped + deskewed) strip. For the ppocr quad segmenter.
+    pub fn recognize_line_direct_strip(
+        &self,
+        image: &DynamicImage,
+        boundary: &[(f64, f64)],
+    ) -> Result<(String, image::GrayImage)> {
+        let strip = line_strip_direct(image, boundary);
+        let text = self.recognize_line(&DynamicImage::ImageLuma8(strip.clone()))?;
+        Ok((text, strip))
+    }
+
+    /// Like [`recognize_line_poly`](Self::recognize_line_poly) but also returns
+    /// the (polygon-masked + curvature-gated-dewarped) strip. For the ppocr-poly
+    /// segmenter.
+    pub fn recognize_line_poly_strip(
+        &self,
+        image: &DynamicImage,
+        polygon: &[(f64, f64)],
+        quad: &[(f64, f64)],
+    ) -> Result<(String, image::GrayImage)> {
+        let strip = line_strip_poly(image, polygon, quad);
+        let text = self.recognize_line(&DynamicImage::ImageLuma8(strip.clone()))?;
+        Ok((text, strip))
+    }
+}
+
+/// Build the recognizer-input strip for the PP-OCR **direct** path (quad
+/// segmenter): `crop_polygon_white_bg` + optional deskew. Factored out of
+/// [`Engine::recognize_line_direct`] so both the recognize-only and
+/// strip-returning variants share one implementation.
+fn line_strip_direct(image: &DynamicImage, boundary: &[(f64, f64)]) -> image::GrayImage {
+    let mut crop = crop_polygon_white_bg(image, boundary);
+    if let Some(angle) = quad_deskew_angle(boundary) {
+        if angle.abs() >= DESKEW_THRESHOLD {
+            let strip = recognition::dewarp::rotate_deskew(
+                &crop.to_luma8(),
+                &[(boundary[0].0, boundary[0].1), (boundary[1].0, boundary[1].1)],
+                255,
+            );
+            crop = DynamicImage::ImageLuma8(strip);
+        }
+    }
+    crop.to_luma8()
+}
+
+/// Build the recognizer-input strip for the PP-OCR **poly** path: curvature-
+/// gated dewarp (curved → `extract_polygon_line` mesh warp; straight → polygon
+/// mask + quad deskew). Factored out of [`Engine::recognize_line_poly`].
+fn line_strip_poly(
+    image: &DynamicImage,
+    polygon: &[(f64, f64)],
+    quad: &[(f64, f64)],
+) -> image::GrayImage {
+    let midline = recognition::dewarp::curved_midline(polygon, 16);
+    let sagitta = recognition::dewarp::baseline_sagitta(&midline);
+    if sagitta >= CURVATURE_THRESHOLD && midline.len() >= 3 {
+        return recognition::dewarp::extract_polygon_line(image, &midline, polygon)
+            .unwrap_or_else(|_| crop_polygon_white_bg(image, polygon).to_luma8());
+    }
+    let mut crop = crop_polygon_white_bg(image, polygon);
+    if let Some(angle) = quad_deskew_angle(quad) {
+        if angle.abs() >= DESKEW_THRESHOLD {
+            let min_x = polygon.iter().map(|p| p.0).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+            let min_y = polygon.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+            let strip = recognition::dewarp::rotate_deskew(
+                &crop.to_luma8(),
+                &[
+                    (quad[0].0 - min_x as f64, quad[0].1 - min_y as f64),
+                    (quad[1].0 - min_x as f64, quad[1].1 - min_y as f64),
+                ],
+                255,
+            );
+            crop = DynamicImage::ImageLuma8(strip);
+        }
+    }
+    crop.to_luma8()
 }
 
 // ── PP-OCR direct pipeline helpers ──────────────────────────────────

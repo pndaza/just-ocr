@@ -30,6 +30,8 @@
     saveMergeParagraphs,
     lastFixBurmeseSpelling,
     saveFixBurmeseSpelling,
+    lastExportIncludePageName,
+    saveExportIncludePageName,
     type OcrOpts,
     type Job,
     type PdfMode,
@@ -84,6 +86,11 @@
   // run; persisted globally like segmenter.
   let mergeParagraphs = $state(lastMergeParagraphs());
 
+  // Whether exported files include the per-page `=== filename (conf, ms) ===`
+  // header. Lives in Settings (not the toolbar) since it's an export-format
+  // choice, not a per-run toggle. Default false = body-only export.
+  let exportIncludePageName = $state(lastExportIncludePageName());
+
   // Remember the chosen engine + language so they are pre-selected on the next
   // launch. loadLanguages() validates the language against available models,
   // so a value removed in the meantime is corrected automatically.
@@ -99,13 +106,16 @@
     saveSegmenter(opts.segmenter);
   });
   // PP-OCR detector variant (small/tiny) is persisted so the chosen Det
-  // value is sticky across launches. Only affects the PP-OCR segmenters;
-  // ignored when segmenter is Kraken.
+  // dropdown value is sticky across launches. Only affects the PP-OCR
+  // segmenters; ignored when segmenter is Kraken.
   $effect(() => {
     saveDetVariant(opts.detVariant);
   });
   $effect(() => {
     saveMergeParagraphs(mergeParagraphs);
+  });
+  $effect(() => {
+    saveExportIncludePageName(exportIncludePageName);
   });
   // Spelling fix is sticky across launches, like the other OcrOpts fields.
   $effect(() => {
@@ -496,6 +506,7 @@
     await exportResults(jobs, {
       mergeParagraphs,
       fixSpelling: opts.fixBurmeseSpelling,
+      includePageName: exportIncludePageName,
     });
   }
 
@@ -565,7 +576,7 @@
       aria-orientation="vertical"
     ></div>
     <section class="col right" style="width:{rightW}px">
-      <Output job={selected} {mergeParagraphs} fixSpelling={opts.fixBurmeseSpelling} />
+      <Output job={selected} {jobs} {mergeParagraphs} fixSpelling={opts.fixBurmeseSpelling} />
     </section>
   </main>
   {#if dropping}
@@ -592,6 +603,8 @@
     onchangetheme={changeTheme}
     onclose={() => (showSettings = false)}
     {updateAvailable}
+    {exportIncludePageName}
+    onchangeexportpage={(v: boolean) => (exportIncludePageName = v)}
   />
 {/if}
 

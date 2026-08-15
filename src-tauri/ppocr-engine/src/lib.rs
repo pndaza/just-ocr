@@ -44,7 +44,7 @@ mod weights;
 mod windows;
 
 pub use model::{CpuOptions, Detector, DetectorConfig};
-pub use postprocess::{Detection, DetectorTransform, Point};
+pub use postprocess::{Detection, DetectorPostprocessOptions, DetectorTransform, Point};
 pub use tensor::Tensor;
 
 /// Interleaved row-major RGB8 image view, built from the host's `DynamicImage`.
@@ -78,7 +78,7 @@ impl RgbImage {
     }
 }
 
-use crate::postprocess::{DetectorInputPlan, DetectorPostprocessOptions};
+use crate::postprocess::DetectorInputPlan;
 use crate::preprocess::prepare_detector;
 use anyhow::{Context, Result};
 
@@ -100,6 +100,25 @@ impl Detector {
         let values: &[f32] = output.as_f32()?;
         let shape: &[usize] = output.shape();
         let opts = DetectorPostprocessOptions::default();
+        crate::postprocess::extract_detections(values, shape, plan.transform(), opts)
+    }
+
+    /// Like [`detect`](Self::detect) but with caller-supplied postprocess
+    /// options. Lets hosts tune `binary_threshold` / `box_threshold` for inputs
+    /// where the defaults over- or under-segment (e.g. low-ink scans). Everything
+    /// else (resize, transform, forward pass) is identical to `detect`.
+    pub fn detect_with_options(
+        &self,
+        img: &image::DynamicImage,
+        opts: DetectorPostprocessOptions,
+    ) -> Result<Vec<Detection>> {
+        let rgb = RgbImage::from_dynamic(img);
+        let plan = DetectorInputPlan::new(rgb.width(), rgb.height(), Some(736))?;
+        let prepared = prepare_detector(&rgb, plan);
+        let input = Tensor::from_f32(prepared.shape().to_vec(), prepared.data)?;
+        let output = self.forward(input)?;
+        let values: &[f32] = output.as_f32()?;
+        let shape: &[usize] = output.shape();
         crate::postprocess::extract_detections(values, shape, plan.transform(), opts)
     }
 
