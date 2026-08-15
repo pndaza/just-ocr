@@ -463,10 +463,14 @@ export function saveEngine(engine: Engine): void {
 }
 
 /** Read the last-used Myanmar segmenter from localStorage; defaults to "ppocr".
- * Validates the stored value against the known segmenter ids — anything stale
- * (e.g. a prior dev build's "ppocr-small") or missing falls back to "ppocr". */
+ * Validates the stored value against the segmenter ids currently surfaced in
+ * the UI — anything stale, missing, or a hidden option (e.g. "kraken", which
+ * is retained in code but not accurate enough to expose yet) falls back to
+ * "ppocr". The `"kraken"` variant stays in the `Segmenter` type + backend. */
 export function lastSegmenter(): Segmenter {
-  const KNOWN: Segmenter[] = ["kraken", "ppocr", "ppocr-poly"];
+  // Note: "kraken" is intentionally absent here — it's hidden from the UI
+  // until accuracy improves, so a previously-persisted choice is migrated.
+  const KNOWN: Segmenter[] = ["ppocr", "ppocr-poly"];
   try {
     const v = localStorage.getItem(LAST_SEGMENTER_KEY);
     return (v && KNOWN.includes(v as Segmenter) ? v : "ppocr") as Segmenter;
