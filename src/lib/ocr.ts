@@ -714,10 +714,20 @@ export const LLM_MODELS = [
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
   { value: "gemini-flash-latest", label: "Flash (latest)" },
   { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
+  { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite" },
   { value: "gemini-flash-lite-latest", label: "Flash Lite (latest)" },
 ] as const;
 
 export type LlmModel = (typeof LLM_MODELS)[number]["value"];
+
+/** Free-tier daily REQUEST limits on Google AI Studio (per project+model).
+ *  Flash models are capped hard (~20/day); flash-lite far more loosely
+ *  (~500/day). Used to warn before a check that would exhaust the quota
+ *  partway through. Unknown ids assume the stricter flash cap. */
+export function llmDailyLimit(model: string): number {
+  if (model.includes("flash-lite")) return 500;
+  return 20;
+}
 
 /** Batch sizes (pages per request) offered in the AI Check dialog. Bigger
  *  batches mean fewer requests but risk output-token limits and make a

@@ -2,6 +2,7 @@
   import {
     llmSpellCheck,
     llmRewritePages,
+    llmDailyLimit,
     LLM_MODELS,
     LLM_BATCH_SIZES,
     type AiCheckMode,
@@ -52,9 +53,12 @@
     onsuggestions,
   }: Props = $props();
 
-  /** A reviewable wrong→correct pair plus its checkbox state. */
+  /** A reviewable wrong→correct pair plus its checkbox state. `reverted`
+   *  (rewrite mode) marks a line whose correction the user rolled back to
+   *  keep the original spelling. */
   interface FixItem extends LlmWordFix {
     checked: boolean;
+    reverted?: boolean;
   }
 
   /** All suggestions for one page, in batch order. Pages the model found no
@@ -100,11 +104,21 @@
     suggestions.reduce((n, s) => n + s.fixes.filter((f) => f.checked).length, 0),
   );
   let totalFixCount = $derived(
-    suggestions.reduce((n, s) => n + s.fixes.length, 0),
+    suggestions.reduce(
+      (n, s) => n + s.fixes.filter((f) => !f.reverted).length,
+      0,
+    ),
   );
   let pagesWithFixes = $derived(
     suggestions.filter((s) => s.fixes.length > 0).length,
   );
+
+  // ── Free-tier quota guidance ────────────────────────────────────────────────
+  // Requests the planned check needs vs. the model's free daily cap. Warning
+  // only — the API is the source of truth (other usage today counts too).
+  let requestCount = $derived(Math.ceil(checkable.length / batchSize));
+  let dailyLimit = $derived(llmDailyLimit(model));
+  let overLimit = $derived(requestCount > dailyLimit);
 
   /**
    * The basis lines for a page: whatever the user currently sees — the
@@ -235,6 +249,23 @@
       if (job) job.llmFix = null;
     }
     appliedJobIds = [];
+  }
+
+  /** Rewrite mode: keep ONE line's original text — the model sometimes
+   *  "corrects" old/traditional spelling to the modern form, which isn't
+   *  always wanted. Restores the line in the applied projection and dims the
+   *  row; the last revert on a page drops its (now no-op) llmFix. */
+  function revertFix(s: PageReview, i: number) {
+    const f = s.fixes[i];
+    if (f.reverted) return;
+    f.reverted = true;
+    const job = jobs.find((j) => j.id === s.jobId);
+    if (!job?.result || !job.llmFix || f.line == null) return;
+    const fixed = job.llmFix.fixedLines;
+    if (f.line < 1 || f.line > fixed.length) return;
+    fixed[f.line - 1] = f.wrong;
+    const remaining = s.fixes.filter((x) => !x.reverted).length;
+    job.llmFix = remaining === 0 ? null : { fixedLines: fixed, fixes: remaining };
   }
 
   /**
@@ -471,10 +502,22 @@
       if (onNativeControl || checkMode === "rewrite") return; // nothing to toggle
       e.preventDefault(); // keep the panel from scrolling
       toggleCursor();
-    } else if (e.key === "Enter" && selectedCount > 0 && checkMode === "review") {
+    } else if (
+      (e.key === "Enter" || e.key === "F2") &&
+      phase === "review" &&
+      checkMode === "review"
+    ) {
+      // Enter/F2 = Excel-style "edit cell": open the editor on the cursor
+      // row's correction (Shift → the wrong word, which must keep matching
+      // the page text). Page-header rows (-1) have no words to edit. While a
+      // button/select has focus Enter keeps its native meaning (click/open).
       if (onNativeControl) return;
+      const row = flatRows.find((r) => r.key === cursorKey);
+      if (!row || row.i < 0) return;
       e.preventDefault();
-      applyFixes();
+      const fix = row.s.fixes[row.i];
+      const field = e.shiftKey ? "w" : "c";
+      startEdit(`${row.s.jobId}:${row.i}:${field}`, field === "w" ? fix.wrong : fix.correct);
     }
   }
 </script>
@@ -549,28 +592,38 @@
               {/if}
             </p>
             <div class="opts">
-            <label class="opt">
-              <span class="opt-lbl">Model</span>
-              <select bind:value={model}>
-                {#each LLM_MODELS as m}
-                  <option value={m.value}>{m.label}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="opt">
-              <span class="opt-lbl">Pages/req</span>
-              <select
-                bind:value={batchSize}
-                title="Fewer pages per request is steadier; more is faster but risks output limits"
-              >
-                {#each LLM_BATCH_SIZES as s}<option value={s}>{s}</option>{/each}
-              </select>
-            </label>
-            <span class="hint req-hint">
-              → {Math.ceil(checkable.length / batchSize)}
-              {Math.ceil(checkable.length / batchSize) === 1 ? "request" : "requests"}
-            </span>
-          </div>
+              <label class="opt">
+                <span class="opt-lbl">Model</span>
+                <select bind:value={model} title="Free-tier daily request limits shown per model">
+                  {#each LLM_MODELS as m}
+                    <option value={m.value}>{m.label} · {llmDailyLimit(m.value)} req/day</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="opt">
+                <span class="opt-lbl">Pages/req</span>
+                <select
+                  bind:value={batchSize}
+                  title="Fewer pages per request is steadier; more is faster but risks output limits"
+                >
+                  {#each LLM_BATCH_SIZES as s}<option value={s}>{s}</option>{/each}
+                </select>
+              </label>
+              <span class="hint req-hint">
+                → {requestCount}
+                {requestCount === 1 ? "request" : "requests"}
+                · free tier {dailyLimit}/day
+              </span>
+            </div>
+            {#if overLimit}
+              <div class="limit-warning" role="alert">
+                <strong>Over the free-tier daily limit.</strong>
+                This check needs {requestCount} requests, but {modelLabel}
+                allows {dailyLimit}/day — it will likely stop partway with a
+                quota error. Increase pages per request to fit, use fewer
+                pages, or run the rest tomorrow.
+              </div>
+            {/if}
           <button class="btn primary" onclick={startCheck}>
             Start Check
           </button>
@@ -642,7 +695,7 @@
               {pagesWithFixes === 1 ? "page" : "pages"} ·
               <strong>{selectedCount}</strong>/{totalFixCount} selected
             </span>
-            <span class="kbd-hint">↑↓ move · space toggle · ⏎ apply</span>
+            <span class="kbd-hint">↑↓ move · enter edit · space toggle</span>
             <span class="spacer"></span>
             <button class="btn ghost" onclick={() => setAll(true)}>All</button>
             <button class="btn ghost" onclick={() => setAll(false)}>None</button>
@@ -664,7 +717,8 @@
             ? suggestions.filter((s) => s.fixes.length > 0)
             : suggestions as s (s.jobId)}
             <section class="page">
-              <label
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
                 class="page-head"
                 class:muted={!s.fixes.length}
                 class:cursor={cursorKey === `${s.jobId}:all` && checkMode === "review"}
@@ -677,6 +731,7 @@
                     type="checkbox"
                     checked={pageAllChecked(s)}
                     onchange={(e) => togglePage(s, e.currentTarget.checked)}
+                    title="Toggle all fixes on this page"
                   />
                 {:else if !s.fixes.length}
                   <span class="ok-dot" aria-hidden="true">✓</span>
@@ -691,7 +746,7 @@
                 {:else}
                   <span class="page-ok">no changes</span>
                 {/if}
-              </label>
+              </div>
               {#if s.fixes.length}
                 <ul class="fix-list">
                   {#each s.fixes as f, i (i)}
@@ -703,27 +758,49 @@
                         <div
                           class="fix diffline"
                           class:cursor={cursorKey === `${s.jobId}:${i}`}
+                          class:reverted={f.reverted}
                           data-key={`${s.jobId}:${i}`}
                           onclick={() => (cursorKey = `${s.jobId}:${i}`)}
                         >
+                          <button
+                            class="revert-btn"
+                            class:done={f.reverted}
+                            onclick={(e) => {
+                              e.stopPropagation();
+                              revertFix(s, i);
+                            }}
+                            disabled={f.reverted}
+                            title={f.reverted
+                              ? "Original kept"
+                              : "Keep the original — revert this line's correction"}
+                            aria-label="Keep original line"
+                          >↺</button>
                           <span class="line-chip" title="Line on the page">L{f.line}</span>
-                          <!-- Whole line with an inline word diff: unchanged
-                               words render plain, removed words on the danger
-                               tint, corrected words on the ok tint. -->
-                          <div class="diff-body">
-                            {#each diffWords(f.wrong, f.correct) as seg, k (k)}
-                              {#if seg.type === "del"}
-                                <span class="d-del" title="removed">{seg.text}</span>
-                              {:else if seg.type === "add"}
-                                <span class="d-add" title="corrected">{seg.text}</span>
-                              {:else if seg.type !== "gap"}
-                                <span>{seg.text}</span>
-                              {/if}
-                            {/each}
-                          </div>
+                          {#if f.reverted}
+                            <span class="d-kept" title="Original spelling kept">{f.wrong}</span>
+                          {:else}
+                            <!-- Whole line with an inline word diff: unchanged
+                                 words render plain, removed words on the danger
+                                 tint, corrected words on the ok tint. -->
+                            <div class="diff-body">
+                              {#each diffWords(f.wrong, f.correct) as seg, k (k)}
+                                {#if seg.type === "del"}
+                                  <span class="d-del" title="removed">{seg.text}</span>
+                                {:else if seg.type === "add"}
+                                  <span class="d-add" title="corrected">{seg.text}</span>
+                                {:else if seg.type !== "gap"}
+                                  <span>{seg.text}</span>
+                                {/if}
+                              {/each}
+                            </div>
+                          {/if}
                         </div>
                       {:else}
-                        <label
+                        <!-- Not a <label>: only the checkbox itself toggles
+                             (clicking elsewhere in the row just moves the
+                             cursor). -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div
                           class="fix"
                           class:cursor={cursorKey === `${s.jobId}:${i}`}
                           class:invalid={invalidKeys.has(`${s.jobId}:${i}`)}
@@ -799,7 +876,7 @@
                           {#if invalidKeys.has(`${s.jobId}:${i}`)}
                             <span class="invalid-note" title="This word doesn't occur in the page text, so the fix can't apply">not in page</span>
                           {/if}
-                        </label>
+                        </div>
                       {/if}
                     </li>
                   {/each}
@@ -962,7 +1039,7 @@
     font-size: 12px;
     padding: 4px 8px;
     border-radius: 6px;
-    max-width: 130px;
+    max-width: 150px;
   }
   .opt-lbl {
     font-size: 11px;
@@ -970,6 +1047,17 @@
   }
   .req-hint {
     font-variant-numeric: tabular-nums;
+  }
+  /* Pre-flight quota warning — shown before the check starts, unlike the
+     post-failure quota banner in review phase. */
+  .limit-warning {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--danger);
+    background: var(--danger-soft);
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    padding: 10px 12px;
   }
   /* Fix-mode segmented control (same visual language as Settings). */
   .seg {
@@ -1101,7 +1189,6 @@
     background: var(--surface);
     font-size: 12px;
     color: var(--text-dim);
-    cursor: pointer;
   }
   .page-head.muted { cursor: default; }
   .page-head input { accent-color: var(--accent-dim); }
@@ -1140,7 +1227,6 @@
     gap: 10px;
     padding: 6px 12px;
     font-size: 13px;
-    cursor: pointer;
   }
   .fix input { accent-color: var(--accent-dim); }
   /* Line address of the flagged word — makes the scoping visible: the fix
@@ -1194,6 +1280,41 @@
      corrected words the ok tint — backgrounds, not strike/underline, to keep
      complex-script glyphs readable. */
   .diffline { align-items: flex-start; cursor: default; }
+  /* "Keep original" button at the start of each diff row. */
+  .revert-btn {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--text-faint);
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .revert-btn:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
+  }
+  .revert-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .revert-btn.done { color: var(--ok); border-color: transparent; background: none; }
+  /* Reverted row: correction rolled back — original shown plain, dimmed. */
+  .fix.reverted { opacity: 0.55; }
+  .d-kept {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-dim);
+  }
   .diff-body {
     flex: 1;
     min-width: 0;

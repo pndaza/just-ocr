@@ -98,9 +98,9 @@
   }
 
   // ── API key test ──────────────────────────────────────────────────────────
-  // The Test button makes a minimal backend call (gemma-4-31b-it) to prove
-  // the key authenticates before the user relies on AI Check. Editing the
-  // key resets the verdict so a stale ✓ can't mislead.
+  // The Test button makes a minimal backend call (gemini-flash-lite-latest)
+  // to prove the key authenticates before the user relies on AI Check.
+  // Editing the key resets the verdict so a stale ✓ can't mislead.
   let testState = $state<"idle" | "testing" | "ok" | "error">("idle");
   let testError = $state("");
 
@@ -201,7 +201,7 @@
             class="upd-btn test-btn"
             onclick={onTestKey}
             disabled={testState === "testing" || !llmApiKey.trim()}
-            title="Verify the key with a minimal Gemini request (gemma-4-31b-it)"
+            title="Verify the key with a minimal Gemini request (gemini-flash-lite-latest)"
           >
             {testState === "testing" ? "Testing…" : "Test"}
           </button>
