@@ -15,6 +15,7 @@
 //! filtering benefit from serde. The key is passed per-call from the
 //! frontend (stored in localStorage) and never persisted backend-side.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -469,11 +470,16 @@ fn filter_fixes(fixes: Vec<LlmPageFix>, pages: &[String]) -> Vec<LlmPageFix> {
                 None => text.contains(f.wrong.as_str()),
             }
         });
-        // Compare line too: the same wrong word on two lines is two distinct
-        // fixes, not a duplicate.
+        // Dedup by (line, wrong, correct) — the same wrong word on two lines
+        // is two distinct fixes, not a duplicate. A HashSet rather than
+        // `dedup_by` (which only drops ADJACENT duplicates) because the
+        // model can repeat an entry after interleaving others; a leftover
+        // pair would render as a duplicate row and double-count its
+        // replacement at apply time.
+        let mut seen = HashSet::new();
         page_fix
             .fixes
-            .dedup_by(|a, b| a.wrong == b.wrong && a.correct == b.correct && a.line == b.line);
+            .retain(|f| seen.insert((f.line, f.wrong.clone(), f.correct.clone())));
         if !page_fix.fixes.is_empty() {
             out.push(page_fix);
         }
@@ -632,6 +638,23 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fixes.len(), 1);
         assert_eq!(out[0].fixes[0].line, Some(2));
+    }
+
+    /// `dedup_by` only drops ADJACENT duplicates — the model can repeat an
+    /// entry after interleaving others, and the repeat must still go.
+    #[test]
+    fn duplicate_fixes_dedupe_even_non_adjacent() {
+        let pages = vec!["teh cat".to_string()];
+        let model = r#"[
+            {"page":1,"fixes":[
+                {"line":1,"wrong":"teh","correct":"the"},
+                {"line":1,"wrong":"cat","correct":"hat"},
+                {"line":1,"wrong":"teh","correct":"the"}
+            ]}
+        ]"#;
+        let out = parse_response(&response_body(model), &pages).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].fixes.len(), 2);
     }
 
     #[test]

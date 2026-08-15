@@ -342,8 +342,9 @@ export async function llmRewritePages(
 
 /**
  * Verify a Google AI Studio API key with a minimal request (backend uses the
- * cheap gemma-4-31b-it model). Resolves when the key authenticates; rejects
- * with the backend's user-facing message (invalid key, quota, network…).
+ * cheap gemini-flash-lite-latest model). Resolves when the key authenticates;
+ * rejects with the backend's user-facing message (invalid key, quota,
+ * network…).
  */
 export async function llmTestKey(apiKey: string): Promise<void> {
   return invoke<void>("llm_test_key", { apiKey });
