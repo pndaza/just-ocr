@@ -38,12 +38,15 @@
     saveLlmModel,
     lastLlmBatchSize,
     saveLlmBatchSize,
+    lastLlmConcurrency,
+    saveLlmConcurrency,
     lastAiCheckMode,
     saveAiCheckMode,
     lastShowFixSpelling,
     saveShowFixSpelling,
     type AiCheckMode,
     type LlmBatchSize,
+    type LlmConcurrency,
     type LlmModel,
     type OcrOpts,
     type Job,
@@ -112,6 +115,9 @@
   // Pages per Gemini request — chosen in the AI Check panel (10-50) rather
   // than Settings, since it tunes the run the user is about to start.
   let llmBatchSize = $state<LlmBatchSize>(lastLlmBatchSize());
+  // Gemini requests kept in flight at once (1-3, default 2) — chosen in the
+  // AI Check panel next to the batch size.
+  let llmConcurrency = $state<LlmConcurrency>(lastLlmConcurrency());
   // AI Check fix mode: "review" (word pairs) or "rewrite" (corrected page
   // text, diffed per line). Chosen in the panel, sticky across launches.
   let aiCheckMode = $state<AiCheckMode>(lastAiCheckMode());
@@ -160,6 +166,9 @@
   });
   $effect(() => {
     saveLlmBatchSize(llmBatchSize);
+  });
+  $effect(() => {
+    saveLlmConcurrency(llmConcurrency);
   });
   $effect(() => {
     saveAiCheckMode(aiCheckMode);
@@ -715,6 +724,7 @@
           apiKey={llmApiKey}
           bind:model={llmModel}
           bind:batchSize={llmBatchSize}
+          bind:concurrency={llmConcurrency}
           bind:mode={aiCheckMode}
           onclose={() => {
             aiPanelOpen = false;

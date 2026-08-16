@@ -880,17 +880,21 @@ const LLM_BATCH_SIZE_KEY = "just-ocr:llm-batch-size";
 
 /** Flash-family models offered in the AI Check dialog. The id is
  *  interpolated into the Gemini REST path by the backend; keep the ids
- *  exactly as Google names them. The first entry is the default (newest
- *  flash at time of writing); "gemini-flash-latest" tracks whatever Google
- *  ships as current. */
+ *  exactly as Google names them. The first entry is the default — see the
+ *  inline note for why that's flash-lite rather than full flash. */
 export const LLM_MODELS = [
-  { value: "gemini-3.7-flash", label: "Gemini 3.7 Flash" },
+  // First entry = the default selection. Flash is the better proofreader,
+  // but its free tier (~20 requests/day) runs dry partway through even a
+  // modest book, while flash-lite allows ~500 — so the default is
+  // flash-lite-latest, the alias tracking Google's current GA flash-lite
+  // (the -latest aliases always exist, unlike pinned versions that may not
+  // have shipped — a speculative "3.7" sat here once and 404'd).
+  { value: "gemini-flash-lite-latest", label: "Flash Lite (latest)" },
+  { value: "gemini-flash-latest", label: "Flash (latest)" },
   { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
   { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
-  { value: "gemini-flash-latest", label: "Flash (latest)" },
   { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash Lite" },
   { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash Lite" },
-  { value: "gemini-flash-lite-latest", label: "Flash Lite (latest)" },
 ] as const;
 
 export type LlmModel = (typeof LLM_MODELS)[number]["value"];
@@ -935,6 +939,37 @@ export function lastLlmBatchSize(): LlmBatchSize {
 export function saveLlmBatchSize(size: LlmBatchSize): void {
   try {
     localStorage.setItem(LLM_BATCH_SIZE_KEY, String(size));
+  } catch {
+    /* storage may be unavailable (private mode) — ignore */
+  }
+}
+
+const LLM_CONCURRENCY_KEY = "just-ocr:llm-concurrency";
+
+/** Parallel Gemini requests the AI Check keeps in flight. Two by default:
+ *  roughly halves wall-clock time on big checks while staying comfortably
+ *  inside the free tier's per-minute request limit; three is there for the
+ *  patient with flash-lite's looser limits. */
+export const LLM_CONCURRENCY = [1, 2, 3] as const;
+
+export type LlmConcurrency = (typeof LLM_CONCURRENCY)[number];
+
+/** Read the chosen concurrency; defaults to 2. Validates the stored value
+ *  so anything stale falls back to the default. */
+export function lastLlmConcurrency(): LlmConcurrency {
+  try {
+    const v = Number(localStorage.getItem(LLM_CONCURRENCY_KEY));
+    return LLM_CONCURRENCY.find((c) => c === v) ?? 2;
+  } catch {
+    // storage may be unavailable (private mode) — use the default
+    return 2;
+  }
+}
+
+/** Persist the chosen concurrency so it is pre-selected on next launch. */
+export function saveLlmConcurrency(concurrency: LlmConcurrency): void {
+  try {
+    localStorage.setItem(LLM_CONCURRENCY_KEY, String(concurrency));
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

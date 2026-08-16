@@ -5,9 +5,11 @@
     llmDailyLimit,
     LLM_MODELS,
     LLM_BATCH_SIZES,
+    LLM_CONCURRENCY,
     type AiCheckMode,
     type Job,
     type LlmBatchSize,
+    type LlmConcurrency,
     type LlmModel,
     type LlmWordFix,
   } from "./ocr";
@@ -25,6 +27,10 @@
     model: LlmModel;
     /** Pages per Gemini request, picked here via two-way binding. */
     batchSize: LlmBatchSize;
+    /** Gemini requests kept in flight at once (1–3). Picked here via
+     *  two-way binding, persisted globally by App — parallel requests
+     *  speed up big checks; see LLM_CONCURRENCY for the default rationale. */
+    concurrency: LlmConcurrency;
     /** Fix mode: "review" (wrong→correct word pairs) or "rewrite" (the model
      *  returns each page's corrected text). Picked here, persisted by App. */
     mode: AiCheckMode;
@@ -46,6 +52,7 @@
     apiKey,
     model = $bindable(),
     batchSize = $bindable(),
+    concurrency = $bindable(),
     mode = $bindable(),
     onclose,
     onopensettings,
@@ -120,10 +127,70 @@
   let totalFixCount = $derived(stats.total);
   let pagesWithFixes = $derived(stats.pages);
 
+  // ── Page range ──────────────────────────────────────────────────────────────
+  // The flash models' free tier allows only ~20 requests/day — far too few
+  // for a 600-page book in one go. The range picks a contiguous slice of the
+  // checkable pages (1-based, inclusive, queue order), with the same UI as
+  // the PDF dialog's range. The inputs are PRE-FILLED with the full span
+  // (see the fill effect below) rather than relying on "empty = all";
+  // clearing ONE field stays open-ended ("from" only → that page to the
+  // end, "to" only → page 1 through it), and an invalid range blocks Start.
+  // NOTE: `bind:value` on a type="number" input assigns a *number* once the
+  // text is parseable (and "" when empty/clearing) — handle both.
+  let pageFrom = $state<number | "">("");
+  let pageTo = $state<number | "">("");
+
+  function parsePageField(v: number | ""): number | null {
+    if (v === "") return null;
+    return Number.isInteger(v) && v >= 1 ? v : Number.NaN;
+  }
+
+  // Non-null while the entered range is invalid; shown in red beside the
+  // inputs and blocks Start so a bad range can never plan a check.
+  let rangeError = $derived.by(() => {
+    const from = parsePageField(pageFrom);
+    const to = parsePageField(pageTo);
+    if (Number.isNaN(from) || Number.isNaN(to)) {
+      return "Pages must be whole numbers ≥ 1";
+    }
+    if (from !== null && to !== null && to < from) {
+      return "“To” must be ≥ “From”";
+    }
+    if (from !== null && from > checkable.length) {
+      const plural = checkable.length === 1 ? "page" : "pages";
+      return `Only ${checkable.length} ${plural} with recognized text`;
+    }
+    return null;
+  });
+
+  // The pages the current (valid) range selects — the check plan, the
+  // request count and the quota warning all derive from this slice.
+  let checkSlice = $derived.by(() => {
+    if (rangeError || !checkable.length) return [];
+    const from = parsePageField(pageFrom);
+    const to = parsePageField(pageTo);
+    if (from === null && to === null) return checkable;
+    return checkable.slice((from ?? 1) - 1, to ?? checkable.length);
+  });
+
+  // Pre-fill the range inputs with the full span (1..N) — no "empty = all"
+  // convention to remember. Self-healing: re-fills whenever BOTH fields are
+  // empty (panel opened, more pages finished, or the user cleared both), and
+  // stops the moment the user types anything — their values are theirs.
+  $effect(() => {
+    if (checkable.length > 0 && pageFrom === "" && pageTo === "") {
+      pageFrom = 1;
+      pageTo = checkable.length;
+    }
+  });
+
   // ── Free-tier quota guidance ────────────────────────────────────────────────
-  // Requests the planned check needs vs. the model's free daily cap. Warning
-  // only — the API is the source of truth (other usage today counts too).
-  let requestCount = $derived(Math.ceil(checkable.length / batchSize));
+  // Requests the planned check (over the selected range) needs vs. the
+  // model's free daily cap. Warning only — the API is the source of truth
+  // (other usage today counts too).
+  let requestCount = $derived(
+    Math.ceil(checkSlice.length / batchSize),
+  );
   let dailyLimit = $derived(llmDailyLimit(model));
   let overLimit = $derived(requestCount > dailyLimit);
 
@@ -160,24 +227,30 @@
     return basisLines(job).join("\n");
   }
 
-  // Batch plan for the in-flight check plus a resume cursor: `nextBatch` is
-  // the first batch whose results have NOT landed. Kept as plain variables
+  // Batch plan for the in-flight check plus resume state, all indexed by
+  // plan position: `batchDone[b]` once batch b's results have landed,
+  // `batchPages[b]` holding its review rows. Kept as plain variables
   // (nothing renders from them directly) so an interrupted check can resume
-  // from the failure instead of restarting: each request burns free-tier
-  // quota, and a restart would also drop the checkbox edits the user
-  // already made on the collected pages.
+  // from exactly the batches that never landed — each request burns
+  // free-tier quota, and a restart would also drop the checkbox edits the
+  // user already made on the collected pages. Per-batch flags (rather than
+  // the old single cursor) because batches complete out of order once
+  // requests run in parallel.
   let batchPlan: Job[][] = [];
-  let nextBatch = 0;
+  let batchDone: boolean[] = [];
+  let batchPages: PageReview[][] = [];
 
-  /** Start a fresh check: rebuild the plan from the currently checkable
-   *  pages and discard any previously collected results. */
+  /** Start a fresh check: rebuild the plan from the currently selected
+   *  page range (all checkable pages when empty) and discard any previously
+   *  collected results. */
   function startCheck() {
-    if (!checkable.length || !hasKey) return;
+    if (!checkSlice.length || !hasKey) return;
     batchPlan = [];
-    for (let i = 0; i < checkable.length; i += batchSize) {
-      batchPlan.push(checkable.slice(i, i + batchSize));
+    for (let i = 0; i < checkSlice.length; i += batchSize) {
+      batchPlan.push(checkSlice.slice(i, i + batchSize));
     }
-    nextBatch = 0;
+    batchDone = batchPlan.map(() => false);
+    batchPages = batchPlan.map(() => []);
     suggestions = [];
     renderedSections = SECTION_CHUNK;
     appliedJobIds = [];
@@ -194,92 +267,139 @@
   }
 
   /**
-   * Run the remaining batches (the user-chosen `batchSize` pages per
-   * request, sequentially so Stop takes effect between batches) and ask
-   * Gemini to proofread them. In "review" mode the model returns wrong→
-   * correct word pairs; in "rewrite" mode it returns each page's corrected
-   * text, which we diff per line into change rows (old → new) — the review
-   * UI and apply path stay uniform. A batch failure keeps the
-   * already-collected pages reviewable — the error shows alongside the
-   * results rather than discarding them, and Retry resumes from the failed
-   * batch instead of re-sending them.
+   * Run ONE batch: send the request and shape the response into review
+   * rows for its pages. In "review" mode the model returns wrong→correct
+   * word pairs; in "rewrite" mode it returns each page's corrected text,
+   * diffed per line into change rows (old → new), applied to the job the
+   * moment the response lands (instant-apply contract; "Undo all"
+   * reverts). Only pages with actual diffs enter the list in rewrite mode
+   * — clean pages aren't shown at all (the "No changes needed" notice
+   * covers the all-clean case).
+   */
+  async function checkBatch(batch: Job[], texts: string[]): Promise<PageReview[]> {
+    if (checkMode === "rewrite") {
+      const result = await llmRewritePages(apiKey, model, texts);
+      const pages: PageReview[] = [];
+      for (let i = 0; i < batch.length; i++) {
+        const job = batch[i];
+        const newLines = result.find((p) => p.page === i + 1)?.lines ?? null;
+        const basis = basisLines(job);
+        const fixes: FixItem[] = [];
+        if (newLines) {
+          // Diff per line; a short/long response degrades gracefully
+          // (extra lines ignored, missing lines stay original).
+          const n = Math.min(newLines.length, basis.length);
+          let changed = 0;
+          const out = [...basis];
+          for (let l = 0; l < n; l++) {
+            if (newLines[l] !== basis[l]) {
+              // Whitespace-only differences (trailing spaces, line-number
+              // echo remnants) are noise — don't create ghost rows.
+              if (newLines[l].trim() === basis[l].trim()) continue;
+              fixes.push({
+                wrong: basis[l],
+                correct: newLines[l],
+                line: l + 1,
+                checked: true,
+              });
+              out[l] = newLines[l];
+              changed += 1;
+            }
+          }
+          if (changed > 0) {
+            job.llmFix = { fixedLines: out, fixes: changed };
+            appliedJobIds = [...appliedJobIds, job.id];
+          }
+        }
+        if (fixes.length) {
+          pages.push({ jobId: job.id, name: job.name, fixes });
+        }
+      }
+      return pages;
+    }
+    const result = await llmSpellCheck(apiKey, model, texts);
+    return batch.map((job, i) => ({
+      jobId: job.id,
+      name: job.name,
+      fixes: (result.find((p) => p.page === i + 1)?.fixes ?? []).map(
+        (f) => ({ ...f, checked: true }),
+      ),
+    }));
+  }
+
+  /**
+   * Run the remaining batches with a worker pool of `concurrency` in-flight
+   * requests (each still the user-chosen `batchSize` pages). Workers pull
+   * the next un-started batch until the plan is exhausted, Stop lands, or a
+   * request fails; in-flight requests always finish and their pages stay
+   * collected — only NEW batches are held back, same contract as the old
+   * sequential loop. A failure keeps the already-collected pages reviewable
+   * — the error shows alongside the results rather than discarding them,
+   * and Retry resumes from the batches that never landed instead of
+   * re-sending them.
    */
   async function runBatches() {
     cancelRequested = false;
     error = null;
     phase = "checking";
-    progress = { current: nextBatch, total: batchPlan.length };
+    const total = batchPlan.length;
+    // Progress counts batches STARTED (in flight or landed), not just
+    // landed — with slow LLM responses, a landed-only counter sits at
+    // "0 of 3" while the first requests are still in flight and reads as
+    // stuck (same pre-tick convention as the batch Run All counter).
+    // Resumes start from the already-collected count.
+    let accounted = batchDone.filter(Boolean).length;
+    progress = { current: Math.min(accounted, total), total };
     let cancelled = false;
-    try {
-      for (let b = nextBatch; b < batchPlan.length; b++) {
-        if (cancelRequested) {
-          cancelled = true;
-          break;
-        }
-        // Tick before the request so progress reflects work starting, not
-        // finishing (same convention as the batch Run All counter).
-        progress = { current: b + 1, total: batchPlan.length };
+    let firstError: string | null = null;
+    let next = 0; // next batch index to START (skipping collected ones)
+    // Pool size is clamped to the plan (and ≥1) so a 1-batch check with
+    // concurrency 3 still sends exactly one request.
+    const poolSize = Math.max(1, Math.min(concurrency, Math.max(total, 1)));
+
+    const runWorker = async () => {
+      // The check+pull below is synchronous (no await between), so workers
+      // can't race past each other on `next`.
+      while (!cancelRequested && firstError === null) {
+        // Pull the next batch that hasn't been collected yet — with parallel
+        // completion, later batches can be done while an earlier one failed,
+        // and a resumed Retry must not re-send those (each request burns
+        // free-tier quota).
+        while (next < total && batchDone[next]) next += 1;
+        if (next >= total) return;
+        const b = next;
+        next += 1;
+        accounted += 1;
+        progress = { current: Math.min(accounted, total), total };
         const batch = batchPlan[b];
-        const texts = batch.map(pageText);
-        if (checkMode === "rewrite") {
-          const result = await llmRewritePages(apiKey, model, texts);
-          for (let i = 0; i < batch.length; i++) {
-            const job = batch[i];
-            const newLines =
-              result.find((p) => p.page === i + 1)?.lines ?? null;
-            const basis = basisLines(job);
-            const fixes: FixItem[] = [];
-            if (newLines) {
-              // Diff per line; a short/long response degrades gracefully
-              // (extra lines ignored, missing lines stay original).
-              const n = Math.min(newLines.length, basis.length);
-              let changed = 0;
-              const out = [...basis];
-              for (let l = 0; l < n; l++) {
-                if (newLines[l] !== basis[l]) {
-                  // Whitespace-only differences (trailing spaces, line-number
-                  // echo remnants) are noise — don't create ghost rows.
-                  if (newLines[l].trim() === basis[l].trim()) continue;
-                  fixes.push({
-                    wrong: basis[l],
-                    correct: newLines[l],
-                    line: l + 1,
-                    checked: true,
-                  });
-                  out[l] = newLines[l];
-                  changed += 1;
-                }
-              }
-              // Rewrite mode applies instantly — the corrected text lands in
-              // the Text panel the moment the batch returns. The diff rows
-              // below are an audit view; "Undo all" reverts.
-              if (changed > 0) {
-                job.llmFix = { fixedLines: out, fixes: changed };
-                appliedJobIds = [...appliedJobIds, job.id];
-              }
-            }
-            // Only pages with actual diffs enter the list — clean pages
-            // aren't shown at all in this mode (the "No changes needed"
-            // notice covers the all-clean case).
-            if (fixes.length) {
-              suggestions.push({ jobId: job.id, name: job.name, fixes });
-            }
+        try {
+          batchPages[b] = await checkBatch(batch, batch.map(pageText));
+          batchDone[b] = true;
+          // No progress tick on landing — the batch was counted when it
+          // started; the bar reaches N/N as the last batches are pulled.
+        } catch (e: any) {
+          // Remember the first failure; the condition above stops every
+          // worker from pulling further batches once it's set.
+          if (firstError === null) {
+            firstError = typeof e === "string" ? e : e?.message ?? String(e);
           }
-        } else {
-          const result = await llmSpellCheck(apiKey, model, texts);
-          for (let i = 0; i < batch.length; i++) {
-            const fixes = (result.find((p) => p.page === i + 1)?.fixes ?? []).map(
-              (f) => ({ ...f, checked: true }),
-            );
-            suggestions.push({ jobId: batch[i].id, name: batch[i].name, fixes });
-          }
+          return;
         }
-        // Batch landed — a later Retry resumes after it, not at it.
-        nextBatch = b + 1;
       }
-    } catch (e: any) {
-      error = typeof e === "string" ? e : e?.message ?? String(e);
+      if (cancelRequested) cancelled = true;
+    };
+    await Promise.all(
+      Array.from({ length: poolSize }, () => runWorker()),
+    );
+
+    // Assemble the review list in PLAN order — batches complete out of
+    // order under parallel requests, but the list should read in page
+    // order regardless of which response arrived first.
+    suggestions = [];
+    for (let b = 0; b < total; b++) {
+      if (batchDone[b]) suggestions.push(...batchPages[b]);
     }
+    error = firstError;
     progress = null;
     // A stop before anything came back just returns to the start screen.
     if (cancelled && !suggestions.length && !error) {
@@ -688,8 +808,8 @@
       {:else}
           <div class="intro">
             <p>
-              {checkable.length}
-              {checkable.length === 1 ? "page" : "pages"} will be proofread by
+              {checkSlice.length}
+              {checkSlice.length === 1 ? "page" : "pages"} will be proofread by
               Gemini.
             </p>
             <div class="seg" role="radiogroup" aria-label="Fix mode">
@@ -721,8 +841,36 @@
                 smaller batch size.
               {/if}
             </p>
+            <!-- Four option rows (Pages / Model / Pages/req / Parallel) with
+                 a fixed-width label column so every control starts at the
+                 same left edge — same alignment idea as the PDF dialog. -->
             <div class="opts">
-              <label class="opt">
+              <div class="opt-row">
+                <span class="opt-lbl">Pages</span>
+                <div class="range">
+                  <input
+                    class="num"
+                    type="number"
+                    min="1"
+                    placeholder="from"
+                    bind:value={pageFrom}
+                    aria-label="First page to check"
+                  />
+                  <span class="dash" aria-hidden="true">–</span>
+                  <input
+                    class="num"
+                    type="number"
+                    min="1"
+                    placeholder="to"
+                    bind:value={pageTo}
+                    aria-label="Last page to check"
+                  />
+                  {#if rangeError}
+                    <span class="range-hint error">{rangeError}</span>
+                  {/if}
+                </div>
+              </div>
+              <label class="opt-row">
                 <span class="opt-lbl">Model</span>
                 <select bind:value={model} title="Free-tier daily request limits shown per model">
                   {#each LLM_MODELS as m}
@@ -730,31 +878,42 @@
                   {/each}
                 </select>
               </label>
-              <label class="opt">
+              <label class="opt-row">
                 <span class="opt-lbl">Pages/req</span>
                 <select
+                  class="sm"
                   bind:value={batchSize}
                   title="Fewer pages per request is steadier; more is faster but risks output limits"
                 >
                   {#each LLM_BATCH_SIZES as s}<option value={s}>{s}</option>{/each}
                 </select>
               </label>
-              <span class="hint req-hint">
-                → {requestCount}
-                {requestCount === 1 ? "request" : "requests"}
-                · free tier {dailyLimit}/day
-              </span>
+              <label class="opt-row">
+                <span class="opt-lbl">Parallel</span>
+                <select
+                  class="sm"
+                  bind:value={concurrency}
+                  title="Requests sent to Gemini at once — faster on big checks, but more can trip the per-minute rate limit"
+                >
+                  {#each LLM_CONCURRENCY as c}<option value={c}>{c}</option>{/each}
+                </select>
+              </label>
             </div>
+            <span class="hint req-hint">
+              → {requestCount}
+              {requestCount === 1 ? "request" : "requests"}
+              · free tier {dailyLimit}/day
+            </span>
             {#if overLimit}
               <div class="limit-warning" role="alert">
                 <strong>Over the free-tier daily limit.</strong>
                 This check needs {requestCount} requests, but {modelLabel}
                 allows {dailyLimit}/day — it will likely stop partway with a
-                quota error. Increase pages per request to fit, use fewer
-                pages, or run the rest tomorrow.
+                quota error. Increase pages per request, narrow the page
+                range, or run the rest tomorrow.
               </div>
             {/if}
-          <button class="btn primary" onclick={startCheck}>
+          <button class="btn primary" onclick={startCheck} disabled={!checkSlice.length}>
             Start Check
           </button>
         </div>
@@ -764,7 +923,9 @@
         <span class="spin" aria-hidden="true"></span>
         <div class="check-progress">
           <p>
-            Checking batch {progress?.current ?? 0} of {progress?.total ?? 0}…
+            <!-- Progress counts batches STARTED (in flight or landed) — see
+                 runBatches for why a landed-only counter reads as stuck. -->
+            Checking {progress?.current ?? 0} of {progress?.total ?? 0} batches…
           </p>
           <div
             class="bar"
@@ -1160,29 +1321,71 @@
     opacity: 0.4;
     cursor: not-allowed;
   }
-  /* Run options (model + batch size) on the ready screen. */
+  /* Run options on the ready screen: four rows (Pages / Model / Pages/req /
+     Parallel) with a FIXED label column so every control starts at the same
+     left edge — same mechanism as the PDF dialog's `.lbl` column. A shared
+     grid can't do this (each row would size its own column), so the width
+     is a constant sized to the longest label, "PAGES/REQ". */
   .opts {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    gap: 10px;
     font-size: 12px;
     color: var(--text-dim);
-    flex-wrap: wrap;
   }
-  .opt {
+  .opt-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 10px;
   }
-  .opt select {
+  .opt-lbl {
+    flex: 0 0 70px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+  }
+  .opt-row select {
     font-size: 12px;
     padding: 4px 8px;
     border-radius: 6px;
-    max-width: 150px;
+    max-width: 300px;
   }
-  .opt-lbl {
-    font-size: 11px;
+  /* The two numeric dropdowns (Pages/req, Parallel) get a shared fixed
+     width so they match — their one- and two-digit options would otherwise
+     size the selects differently. */
+  .opt-row select.sm {
+    width: 56px;
+  }
+  /* Page range — two number inputs with a right-aligned validation error
+     (only rendered when the range is invalid; see the markup). */
+  .range {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .num {
+    width: 56px;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-inset);
+    color: var(--text);
+  }
+  .num:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+  }
+  .dash {
     color: var(--text-faint);
+  }
+  .range-hint {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--danger);
+    text-align: right;
   }
   .req-hint {
     font-variant-numeric: tabular-nums;
