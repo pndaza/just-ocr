@@ -16,6 +16,7 @@
     fixBurmeseSpelling,
     readFiles,
     renderPdf,
+    pdfPageCount,
     exportResults,
     readJobBytes,
     disposeJobFile,
@@ -50,6 +51,7 @@
     type Job,
     type PdfMode,
     type ImageMode,
+    type PageRange,
     type ReadFile,
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
@@ -209,17 +211,47 @@
   // a progress bar.
   let pdfDialog = $state<{
     name: string;
-    bytes: Uint8Array;
+    /** Absolute path of the PDF (drag-drop flow). Null for the file-picker
+     *  flow, which supplies `bytes` instead — exactly one of the two is set. */
+    path: string | null;
+    bytes: Uint8Array | null;
     status: "choosing" | "working";
     mode: PdfMode | null;
     done: number;
     total: number;
+    /** Page count from `pdfPageCount` — null until it resolves (or on error,
+     *  in which case the dialog just omits the "of N pages" affordances). */
+    pageCount: number | null;
     resolve: (pages: ReadFile[] | null) => void;
   } | null>(null);
 
-  function promptPdf(name: string, bytes: Uint8Array): Promise<ReadFile[] | null> {
+  function promptPdf(
+    name: string,
+    source: Uint8Array | string,
+  ): Promise<ReadFile[] | null> {
     return new Promise((resolve) => {
-      pdfDialog = { name, bytes, status: "choosing", mode: null, done: 0, total: 0, resolve };
+      pdfDialog = {
+        name,
+        path: typeof source === "string" ? source : null,
+        bytes: typeof source === "string" ? null : source,
+        status: "choosing",
+        mode: null,
+        done: 0,
+        total: 0,
+        pageCount: null,
+        resolve,
+      };
+      // Fetch the page count for the Pages row ("of N pages") and range
+      // validation. Best effort: if it fails (or the user already moved on)
+      // the dialog simply stays count-less.
+      pdfPageCount(source).then(
+        (n) => {
+          if (pdfDialog?.status === "choosing") {
+            pdfDialog = { ...pdfDialog, pageCount: n };
+          }
+        },
+        () => {},
+      );
     });
   }
 
@@ -227,29 +259,36 @@
     mode: PdfMode,
     imageMode: ImageMode,
     maxHeight: number | null,
+    pageRange: PageRange | null,
   ) {
     if (!pdfDialog) return;
     pdfDialog = { ...pdfDialog, status: "working", mode };
-    runPdfRendering(mode, imageMode, maxHeight);
+    runPdfRendering(mode, imageMode, maxHeight, pageRange);
   }
 
   async function runPdfRendering(
     mode: PdfMode,
     imageMode: ImageMode,
     maxHeight: number | null,
+    pageRange: PageRange | null,
   ) {
     const dlg = pdfDialog;
     if (!dlg) return;
+    // Exactly one of path (drag-drop) / bytes (picker) is set — renderPdf
+    // takes whichever we have.
+    const source = dlg.path ?? dlg.bytes;
+    if (!source) return;
     try {
       const pages = await renderPdf(
         dlg.name,
-        dlg.bytes,
+        source,
         mode,
         (done, total) => {
           if (pdfDialog) pdfDialog = { ...pdfDialog, done, total };
         },
         imageMode,
         maxHeight ?? undefined,
+        pageRange ?? undefined,
       );
       dlg.resolve(pages.length ? pages : null);
     } catch (e) {
@@ -420,7 +459,9 @@
     for (const f of read) {
       try {
         if (isPdf(f.name)) {
-          const pages = await promptPdf(f.name, new Uint8Array(f.bytes));
+          // Process by path — the backend reads the file itself, so the
+          // multi-MB bytes never cross the IPC boundary as a JSON array.
+          const pages = await promptPdf(f.name, f.path!);
           if (!pages) continue;
           added.push(...makeJobsFromReadFiles(pages));
         } else {
@@ -731,6 +772,7 @@
     mode={pdfDialog.mode}
     done={pdfDialog.done}
     total={pdfDialog.total}
+    pageCount={pdfDialog.pageCount}
     onprocess={onPdfModeChosen}
     oncancel={cancelPdf}
   />

@@ -93,17 +93,41 @@ pub(crate) fn page_name(pdf_name: &str, page: usize) -> String {
     format!("{stem} · p{page}")
 }
 
+/// True when the 1-based `page` number falls inside the inclusive `range`
+/// (`None` = every page).
+fn in_page_range(page: u32, range: Option<(u32, u32)>) -> bool {
+    match range {
+        Some((from, to)) => page >= from && page <= to,
+        None => true,
+    }
+}
+
+/// Number of pages in `pdf_bytes`. Loads the document and reads the page
+/// tree — no image decoding, so it's cheap even for large scans. Used by the
+/// frontend's PDF dialog to show "of N pages" and validate range inputs
+/// before processing starts.
+pub(crate) fn page_count(pdf_bytes: &[u8]) -> Result<usize, String> {
+    let doc = Document::load_from(pdf_bytes).map_err(|e| format!("Failed to load PDF: {e}"))?;
+    Ok(doc.get_pages().len())
+}
+
 /// Extract the largest embedded image from each page of `pdf_bytes`, decoded
-/// to RGB8 and re-encoded as PNG (so it drops into the existing image pipeline).
-/// Returns one entry per page that yielded an image, in page order. Pages with
-/// no extractable image are skipped; the caller surfaces the count.
+/// to RGB8 and re-encoded as PNG (so it drops into the existing image
+/// pipeline). Returns one `(page_number, png)` entry per page that yielded an
+/// image, in page order — the page number is the PDF's original 1-based
+/// numbering, so a ranged selection keeps its true page labels (p5, p6, …)
+/// rather than being renumbered from 1. Pages with no extractable image are
+/// skipped; the caller surfaces the count.
 ///
 /// `max_height` optionally bounds each page's pixel height (see
 /// `maybe_downscale`) — pages taller than the limit are downscaled, aspect
 /// preserved; shorter pages are untouched.
 ///
-/// `on_progress(done, total)` is called once with the total page count, then
-/// once per page after it is processed, so the UI can show progress.
+/// `page_range` optionally restricts extraction to an inclusive 1-based range.
+/// The filter runs before decoding, so ranged extraction also skips the work.
+///
+/// `on_progress(done, total)` is called once with the selected page count,
+/// then once per page after it is processed, so the UI can show progress.
 ///
 /// Decoding/re-encoding each page's image is independent and CPU-bound (the
 /// `image`/inflate/fax decoders are single-threaded), so pages run across a
@@ -114,11 +138,19 @@ pub(crate) fn extract_pages(
     on_progress: impl Fn(usize, usize) + Send + Sync,
     image_mode: ImageMode,
     max_height: Option<u16>,
-) -> Result<Vec<Vec<u8>>, String> {
+    page_range: Option<(u32, u32)>,
+) -> Result<Vec<(u32, Vec<u8>)>, String> {
     // Load from memory via a temp file: lopdf's Document::load takes a path,
     // and load_from takes a Read. Bytes in memory satisfy the latter.
     let doc = Document::load_from(pdf_bytes).map_err(|e| format!("Failed to load PDF: {e}"))?;
-    let pages = doc.get_pages();
+    // Filter to the requested range up front (BTreeMap iterates in page
+    // order, preserved by collect) so totals, work, and output all reflect
+    // only the selection.
+    let pages: Vec<(u32, lopdf::ObjectId)> = doc
+        .get_pages()
+        .into_iter()
+        .filter(|(page_num, _)| in_page_range(*page_num, page_range))
+        .collect();
     let total = pages.len();
     on_progress(0, total);
 
@@ -128,11 +160,11 @@ pub(crate) fn extract_pages(
     // Counts completed pages so progress events stay monotonic across threads.
     let completed = AtomicUsize::new(0);
 
-    // BTreeMap iterates in page order; rayon preserves that order in `collect`,
-    // so the returned PNGs line up with `page_name(..., i + 1)`.
-    let pngs: Vec<Option<Vec<u8>>> = pages
+    // rayon preserves slice order in `collect`, so the returned entries stay
+    // in page order.
+    let pngs: Vec<Option<(u32, Vec<u8>)>> = pages
         .par_iter()
-        .map(|(&page_num, &page_id)| {
+        .map(|&(page_num, page_id)| {
             // Locate + pick the largest image for this page (cheap, borrows doc).
             let pdf_images = match doc.get_page_images(page_id) {
                 Ok(v) => v,
@@ -169,7 +201,7 @@ pub(crate) fn extract_pages(
                             // oversized scans are what this option exists for.
                             let dyn_img = maybe_downscale(dyn_img, max_height);
                             match reencode_png(&to_target(dyn_img, image_mode)) {
-                                Ok(png) => Some(png),
+                                Ok(png) => Some((page_num, png)),
                                 Err(e) => {
                                     eprintln!("Warning: page {page_num} re-encode: {e}");
                                     None
@@ -201,18 +233,24 @@ pub(crate) fn extract_pages(
 /// user-selectable from the frontend; `PDF_RENDER_HEIGHT` is the fallback when
 /// none is supplied.
 ///
+/// Returns one `(page_number, png)` entry per rendered page — the PDF's
+/// original 1-based numbering, preserved under a ranged selection. When
+/// `page_range` is given, only pages inside the inclusive range are
+/// rasterized.
+///
 /// Scaling is derived from each page's own dimensions so every page ends up
 /// the same pixel height regardless of its MediaBox — important because scanned
 /// PDFs often declare oversized pages that would otherwise explode the output.
 ///
-/// `on_progress(done, total)` is called once with the total page count, then
-/// once per page after it is rasterized, so the UI can show progress.
+/// `on_progress(done, total)` is called once with the selected page count,
+/// then once per page after it is rasterized, so the UI can show progress.
 pub(crate) fn render_pages(
     pdf_bytes: &[u8],
     target_height: u16,
     on_progress: impl Fn(usize, usize) + Send + Sync,
     image_mode: ImageMode,
-) -> Result<Vec<Vec<u8>>, String> {
+    page_range: Option<(u32, u32)>,
+) -> Result<Vec<(u32, Vec<u8>)>, String> {
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::hayro_syntax::Pdf;
     use hayro::vello_cpu::color::palette::css::WHITE;
@@ -226,11 +264,20 @@ pub(crate) fn render_pages(
     let interpreter_settings = InterpreterSettings::default();
 
     let pages = pdf.pages();
-    let total = pages.len();
+    let total = pages
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| in_page_range(*i as u32 + 1, page_range))
+        .count();
     on_progress(0, total);
 
     let mut out = Vec::new();
+    let mut done = 0usize;
     for (i, page) in pages.iter().enumerate() {
+        let page_num = i as u32 + 1;
+        if !in_page_range(page_num, page_range) {
+            continue;
+        }
         // page.render_dimensions() is the unscaled (width, height) in points.
         // Scale so the rendered height is exactly target_height px.
         let (_w, h) = page.render_dimensions();
@@ -262,7 +309,8 @@ pub(crate) fn render_pages(
             Some(b) => b,
             None => {
                 eprintln!("Warning: page {} RGB buffer size mismatch", i + 1);
-                on_progress(i + 1, total);
+                done += 1;
+                on_progress(done, total);
                 continue;
             }
         };
@@ -270,12 +318,14 @@ pub(crate) fn render_pages(
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Warning: page {} PNG encode: {e}", i + 1);
-                on_progress(i + 1, total);
+                done += 1;
+                on_progress(done, total);
                 continue;
             }
         };
-        out.push(png);
-        on_progress(i + 1, total);
+        out.push((page_num, png));
+        done += 1;
+        on_progress(done, total);
     }
     Ok(out)
 }
@@ -908,8 +958,20 @@ mod tests {
 
 #[cfg(test)]
 mod extract_tests {
-    use super::{extract_pages, maybe_downscale, ImageMode};
+    use super::{extract_pages, maybe_downscale, page_count, ImageMode};
     use std::path::PathBuf;
+
+    #[test]
+    fn page_count_reads_page_tree() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/tmp.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/tmp.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read tmp.pdf");
+        assert_eq!(page_count(&bytes).expect("count succeeds"), 5);
+    }
 
     #[test]
     fn downscale_bounds_height_without_upscaling() {
@@ -1071,9 +1133,9 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read fixture");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None).expect("extract succeeds");
         assert!(!pages.is_empty(), "expected at least one extracted page");
-        for png in &pages {
+        for (_, png) in &pages {
             assert!(!png.is_empty(), "extracted page PNG must be non-empty");
             assert_eq!(&png[0..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
         }
@@ -1093,10 +1155,10 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read tmp.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None).expect("extract succeeds");
         // tmp.pdf has 5 pages, every one a FlateDecode→DCTDecode image.
         assert_eq!(pages.len(), 5, "all 5 pages should extract, got {}", pages.len());
-        for (i, png) in pages.iter().enumerate() {
+        for (i, (_, png)) in pages.iter().enumerate() {
             assert!(!png.is_empty(), "page {} PNG empty", i + 1);
             assert_eq!(
                 &png[0..8],
@@ -1105,6 +1167,24 @@ mod extract_tests {
                 i + 1
             );
         }
+    }
+
+    /// Range filtering: 2..=3 of the 5-page tmp.pdf yields exactly two pages,
+    /// numbered with the PDF's original page numbers (not renumbered from 1).
+    #[test]
+    fn page_range_selects_original_page_numbers() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/tmp.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/tmp.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read tmp.pdf");
+        let pages =
+            extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, Some((2, 3))).expect("extract succeeds");
+        assert_eq!(pages.len(), 2, "expected only pages 2–3, got {}", pages.len());
+        assert_eq!(pages[0].0, 2, "first entry should be original page 2");
+        assert_eq!(pages[1].0, 3, "second entry should be original page 3");
     }
 
     /// Regression for 1-bpc grayscale images with a PNG predictor (`/Filter
@@ -1121,14 +1201,14 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read sample_png.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None).expect("extract succeeds");
         assert_eq!(
             pages.len(),
             5,
             "all 5 pages should extract, got {}",
             pages.len()
         );
-        for (i, png) in pages.iter().enumerate() {
+        for (i, (_, png)) in pages.iter().enumerate() {
             assert!(!png.is_empty(), "page {} PNG empty", i + 1);
             assert_eq!(
                 &png[0..8],
@@ -1155,13 +1235,13 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read tmp_2.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None).expect("extract succeeds");
         assert!(
             pages.len() >= 130,
             "expected >=130 of 135 pages, got {}",
             pages.len()
         );
-        for (i, png) in pages.iter().enumerate() {
+        for (i, (_, png)) in pages.iter().enumerate() {
             assert!(!png.is_empty(), "page {} PNG empty", i + 1);
             assert_eq!(
                 &png[0..8],
@@ -1185,12 +1265,12 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read sample_ccitt.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None).expect("extract succeeds");
         assert_eq!(pages.len(), 5, "expected 5 pages, got {}", pages.len());
 
         // Each page should be predominantly white (a text scan), not inverted.
         // Assert <50% dark — an inverted page is ~95%, a correct one ~5-15%.
-        for (i, png) in pages.iter().enumerate() {
+        for (i, (_, png)) in pages.iter().enumerate() {
             assert_eq!(
                 &png[0..8],
                 &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
@@ -1229,9 +1309,9 @@ mod extract_tests {
         let bytes = std::fs::read(&path).expect("read tmp_2.pdf");
         // Render just the first page at a small height to keep the test fast.
         // hayro doesn't expose per-page selection, so render and check page 1.
-        let pages = render_pages(&bytes, 400, |_, _| {}, ImageMode::Gray).expect("render succeeds");
+        let pages = render_pages(&bytes, 400, |_, _| {}, ImageMode::Gray, None).expect("render succeeds");
         assert!(!pages.is_empty(), "render produced no pages");
-        let png = &pages[0];
+        let png = &pages[0].1;
         assert_eq!(
             &png[0..8],
             &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
@@ -1258,7 +1338,7 @@ mod extract_tests {
 
     #[test]
     fn rejects_garbage_bytes() {
-        let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray, None).unwrap_err();
+        let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray, None, None).unwrap_err();
         assert!(
             err.to_lowercase().contains("load") || err.to_lowercase().contains("pdf"),
             "expected a load error, got: {err}"

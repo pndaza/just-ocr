@@ -193,13 +193,20 @@ export async function availableLanguages(): Promise<string[]> {
 
 export interface ReadFile {
   name: string;
-  /** Inline bytes for regular images; absent for PDF pages (which use `path`). */
+  /** Inline bytes; only used by the file-picker flow. Absent for drag-drop
+   *  (paths only — inline `Vec<u8>` IPC is far too slow for multi-MB files)
+   *  and for PDF pages (temp PNG `path`). */
   bytes?: number[];
-  /** Temp PNG path for PDF pages; absent for regular images. */
+  /** On-disk path; present for drag-drop files and PDF page PNGs. */
   path?: string;
 }
 
-/** Read files from disk by absolute path (for native drag-drop). */
+/**
+ * Read files from disk by absolute path (for native drag-drop). Returns name +
+ * path only — the backend deliberately does not ship bytes, since Tauri's
+ * `Vec<u8>`-as-JSON-array serialization makes multi-MB files crawl. Jobs load
+ * their bytes on demand (`readJobBytes`), and PDFs are processed by path.
+ */
 export async function readFiles(paths: string[]): Promise<ReadFile[]> {
   return invoke<ReadFile[]>("read_files", { paths });
 }
@@ -207,6 +214,22 @@ export async function readFiles(paths: string[]): Promise<ReadFile[]> {
 /** True if the file name has a .pdf extension (case-insensitive). */
 export function isPdf(name: string): boolean {
   return /\.pdf$/i.test(name);
+}
+
+/**
+ * Page count of a PDF via the Rust `pdf_page_count` command (page-tree read
+ * only, no decoding). The PDF dialog fetches this when it opens to show
+ * "of N pages" and validate the range inputs before processing starts.
+ *
+ * Pass the file's absolute path when you have one (drag-drop flow): the
+ * backend reads it itself, avoiding the `Vec<u8>`-as-JSON IPC tax that makes
+ * multi-MB PDFs crawl. Inline bytes are only for the file-picker flow, which
+ * already holds them in JS.
+ */
+export async function pdfPageCount(source: Uint8Array | string): Promise<number> {
+  return invoke<number>("pdf_page_count", {
+    ...(typeof source === "string" ? { pdfPath: source } : { bytes: Array.from(source) }),
+  });
 }
 
 /** Progress payload emitted by the Rust `render_pdf` command per page. */
@@ -217,8 +240,24 @@ export interface PdfProgress {
 }
 
 /**
+ * Inclusive 1-based page range restricting PDF processing. An omitted upper
+ * bound is expressed as `4294967295` (`u32::MAX`, "from N to the end") — the
+ * Rust side treats it as unbounded since documents can't have more pages.
+ * Mirrors the Rust `PageRange` struct field-for-field.
+ */
+export interface PageRange {
+  from: number;
+  to: number;
+}
+
+/**
  * Extract or render each page of a PDF to a PNG via the Rust `render_pdf`
- * command. Returns one ReadFile per page, named `<stem> · p<n>`.
+ * command. Returns one ReadFile per page, named `<stem> · p<n>` with the PDF's
+ * original page numbers (a ranged selection keeps its true labels).
+ *
+ * `source` is the PDF as an absolute path (drag-drop flow — the backend reads
+ * it itself; sending multi-MB bytes as a JSON number array would crawl) or as
+ * inline bytes (file-picker flow, which already holds them in JS).
  *
  * `maxHeight` bounds the output page height in both modes. Extract downscales
  * pages taller than the limit (aspect preserved, never upscales); high-res
@@ -226,17 +265,21 @@ export interface PdfProgress {
  * `undefined` keeps native resolution. Render rasterizes at exactly this
  * height, so the dialog always sends a value there.
  *
+ * `pageRange` optionally restricts processing to an inclusive 1-based page
+ * range (both modes); `undefined` processes every page.
+ *
  * `onProgress(done, total)` is called as each page is processed, driven by the
  * `pdf-progress` event the backend emits. Used to show a progress bar in the
  * PDF-mode dialog while a large PDF is read.
  */
 export async function renderPdf(
   name: string,
-  bytes: Uint8Array,
+  source: Uint8Array | string,
   mode: PdfMode,
   onProgress?: (done: number, total: number) => void,
   imageMode?: ImageMode,
   maxHeight?: number,
+  pageRange?: PageRange,
 ): Promise<ReadFile[]> {
   let unlisten: UnlistenFn | null = null;
   if (onProgress) {
@@ -249,10 +292,11 @@ export async function renderPdf(
   try {
     return await invoke<ReadFile[]>("render_pdf", {
       pdfName: name,
-      bytes: Array.from(bytes),
+      ...(typeof source === "string" ? { pdfPath: source } : { bytes: Array.from(source) }),
       mode,
       imageMode,
       maxHeight,
+      pageRange,
     });
   } finally {
     unlisten?.();

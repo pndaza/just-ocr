@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ImageMode, PdfMode } from "./ocr";
+  import type { ImageMode, PageRange, PdfMode } from "./ocr";
 
   // Color format for the per-page PNGs. Grayscale is the default (smaller,
   // no accuracy loss — recognizers binarize internally); Color keeps the
@@ -34,15 +34,24 @@
     mode: PdfMode | null;
     /** Pages processed so far (from the backend pdf-progress event). */
     done: number;
+    /** Total page count of the PDF (null until `pdfPageCount` resolves;
+     *  drives the "of N pages" label and range validation). */
+    pageCount: number | null;
     /** Total page count (0 until the backend reports it). */
     total: number;
-    /** Called with the chosen mode + image format + page height when the user
-     *  hits Process. `maxHeight` is null only for extract (native size). */
-    onprocess: (mode: PdfMode, imageMode: ImageMode, maxHeight: number | null) => void;
+    /** Called with the chosen mode + image format + page height + page range
+     *  when the user hits Process. `maxHeight` is null only for extract
+     *  (native size); `pageRange` is null when the whole PDF is processed. */
+    onprocess: (
+      mode: PdfMode,
+      imageMode: ImageMode,
+      maxHeight: number | null,
+      pageRange: PageRange | null,
+    ) => void;
     /** Called when the user cancels (backdrop click, Cancel button, or Esc). */
     oncancel: () => void;
   }
-  let { name, status, mode, done, total, onprocess, oncancel }: Props = $props();
+  let { name, status, mode, done, total, pageCount, onprocess, oncancel }: Props = $props();
 
   // Per-PDF image format; defaults to grayscale, the OCR-friendly choice.
   let imageMode = $state<ImageMode>("gray");
@@ -68,6 +77,51 @@
       heightSel = "1600";
     }
   }
+
+  // Page-range inputs (1-based, inclusive). Empty = process the whole PDF;
+  // one-sided is open-ended ("from" only → that page to the end, "to" only →
+  // page 1 through it) since the page count isn't known before processing.
+  // NOTE: `bind:value` on a type="number" input assigns a *number* once the
+  // text is parseable (and "" when empty/clearing) — handle both.
+  let pageFrom = $state<number | "">("");
+  let pageTo = $state<number | "">("");
+
+  function parsePageField(v: number | ""): number | null {
+    if (v === "") return null;
+    return Number.isInteger(v) && v >= 1 ? v : Number.NaN;
+  }
+
+  // Non-null while the entered range is invalid; shown in red and blocks
+  // Process so a bad range can never reach the backend. Once the page count
+  // arrives, a "from" past the end is caught here too instead of erroring on
+  // the backend (a "to" past the end is fine — it just clamps).
+  let rangeError = $derived.by(() => {
+    const from = parsePageField(pageFrom);
+    const to = parsePageField(pageTo);
+    if (Number.isNaN(from) || Number.isNaN(to)) {
+      return "Pages must be whole numbers ≥ 1";
+    }
+    if (from !== null && to !== null && to < from) {
+      return "“To” must be ≥ “From”";
+    }
+    if (pageCount && from !== null && from > pageCount) {
+      const plural = pageCount === 1 ? "page" : "pages";
+      return `Only ${pageCount} ${plural} in this PDF`;
+    }
+    return null;
+  });
+
+  // u32::MAX as the open "to the end" bound — documents can't exceed it, and
+  // it stays inside the Rust side's u32.
+  const END = 4294967295;
+
+  let pageRange = $derived.by(() => {
+    if (rangeError) return null;
+    const from = parsePageField(pageFrom);
+    const to = parsePageField(pageTo);
+    if (from === null && to === null) return null;
+    return { from: from ?? 1, to: to ?? END };
+  });
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -167,6 +221,33 @@
         </select>
       </div>
 
+      <div class="range-row">
+        <span class="lbl">Pages</span>
+        <input
+          class="num"
+          type="number"
+          min="1"
+          placeholder="from"
+          bind:value={pageFrom}
+          aria-label="First page"
+        />
+        <span class="dash">–</span>
+        <input
+          class="num"
+          type="number"
+          min="1"
+          placeholder="to"
+          bind:value={pageTo}
+          aria-label="Last page"
+        />
+        {#if pageCount}
+          <span class="of">of {pageCount}</span>
+        {/if}
+        <span class="range-hint" class:error={rangeError}>
+          {rangeError ?? (pageCount ? "empty = all" : "empty = all pages")}
+        </span>
+      </div>
+
       <div class="image-mode">
         <span class="lbl">Image format</span>
         <div class="seg" role="radiogroup" aria-label="PDF page image format">
@@ -188,8 +269,9 @@
         <button class="cancel" onclick={oncancel}>Cancel</button>
         <button
           class="primary"
-          disabled={!selectedMode}
-          onclick={() => selectedMode && onprocess(selectedMode, imageMode, maxHeight)}
+          disabled={!selectedMode || !!rangeError}
+          onclick={() =>
+            selectedMode && onprocess(selectedMode, imageMode, maxHeight, pageRange)}
         >Process</button>
       </div>
     {:else}
@@ -355,6 +437,42 @@
   }
   .select:disabled {
     opacity: 0.5;
+  }
+  .range-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 0;
+  }
+  .num {
+    width: 68px;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-inset);
+    color: var(--text);
+  }
+  .num:focus {
+    outline: none;
+    border-color: var(--accent-dim);
+  }
+  .dash {
+    color: var(--text-faint);
+  }
+  .of {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .range-hint {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-faint);
+    text-align: right;
+  }
+  .range-hint.error {
+    color: var(--danger);
   }
   .primary {
     font-size: 12px;

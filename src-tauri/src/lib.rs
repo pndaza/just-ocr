@@ -108,18 +108,28 @@ pub struct ReadFile {
 /// Read one or more files from disk by absolute path. Used to ingest files
 /// dropped onto the window via the native drag-drop event (which only provides
 /// paths, not bytes).
+///
+/// Deliberately returns name + path WITHOUT bytes: Tauri serializes `Vec<u8>`
+/// as a JSON number array, so shipping a multi-MB scanned PDF inline costs
+/// seconds of IPC — the drag-to-dialog path must stay snappy. Consumers are
+/// path-based already: image jobs lazy-load via `readJobBytes`, and PDFs are
+/// processed by `render_pdf`/`pdf_page_count` directly from the path.
 #[tauri::command]
 fn read_files(paths: Vec<String>) -> Vec<ReadFile> {
     paths
         .into_iter()
         .filter_map(|p| {
             let path = std::path::Path::new(&p);
+            // Parity with the old behavior (which dropped unreadable files):
+            // skip directories and anything not readable as a file.
+            if !path.is_file() {
+                return None;
+            }
             let name = path.file_name()?.to_string_lossy().to_string();
-            let bytes = std::fs::read(path).ok()?;
             Some(ReadFile {
                 name,
-                bytes: Some(bytes),
-                path: None,
+                bytes: None,
+                path: Some(p),
             })
         })
         .collect()
@@ -211,8 +221,9 @@ async fn fix_burmese_spelling(lines: Vec<String>) -> Result<Vec<FixResult>, Stri
 }
 
 /// How to turn a PDF page into an image. "extract" pulls the embedded raster
-/// scan (fast, native resolution); "render" rasterizes the page at 1600px
-/// height (slower, handles vector/mixed content).
+/// scan (fast, native resolution or capped by the chosen page height);
+/// "render" rasterizes the page at the chosen height (slower, handles
+/// vector/mixed content).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PdfMode {
@@ -232,6 +243,16 @@ impl Default for PdfMode {
 /// accuracy and speed; ~53px per 30pt glyph (1600 / 30), tall enough to keep
 /// body text legible at any page size.
 const PDF_RENDER_HEIGHT: u16 = 1600;
+
+/// Inclusive 1-based page range from the dialog's "Pages" inputs. An omitted
+/// upper bound arrives as `u32::MAX` ("from N to the end"); the backend clamps
+/// to the document's actual page count by simply finding no further pages.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageRange {
+    from: u32,
+    to: u32,
+}
 
 /// PDF page PNGs are written under the system temp dir to
 /// `just-ocr-<pid>-<seq>`. We namespace by PID so a directory is unambiguously
@@ -280,6 +301,36 @@ fn remove_session_temp_dirs() {
     }
 }
 
+/// Resolve the input for `render_pdf`/`pdf_page_count`: dropped files arrive
+/// as `pdf_path` (read here on a blocking thread — the frontend never touches
+/// their bytes, keeping the drag-to-dialog path free of the `Vec<u8>`-as-JSON
+/// IPC tax), while the file-picker flow already holds bytes in JS and sends
+/// them inline. Exactly one source must be provided; a path wins if both are.
+fn resolve_pdf_bytes(
+    pdf_path: Option<String>,
+    bytes: Option<Vec<u8>>,
+) -> Result<Vec<u8>, String> {
+    match (pdf_path, bytes) {
+        (Some(p), _) => std::fs::read(&p).map_err(|e| format!("Failed to read {p}: {e}")),
+        (None, Some(b)) => Ok(b),
+        (None, None) => Err("No PDF input: pass pdfPath or bytes".into()),
+    }
+}
+
+/// Page count of a PDF, so the frontend's PDF dialog can show "of N pages"
+/// and validate the range inputs before processing starts. Cheap on the
+/// backend (page-tree read only, no decoding). Accepts either a path (drop
+/// flow) or inline bytes (picker flow) — see `resolve_pdf_bytes`.
+#[tauri::command]
+async fn pdf_page_count(
+    pdf_path: Option<String>,
+    bytes: Option<Vec<u8>>,
+) -> Result<usize, String> {
+    async_runtime::spawn_blocking(move || pdf::page_count(&resolve_pdf_bytes(pdf_path, bytes)?))
+        .await
+        .map_err(|e| format!("PDF task failed: {e}"))?
+}
+
 /// Turn each page of a PDF into a PNG, via extract or render mode. Runs on a
 /// blocking thread so the UI stays responsive while large scans decode.
 /// `pdf_name` labels each page `<stem> · p<n>`.
@@ -290,23 +341,37 @@ fn remove_session_temp_dirs() {
 /// resolution; render falls back to the `PDF_RENDER_HEIGHT` default (the UI
 /// always sends a value for render, since it has no "native size" to keep).
 ///
+/// `page_range` optionally restricts processing to an inclusive 1-based page
+/// range (both modes). Selected pages keep their original numbering in the
+/// returned names (`<stem> · p<n>` with the true page number).
+///
 /// Emits a `pdf-progress` event as each page is processed so the frontend can
 /// show a progress bar (extraction/rendering time scales with page count).
 #[tauri::command]
 async fn render_pdf(
     app: tauri::AppHandle,
     pdf_name: String,
-    bytes: Vec<u8>,
+    bytes: Option<Vec<u8>>,
     mode: Option<PdfMode>,
     image_mode: Option<String>,
     max_height: Option<u16>,
+    page_range: Option<PageRange>,
+    pdf_path: Option<String>,
 ) -> Result<Vec<ReadFile>, String> {
     let mode = mode.unwrap_or_default();
     let image_mode = match image_mode.as_deref() {
         Some("color") => pdf::ImageMode::Color,
         _ => pdf::ImageMode::Gray,
     };
+    let page_range = match page_range {
+        Some(r) if r.from >= 1 && r.to >= r.from => Some((r.from, r.to)),
+        Some(r) => return Err(format!("Invalid page range: {}–{}", r.from, r.to)),
+        None => None,
+    };
     async_runtime::spawn_blocking(move || {
+        // Read dropped-path PDFs here (blocking thread) so no bytes ever
+        // cross the IPC boundary for the drag flow. See `resolve_pdf_bytes`.
+        let bytes = resolve_pdf_bytes(pdf_path, bytes)?;
         // Build an emitter the pure pdf functions can call per page. Cloning
         // the AppHandle/name into the closure keeps it 'static + Send.
         let app_handle = app.clone();
@@ -315,11 +380,20 @@ async fn render_pdf(
             let _ = app_handle.emit("pdf-progress", PdfProgress { name: name.clone(), total, done });
         };
         let pages = match mode {
-            PdfMode::Extract => pdf::extract_pages(&bytes, &emit, image_mode, max_height)?,
+            PdfMode::Extract => pdf::extract_pages(&bytes, &emit, image_mode, max_height, page_range)?,
             PdfMode::Render => {
-                pdf::render_pages(&bytes, max_height.unwrap_or(PDF_RENDER_HEIGHT), &emit, image_mode)?
+                pdf::render_pages(&bytes, max_height.unwrap_or(PDF_RENDER_HEIGHT), &emit, image_mode, page_range)?
             }
         };
+
+        // A range that selects nothing is worth an explicit error — without
+        // one it would read as "no extractable pages" and silently skip the
+        // file. (Only checked when a range was requested: a range-less
+        // extract returning nothing means the PDF has no embedded images.)
+        if page_range.is_some() && pages.is_empty() {
+            let (from, to) = page_range.unwrap();
+            return Err(format!("Page range {from}–{to} selects no pages in this PDF"));
+        }
 
         // Write each page PNG to a temp file and return only its path. Returning
         // the bytes inline would serialize many multi-MB images as JSON over the
@@ -332,13 +406,14 @@ async fn render_pdf(
 
         let out = pages
             .into_iter()
-            .enumerate()
-            .map(|(i, png)| {
-                let fname = format!("p{:03}.png", i + 1);
+            .map(|(page_num, png)| {
+                // Name by the PDF's original page number so a ranged
+                // selection keeps its true labels (p5, p6, …).
+                let fname = format!("p{:03}.png", page_num);
                 let fpath = dir.join(&fname);
                 std::fs::write(&fpath, &png).map_err(|e| format!("Failed to write {fname}: {e}"))?;
                 Ok(ReadFile {
-                    name: pdf::page_name(&pdf_name, i + 1),
+                    name: pdf::page_name(&pdf_name, page_num as usize),
                     bytes: None,
                     path: Some(fpath.to_string_lossy().into_owned()),
                 })
@@ -401,6 +476,7 @@ pub fn run() {
             default_save_dir,
             ocr_from_bytes,
             render_pdf,
+            pdf_page_count,
             fix_burmese_spelling,
             llm_fix::llm_spell_check,
             llm_fix::llm_rewrite_pages,
