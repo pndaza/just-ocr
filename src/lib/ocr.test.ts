@@ -9,6 +9,8 @@ import {
   saveLlmBatchSize,
   lastLlmConcurrency,
   saveLlmConcurrency,
+  lastAiCheckMode,
+  saveAiCheckMode,
   type LlmModel,
 } from "./ocr";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -115,6 +117,16 @@ describe("AI spell check prefs", () => {
     ls.clear();
     localStorage.setItem("just-ocr:llm-concurrency", "");
     expect(lastLlmConcurrency()).toBe(2);
+  });
+
+  it("mode defaults to Auto apply (rewrite) and round-trips", () => {
+    expect(lastAiCheckMode()).toBe("rewrite");
+    saveAiCheckMode("review");
+    expect(lastAiCheckMode()).toBe("review");
+    // Unknown/stale stored values fall back to the rewrite default.
+    ls.clear();
+    localStorage.setItem("just-ocr:ai-check-mode", "nonsense");
+    expect(lastAiCheckMode()).toBe("rewrite");
   });
 });
 

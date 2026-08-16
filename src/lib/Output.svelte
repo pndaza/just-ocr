@@ -208,7 +208,7 @@
     {:else if displayText.trim()}
       {#if numberedLines}
         <!-- Line-by-line mode: numbered rows, one per recognized line. The
-             numbers match the AI Check panel's L chips. -->
+             numbers match the AI Spell Fix panel's L chips. -->
         <div class="lines" aria-label="Recognized text">
           {#each numberedLines as line, i (i)}
             {@const segs = splitHighlights(line)}
