@@ -1,12 +1,13 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import type { ImageMode, PageRange, PdfMode } from "./ocr";
 
-  // Color format for the per-page PNGs. Grayscale is the default (smaller,
+  // Color mode for the per-page PNGs. Grayscale is the default (smaller,
   // no accuracy loss — recognizers binarize internally); Color keeps the
   // source as-is.
   const imageModes: { value: ImageMode; label: string; hint: string }[] = [
-    { value: "color", label: "Color", hint: "Keep the source as-is" },
     { value: "gray", label: "Gray", hint: "Best for OCR (default)" },
+    { value: "color", label: "Color", hint: "Keep the source as-is" },
   ];
 
   // Page-height choices (px). "none" = native resolution, extract only —
@@ -35,7 +36,7 @@
     /** Pages processed so far (from the backend pdf-progress event). */
     done: number;
     /** Total page count of the PDF (null until `pdfPageCount` resolves;
-     *  drives the "of N pages" label and range validation). */
+     *  seeds the from/to inputs and validates "from" against it). */
     pageCount: number | null;
     /** Total page count (0 until the backend reports it). */
     total: number;
@@ -78,13 +79,27 @@
     }
   }
 
-  // Page-range inputs (1-based, inclusive). Empty = process the whole PDF;
-  // one-sided is open-ended ("from" only → that page to the end, "to" only →
-  // page 1 through it) since the page count isn't known before processing.
+  // Page-range inputs (1-based, inclusive). Seeded with 1..pageCount once the
+  // count resolves (see the $effect below); clearing both = whole PDF, and
+  // one-sided is open-ended ("from" only → that page to the end).
   // NOTE: `bind:value` on a type="number" input assigns a *number* once the
   // text is parseable (and "" when empty/clearing) — handle both.
   let pageFrom = $state<number | "">("");
   let pageTo = $state<number | "">("");
+
+  // Seed the range inputs the moment the page count arrives. `untrack` keeps
+  // the effect's dependencies to `pageCount` only, so it fires once per PDF —
+  // a user later clearing the fields (meaning "all pages") isn't overridden.
+  $effect(() => {
+    const count = pageCount;
+    if (!count) return;
+    untrack(() => {
+      if (pageFrom === "" && pageTo === "") {
+        pageFrom = 1;
+        pageTo = count;
+      }
+    });
+  });
 
   function parsePageField(v: number | ""): number | null {
     if (v === "") return null;
@@ -240,34 +255,33 @@
 
       <div class="range-row">
         <span class="lbl">Pages</span>
-        <input
-          class="num"
-          type="number"
-          min="1"
-          placeholder="from"
-          bind:value={pageFrom}
-          aria-label="First page"
-        />
-        <span class="dash">–</span>
-        <input
-          class="num"
-          type="number"
-          min="1"
-          placeholder="to"
-          bind:value={pageTo}
-          aria-label="Last page"
-        />
-        {#if pageCount}
-          <span class="of">of {pageCount}</span>
+        <div class="range-fields">
+          <input
+            class="num"
+            type="number"
+            min="1"
+            placeholder="from"
+            bind:value={pageFrom}
+            aria-label="First page"
+          />
+          <span class="dash">–</span>
+          <input
+            class="num"
+            type="number"
+            min="1"
+            placeholder="to"
+            bind:value={pageTo}
+            aria-label="Last page"
+          />
+        </div>
+        {#if rangeError}
+          <span class="range-hint error">{rangeError}</span>
         {/if}
-        <span class="range-hint" class:error={rangeError}>
-          {rangeError ?? (pageCount ? "empty = all" : "empty = all pages")}
-        </span>
       </div>
 
       <div class="image-mode">
-        <span class="lbl">Image format</span>
-        <div class="seg" role="radiogroup" aria-label="PDF page image format">
+        <span class="lbl">Color mode</span>
+        <div class="seg" role="radiogroup" aria-label="PDF page color mode">
           {#each imageModes as m}
             <button
               class="seg-btn"
@@ -355,8 +369,8 @@
     color: var(--text-faint);
     /* Fixed label column so every row's control (segment, dropdown, inputs)
      * starts at the same left edge regardless of label length. Sized to the
-     * longest label, "IMAGE FORMAT". */
-    flex: 0 0 84px;
+     * longest label, "PAGE HEIGHT". */
+    flex: 0 0 88px;
   }
   .seg {
     display: flex;
@@ -448,7 +462,11 @@
     margin: 16px 0 0;
   }
   .select {
-    flex: 1;
+    /* Same width as the from/to pair below (2×56px inputs + 2×10px gaps +
+     * dash), so the select's right edge lines up with the "to" input's —
+     * the select grew to meet the inputs rather than the inputs shrinking
+     * to it. */
+    flex: 0 0 140px;
     font-size: 12px;
     padding: 6px 8px;
     border-radius: 7px;
@@ -462,11 +480,23 @@
   .range-row {
     display: flex;
     align-items: center;
-    gap: 8px;
+    /* 10px like the other label rows — 8px here put the page inputs' left
+     * edge 2px left of the segment/dropdown above them. */
+    gap: 10px;
     margin: 10px 0 0;
   }
+  .range-fields {
+    /* Same width as the height dropdown (140px) so the "to" input's right
+     * edge lines up with the select's; inputs pin to the edges and the dash
+     * centers between them. The fixed basis also stops the inputs from
+     * reflowing when the error hint appears. */
+    flex: 0 0 140px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
   .num {
-    width: 68px;
+    width: 56px;
     font-size: 12px;
     padding: 6px 8px;
     border-radius: 7px;
@@ -480,11 +510,6 @@
   }
   .dash {
     color: var(--text-faint);
-  }
-  .of {
-    font-size: 11px;
-    color: var(--text-dim);
-    white-space: nowrap;
   }
   .range-hint {
     margin-left: auto;
