@@ -130,6 +130,13 @@
     }
   }
 
+  // Shared by the Process button and form submit (Enter in a page field).
+  function process() {
+    if (selectedMode && !rangeError) {
+      onprocess(selectedMode, imageMode, maxHeight, pageRange);
+    }
+  }
+
   // Progress fraction in [0, 1]; 0 until the backend reports a total.
   let pct = $derived(total > 0 ? Math.min(1, done / total) : 0);
 
@@ -181,6 +188,15 @@
     <h2>Process “{name}”</h2>
 
     {#if status === "choosing"}
+      <!-- A real form so Enter (e.g. after typing a page range) submits —
+           hitting Process without touching the mouse. When Process is
+           disabled (invalid range), browsers block implicit submission. -->
+      <form
+        onsubmit={(e) => {
+          e.preventDefault();
+          process();
+        }}
+      >
       <p class="sub">How should this PDF be turned into images for OCR?</p>
 
       <div class="mode-row">
@@ -267,14 +283,14 @@
       </div>
 
       <div class="actions">
-        <button class="cancel" onclick={oncancel}>Cancel</button>
+        <button type="button" class="cancel" onclick={oncancel}>Cancel</button>
         <button
+          type="submit"
           class="primary"
           disabled={!selectedMode || !!rangeError}
-          onclick={() =>
-            selectedMode && onprocess(selectedMode, imageMode, maxHeight, pageRange)}
         >Process</button>
       </div>
+      </form>
     {:else}
       <p class="sub">{statusText}</p>
 
