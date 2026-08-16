@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save, open } from "@tauri-apps/plugin-dialog";
-import { readFile, remove, writeFile } from "@tauri-apps/plugin-fs";
+import { readFile, remove, writeFile, mkdir } from "@tauri-apps/plugin-fs";
+import { join } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { plainText, plainTextWithFix, type OcrResult } from "./result";
 
@@ -65,6 +66,11 @@ export type JobStatus = "queued" | "running" | "done" | "error";
 export interface Job {
   id: number;
   name: string;
+  /** Source grouping for PDF pages: the PDF's name stem (e.g. "report").
+   *  Set by App when a PDF's pages enter the queue; used by image export to
+   *  place the pages under a `<group>/` subfolder instead of a flat file.
+   *  Undefined for regular image files. */
+  group?: string;
   bytes: Uint8Array;
   /** For PDF pages, the temp PNG path. When set, `bytes` is empty and the
    * pixels are read from disk on demand (thumbnail + OCR) instead of held in
@@ -118,15 +124,19 @@ export function makeJob(file: File): Promise<Job> {
 
 /** Build jobs from pre-read files. A `path` (PDF page temp PNG) is used when
  * present; otherwise `bytes` (a regular image) is turned into a Blob URL. The
- * thumbnail for path-based jobs is loaded lazily via `ensureThumb`. */
+ * thumbnail for path-based jobs is loaded lazily via `ensureThumb`.
+ * `group` (the source PDF's name stem) is stamped on every job when given —
+ * see `Job.group`. */
 export function makeJobsFromReadFiles(
   files: { name: string; bytes?: number[]; path?: string }[],
+  group?: string,
 ): Job[] {
   return files.map((f) => {
     if (f.path) {
       return {
         id: nextId++,
         name: f.name,
+        group,
         bytes: new Uint8Array(),
         path: f.path,
         url: "", // filled in by ensureThumb() when the row becomes visible
@@ -146,6 +156,7 @@ export function makeJobsFromReadFiles(
     return {
       id: nextId++,
       name: f.name,
+      group,
       bytes,
       path: null,
       url: URL.createObjectURL(blob),
@@ -220,6 +231,14 @@ export async function readFiles(paths: string[]): Promise<ReadFile[]> {
 /** True if the file name has a .pdf extension (case-insensitive). */
 export function isPdf(name: string): boolean {
   return /\.pdf$/i.test(name);
+}
+
+/** The PDF's file stem ("scan_3.pdf" → "scan_3"). Matches the stem the
+ *  backend bakes into page names (`page_name`), so a job's group folder and
+ *  its "<group> · pN" display name agree. Used as the image-export subfolder
+ *  name for a PDF's pages. */
+export function pdfStem(name: string): string {
+  return name.replace(/\.pdf$/i, "");
 }
 
 /**
@@ -514,6 +533,141 @@ export async function exportResults(
   } catch (e) {
     console.warn(`Could not reveal "${dest}" in file manager:`, e);
   }
+}
+
+// ── Image export (thumbnail panel bottom bar) ────────────────────────────────
+
+/** Output format for the "export images to folder" feature. */
+export type ImageExportFormat = "png" | "jpg";
+
+/** True when the byte stream is already the target format (magic-number sniff
+ *  — PNG: 89 50 4E 47, JPG: FF D8). Matching sources pass through untouched,
+ *  so a PNG→PNG export is a byte-for-byte copy with no re-encode loss. */
+function isFormat(bytes: Uint8Array, format: ImageExportFormat): boolean {
+  if (bytes.length < 4) return false;
+  if (format === "png") {
+    return bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  }
+  return bytes[0] === 0xff && bytes[1] === 0xd8;
+}
+
+/** Decode `bytes` and re-encode to the target format via a canvas. Runs in the
+ *  webview (no backend round-trip); createImageBitmap honors EXIF orientation,
+ *  and JPG gets a white backdrop because it has no alpha channel. */
+async function reencode(bytes: Uint8Array, format: ImageExportFormat): Promise<Uint8Array> {
+  const bmp = await createImageBitmap(new Blob([bytes]));
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  const ctx = canvas.getContext("2d")!;
+  if (format === "jpg") {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  const type = format === "png" ? "image/png" : "image/jpeg";
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error("canvas encode failed"))),
+      type,
+      0.92, // JPEG quality — high enough that OCR-grade scans stay clean
+    );
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+/** File name stem without any extension ("scan.jpg" → "scan"; PDF-page names
+ *  like "report · p1" carry no extension and pass through unchanged). */
+function stemOf(name: string): string {
+  return name.replace(/\.[^.]+$/, "");
+}
+
+/**
+ * Write every job's image into a folder the user picks (native directory
+ * dialog), converting to `format` when the source isn't already that format
+ * (matching sources are copied verbatim).
+ *
+ * PDF-page jobs (those carrying `Job.group`, set when the PDF's pages entered
+ * the queue) are written into a `<pdf name>/` subfolder — pages keep their
+ * `p001`, `p002`… labels (zero-padded so they sort) without the redundant
+ * PDF-name prefix. Plain image jobs land directly in the chosen folder. Name
+ * collisions within this run are de-duplicated with a "-2", "-3" suffix (two
+ * PDFs can share a stem, so their pages can both have a "p001").
+ *
+ * Returns the number of images written, or 0 when the user cancelled the
+ * folder dialog or the queue was empty. `onProgress(done, total)` fires after
+ * each image so the bar can show a counter. Best-effort reveal of the folder
+ * at the end (same Finder-refresh rationale as `exportResults`).
+ */
+export async function exportImages(
+  jobs: Job[],
+  format: ImageExportFormat,
+  onProgress?: (done: number, total: number) => void,
+): Promise<number> {
+  if (!jobs.length) return 0;
+  const dir = await open({
+    title: "Choose a folder for the exported images",
+    directory: true,
+    multiple: false,
+  });
+  if (!dir) return 0; // user cancelled
+
+  const ext = format === "png" ? "png" : "jpg";
+  // Subfolders created so far (PDF groups) — mkdir is not free, so each is
+  // created once per run.
+  const madeDirs = new Set<string>();
+  // Dedupe keys include the subfolder so "report/p1" and a flat "p1" never
+  // shadow each other.
+  const used = new Set<string>();
+  let written = 0;
+  let processed = 0;
+
+  for (const job of jobs) {
+    try {
+      const src = await readJobBytes(job);
+      const out = isFormat(src, format) ? src : await reencode(src, format);
+      let targetDir = dir;
+      let base = stemOf(job.name);
+      if (job.group) {
+        if (!madeDirs.has(job.group)) {
+          await mkdir(await join(dir, job.group), { recursive: true });
+          madeDirs.add(job.group);
+        }
+        targetDir = await join(dir, job.group);
+        // Inside the group folder the name is just the page label — drop the
+        // "<pdf name> · " prefix the queue display carries, and zero-pad the
+        // page number (p3 → p003, matching the backend's temp-file `p{:03}`
+        // convention) so the files sort in page order in Finder/Explorer.
+        const prefix = `${job.group} · `;
+        if (job.name.startsWith(prefix)) {
+          const label = stemOf(job.name.slice(prefix.length));
+          base = label.replace(/^p(\d+)$/, (_m, d: string) => `p${d.padStart(3, "0")}`);
+        }
+      }
+      let fname = `${base}.${ext}`;
+      const key = (f: string) => `${job.group ?? ""}/${f}`.toLowerCase();
+      for (let n = 2; used.has(key(fname)); n++) {
+        fname = `${base}-${n}.${ext}`;
+      }
+      used.add(key(fname));
+      await writeFile(await join(targetDir, fname), out);
+      written++;
+    } catch (e) {
+      // One bad image (unreadable source, failed encode) skips; the rest
+      // still export.
+      console.warn(`Could not export "${job.name}":`, e);
+    }
+    processed++;
+    onProgress?.(processed, jobs.length);
+  }
+
+  try {
+    await revealItemInDir(dir);
+  } catch (e) {
+    console.warn(`Could not reveal "${dir}" in file manager:`, e);
+  }
+  return written;
 }
 
 // ── Language model management ────────────────────────────────────────────────

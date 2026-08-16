@@ -10,6 +10,7 @@
   import {
     availableLanguages,
     isPdf,
+    pdfStem,
     makeJob,
     makeJobsFromReadFiles,
     ocrFromBytes,
@@ -435,7 +436,9 @@
           const buf = new Uint8Array(await file.arrayBuffer());
           const pages = await promptPdf(file.name, buf);
           if (!pages) continue;
-          added.push(...makeJobsFromReadFiles(pages));
+          // Group the pages under the PDF's stem so image export can place
+          // them in a "<pdf name>/" subfolder.
+          added.push(...makeJobsFromReadFiles(pages, pdfStem(file.name)));
         } else {
           added.push(await makeJob(file));
         }
@@ -460,7 +463,8 @@
           // multi-MB bytes never cross the IPC boundary as a JSON array.
           const pages = await promptPdf(f.name, f.path!);
           if (!pages) continue;
-          added.push(...makeJobsFromReadFiles(pages));
+          // Group the pages under the PDF's stem (see addFiles).
+          added.push(...makeJobsFromReadFiles(pages, pdfStem(f.name)));
         } else {
           added.push(...makeJobsFromReadFiles([f]));
         }
