@@ -49,7 +49,13 @@ export interface OcrOpts {
   /** Whether to apply the Burmese post-OCR spelling fix (curated wrong→right
    * word list, backend-side). Myanmar-only in effect — the list is Burmese.
    * Unlike `mergeParagraphs`, this changes what the OCR engine returns, so it
-   * crosses the IPC boundary inside `opts`. */
+   * crosses the IPC boundary inside `opts`.
+   *
+   * TEMPORARILY UNUSED BY THE UI: the toolbar toggle is parked behind
+   * `{#if false}` (rule-based fix is far behind AI spell check) and App
+   * forces this to false so no persisted "on" sticks. The backend command
+   * and rules (`burmese_spelling_rules.tsv`) stay live for when the toggle
+   * returns. */
   fixBurmeseSpelling: boolean;
 }
 
@@ -405,14 +411,11 @@ export async function llmTestKey(apiKey: string): Promise<void> {
 /**
  * Write all completed jobs to a single .txt file via a native save dialog.
  *
- * Each completed job becomes a block. With `includePageName` (default true),
- * the block is headed:
- *
- *     === filename  (90% conf, 120 ms) ===
- *     <recognized text, with merge-paragraphs + spell-fix projection applied>
- *
- * With `includePageName` false, the header line is omitted and only the
- * recognized text is written (blocks still separated by a blank line).
+ * Each completed job becomes a block of recognized text (with
+ * merge-paragraphs + spell-fix projection applied — the same projections the
+ * Output panel shows), separated by a blank line. A per-page
+ * `=== filename (conf, ms) ===` header option existed previously but was
+ * removed: body-only is what the export is for.
  *
  * `mergeParagraphs` (default false) and `fixSpelling` (default false) are the
  * same projections used by the Output panel, so the exported file matches
@@ -423,7 +426,6 @@ export async function exportResults(
   opts?: {
     mergeParagraphs?: boolean;
     fixSpelling?: boolean;
-    includePageName?: boolean;
   },
 ): Promise<void> {
   const done = jobs.filter((j) => j.status === "done" && j.result);
@@ -481,10 +483,6 @@ export async function exportResults(
   if (!dest) return; // user cancelled
 
   const textOpts = opts?.mergeParagraphs ? { mergeParagraphs: true } : undefined;
-  // Default true: include the per-page `=== filename (conf, ms) ===` header.
-  // When false, export is body-only — useful when the page order isn't
-  // meaningful or the headers would clutter downstream processing.
-  const includePageName = opts?.includePageName !== false;
   const blocks = done.map((j) => {
     // Projection precedence: manual edits are authoritative, then an applied
     // AI fix (built on top of the spell-fix basis lines), then the offline
@@ -498,10 +496,7 @@ export async function exportResults(
           : opts?.fixSpelling && j.spellFix
             ? plainTextWithFix(j.result!, j.spellFix.fixedLines, textOpts)
             : plainText(j.result!, textOpts);
-    const bodyTrimmed = body.replace(/\s+$/, "");
-    if (!includePageName) return bodyTrimmed;
-    const conf = j.confidence >= 0 ? `  (${j.confidence}% conf, ${j.elapsedMs} ms)` : `  (${j.elapsedMs} ms)`;
-    return `=== ${j.name}${conf} ===\n` + bodyTrimmed;
+    return body.replace(/\s+$/, "");
   });
   const content = blocks.join("\n\n") + "\n";
 
@@ -713,33 +708,6 @@ export function lastFixBurmeseSpelling(): boolean {
 export function saveFixBurmeseSpelling(on: boolean): void {
   try {
     localStorage.setItem(FIX_BURMESE_SPELLING_KEY, on ? "true" : "false");
-  } catch {
-    /* storage may be unavailable (private mode) — ignore */
-  }
-}
-
-// ── Export preferences (persisted) ───────────────────────────────────────────
-
-const EXPORT_INCLUDE_PAGE_NAME_KEY = "just-ocr:export-include-page-name";
-
-/** Read the export "include page name" preference; defaults to false (body-
- *  only export — no per-page header line). When true, each block is headed
- *  `=== filename (conf, ms) ===`. */
-export function lastExportIncludePageName(): boolean {
-  try {
-    const v = localStorage.getItem(EXPORT_INCLUDE_PAGE_NAME_KEY);
-    // Default false: null/absent → omit. Explicit "true" → include.
-    return v === "true";
-  } catch {
-    // storage may be unavailable (private mode) — use the default
-    return false;
-  }
-}
-
-/** Persist the export "include page name" preference so it is sticky. */
-export function saveExportIncludePageName(on: boolean): void {
-  try {
-    localStorage.setItem(EXPORT_INCLUDE_PAGE_NAME_KEY, on ? "true" : "false");
   } catch {
     /* storage may be unavailable (private mode) — ignore */
   }

@@ -21,18 +21,10 @@
     /** Set by App's silent startup check. Pre-populates the Updates section so the
      *  user doesn't have to re-check after the badge drew them here. */
     updateAvailable: string | null;
-    /** Current value of the "include page name in export" preference. */
-    exportIncludePageName: boolean;
-    /** Called when the user toggles the export page-name preference. */
-    onchangeexportpage: (on: boolean) => void;
     /** Stored Google AI Studio API key for the AI Check tool. */
     llmApiKey: string;
     /** Called when the user edits the API key. */
     onchangeapikey: (key: string) => void;
-    /** Whether the toolbar shows the "Fix spelling" checkbox. */
-    showFixSpelling: boolean;
-    /** Called when the user toggles toolbar "Fix spelling" visibility. */
-    onchangeShowfixspelling: (on: boolean) => void;
   }
   let {
     opts,
@@ -40,14 +32,9 @@
     onchangetheme,
     onclose,
     updateAvailable,
-    exportIncludePageName,
-    onchangeexportpage,
     llmApiKey,
     onchangeapikey,
-    showFixSpelling,
-    onchangeShowfixspelling,
   }: Props = $props();
-
   // Current app version, fetched once on mount for the Updates section header.
   let appVersion = $state("");
   // Status of the MANUAL check button (separate from the silent startup
@@ -97,6 +84,28 @@
     }
   }
 
+  // ── Hover tooltips for section hints ──────────────────────────────────────
+  // Hints used to be always-on paragraphs that dominated the dialog's vertical
+  // space. They now live in a ⓘ tooltip per section. The tooltip is
+  // position:fixed (viewport-relative) because every scrollable ancestor
+  // (.body) and the modal's overflow:hidden would otherwise clip it.
+  let tip = $state<{ x: number; y: number; text: string } | null>(null);
+
+  const TIP_W = 270;
+
+  function showTip(el: HTMLElement, text: string) {
+    const r = el.getBoundingClientRect();
+    // Center under the icon, clamped to the viewport so wide hints near a
+    // window edge stay reachable.
+    let x = r.left + r.width / 2 - TIP_W / 2;
+    x = Math.min(Math.max(8, x), window.innerWidth - TIP_W - 8);
+    tip = { x, y: r.bottom + 8, text };
+  }
+
+  function hideTip() {
+    tip = null;
+  }
+
   // ── API key test ──────────────────────────────────────────────────────────
   // The Test button makes a minimal backend call (gemini-flash-lite-latest)
   // to prove the key authenticates before the user relies on AI Check.
@@ -125,6 +134,33 @@
 </script>
 
 <svelte:window onkeydown={onKey} />
+
+{#snippet info(tipText: string)}
+  <button
+    class="info"
+    type="button"
+    tabindex="0"
+    aria-label={tipText}
+    onmouseenter={(e) => showTip(e.currentTarget, tipText)}
+    onmouseleave={hideTip}
+    onfocus={(e) => showTip(e.currentTarget, tipText)}
+    onblur={hideTip}
+  >
+    <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true" fill="none">
+      <circle cx="8" cy="8" r="6.7" stroke="currentColor" stroke-width="1.4" />
+      <circle cx="8" cy="4.9" r="0.95" fill="currentColor" />
+      <line
+        x1="8"
+        y1="7.1"
+        x2="8"
+        y2="11.6"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+      />
+    </svg>
+  </button>
+{/snippet}
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="backdrop" onclick={onclose} role="presentation">
@@ -169,29 +205,55 @@
         </div>
       </section>
 
-      <section class="sec">
-        <span class="lbl">Export</span>
-        <label class="row">
-          <input
-            type="checkbox"
-            checked={exportIncludePageName}
-            onchange={(e) => onchangeexportpage(e.currentTarget.checked)}
-          />
-          <span>Include page name &amp; stats header</span>
-        </label>
-        <p class="hint">
-          When on, each page in the exported file is headed with its filename
-          and OCR stats. Turn off to export recognized text only.
-        </p>
-      </section>
+      {#if opts.language === "mya" && opts.segmenter !== "kraken"}
+        <!-- Myanmar + PP-OCR only: the PP-OCR line-box detector backbone width.
+             Small = accuracy-oriented (default); Tiny = faster/smaller but less
+             accurate on dense/curved Burmese. Hidden for Kraken (own segmenter
+             model) and for non-Myanmar (full-page Tesseract, no PP-OCR). -->
+        <section class="sec">
+          <div class="lbl-row">
+            <span class="lbl">PP-OCR detection model</span>
+            {@render info(
+              "Tiny   — good for most cases.\nSmall — good for curvy lines.",
+            )}
+          </div>
+          <div class="seg" role="radiogroup" aria-label="PP-OCR detection model">
+            <button
+              class="seg-btn"
+              class:active={opts.detVariant === "tiny"}
+              onclick={() => (opts.detVariant = "tiny")}
+              role="radio"
+              aria-checked={opts.detVariant === "tiny"}
+            >Tiny</button>
+            <button
+              class="seg-btn"
+              class:active={opts.detVariant === "small"}
+              onclick={() => (opts.detVariant = "small")}
+              role="radio"
+              aria-checked={opts.detVariant === "small"}
+            >Small</button>
+          </div>
+        </section>
+      {/if}
 
       <section class="sec">
-        <span class="lbl">AI spell check</span>
+        <div class="lbl-row">
+          <span class="lbl">AI spell check</span>
+          {@render info(
+            "Powers the “AI Check” toolbar tool, which sends recognized text " +
+            "to Gemini to find spelling errors — the model is chosen in the " +
+            "AI Check dialog. This is the app's only online feature; get a " +
+            "free key at aistudio.google.com. The key stays on this machine " +
+            "and is sent only to Google's API.",
+          )}
+        </div>
+        <label class="key-lbl" for="llm-api-key">Google AI Studio API key</label>
         <div class="key-row">
           <input
+            id="llm-api-key"
             class="key-input"
             type="password"
-            placeholder="Google AI Studio API key"
+            placeholder="Paste your key"
             spellcheck="false"
             autocomplete="off"
             value={llmApiKey}
@@ -211,61 +273,7 @@
         {:else if testState === "error"}
           <p class="test-result err">{testError}</p>
         {/if}
-        <p class="hint">
-          Powers the "AI Check" toolbar tool, which sends recognized text to
-          Gemini to find spelling errors — the model is chosen in the AI Check
-          dialog. This is the app's only online feature — get a free key at
-          aistudio.google.com. The key stays on this machine and is sent only
-          to Google's API.
-        </p>
       </section>
-
-      <section class="sec">
-        <span class="lbl">Toolbar</span>
-        <label class="row">
-          <input
-            type="checkbox"
-            checked={showFixSpelling}
-            onchange={(e) => onchangeShowfixspelling(e.currentTarget.checked)}
-          />
-          <span>Show "Fix spelling" toggle</span>
-        </label>
-        <p class="hint">
-          The Burmese spelling-fix checkbox appears in the toolbar only for
-          Myanmar. Hide it here if you don't use the offline fix — the AI
-          Check panel works either way, and the toggle's last state is kept.
-        </p>
-      </section>
-
-      {#if opts.language === "mya" && opts.segmenter !== "kraken"}
-        <!-- Myanmar + PP-OCR only: the PP-OCR line-box detector backbone width.
-             Small = accuracy-oriented (default); Tiny = faster/smaller but less
-             accurate on dense/curved Burmese. Hidden for Kraken (own segmenter
-             model) and for non-Myanmar (full-page Tesseract, no PP-OCR). -->
-        <section class="sec">
-          <span class="lbl">PP-OCR detection</span>
-          <div class="seg" role="radiogroup" aria-label="PP-OCR detection model">
-            <button
-              class="seg-btn"
-              class:active={opts.detVariant === "small"}
-              onclick={() => (opts.detVariant = "small")}
-              role="radio"
-              aria-checked={opts.detVariant === "small"}
-            >Small</button>
-            <button
-              class="seg-btn"
-              class:active={opts.detVariant === "tiny"}
-              onclick={() => (opts.detVariant = "tiny")}
-              role="radio"
-              aria-checked={opts.detVariant === "tiny"}
-            >Tiny</button>
-          </div>
-          <p class="hint">
-            Small is more accurate on dense or curved Burmese. Tiny is faster
-            and lighter, at the cost of detection precision.
-          </p>
-        </section>
-      {/if}
 
       <section class="sec">
         <span class="lbl">Updates {appVersion ? `· v${appVersion}` : ""}</span>
@@ -301,6 +309,15 @@
         {/if}
       </section>
     </div>
+
+    {#if tip}
+      <!-- Fixed/viewport-relative so the modal's overflow:hidden and the
+           scrollable .body can't clip it; pointer-events keeps the hover
+           stable while the cursor rests on the icon. -->
+      <div class="tooltip" style="left:{tip.x}px; top:{tip.y}px" role="tooltip">
+        {tip.text}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -366,31 +383,53 @@
   .sec:last-child {
     border-bottom: none;
   }
+  .lbl-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 8px;
+  }
   .lbl {
-    display: block;
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-faint);
-    margin-bottom: 8px;
   }
-  .row {
-    display: flex;
-    align-items: center;
-    gap: 7px;
+  .info {
+    display: inline-flex;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text-faint);
+    cursor: help;
+  }
+  .info:hover,
+  .info:focus-visible {
+    color: var(--text-dim);
+  }
+  .tooltip {
+    position: fixed;
+    width: 270px;
+    background: var(--text);
+    color: var(--bg-elev);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.45;
+    text-align: left;
+    /* Render \n in tip text as line breaks, and keep intentional space runs
+     * (e.g. the aligned Tiny/Small dashes) from collapsing. */
+    white-space: pre-wrap;
+    pointer-events: none;
+    z-index: 200;
+    box-shadow: 0 8px 24px var(--overlay);
+  }
+  .key-lbl {
+    display: block;
     font-size: 12px;
     color: var(--text-dim);
-    cursor: pointer;
-  }
-  .row input {
-    accent-color: var(--accent-dim);
-  }
-  .hint {
-    margin: 6px 0 0;
-    font-size: 11px;
-    color: var(--text-faint);
-    line-height: 1.4;
+    margin-bottom: 6px;
   }
   .key-row {
     display: flex;

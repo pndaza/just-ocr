@@ -166,19 +166,24 @@
     Merge lines
   </label>
 
-  {#if isMyanmar && showFixSpelling}
-    <!-- Burmese post-OCR spelling fix (curated wrong→right word list, applied
-         in the backend before the result reaches the UI). Myanmar-only: the
-         dict is Burmese, so hiding it for other languages avoids a no-op
-         toggle. Can also be hidden entirely from Settings. -->
-    <label class="check" title="Correct common Burmese recognizer errors (word list)">
-      <input
-        type="checkbox"
-        checked={fixBurmeseSpelling}
-        onchange={(e) => onchangefix(e.currentTarget.checked)}
-      />
-      Fix spelling
-    </label>
+  {#if false}
+    <!-- TEMPORARILY HIDDEN: the rule-based Burmese spelling fix (curated
+         wrong→right word list) is far behind the AI spell check, so the
+         toggle is parked behind {#if false} until it improves. All props and
+         the effect wiring are kept so re-enabling is a one-line change.
+         opts.fixBurmeseSpelling is forced off in App while this is hidden —
+         a stuck-on value would keep applying the fix with no way to turn it
+         off. -->
+    {#if isMyanmar && showFixSpelling}
+      <label class="check" title="Correct common Burmese recognizer errors (word list)">
+        <input
+          type="checkbox"
+          checked={fixBurmeseSpelling}
+          onchange={(e) => onchangefix(e.currentTarget.checked)}
+        />
+        Fix spelling
+      </label>
+    {/if}
   {/if}
 
   <div class="spacer"></div>

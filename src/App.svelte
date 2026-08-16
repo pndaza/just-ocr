@@ -30,10 +30,7 @@
     saveDetVariant,
     lastMergeParagraphs,
     saveMergeParagraphs,
-    lastFixBurmeseSpelling,
     saveFixBurmeseSpelling,
-    lastExportIncludePageName,
-    saveExportIncludePageName,
     lastLlmApiKey,
     saveLlmApiKey,
     lastLlmModel,
@@ -93,7 +90,11 @@
     psm: 3,
     segmenter: lastSegmenter(),
     detVariant: lastDetVariant(),
-    fixBurmeseSpelling: lastFixBurmeseSpelling(),
+    // Forced off: the toolbar "Fix spelling" toggle is temporarily hidden
+    // (rule-based fix is far behind AI spell check — see Toolbar.svelte), and
+    // a persisted "on" would silently keep applying the fix with no way to
+    // turn it off. Restore lastFixBurmeseSpelling() when the toggle returns.
+    fixBurmeseSpelling: false,
   });
 
   // Merge-paragraphs is a display-only preference (it does not change what the
@@ -101,11 +102,6 @@
   // text panel + export). Lives in the toolbar so it can be toggled before a
   // run; persisted globally like segmenter.
   let mergeParagraphs = $state(lastMergeParagraphs());
-
-  // Whether exported files include the per-page `=== filename (conf, ms) ===`
-  // header. Lives in Settings (not the toolbar) since it's an export-format
-  // choice, not a per-run toggle. Default false = body-only export.
-  let exportIncludePageName = $state(lastExportIncludePageName());
 
   // Google AI Studio (Gemini) credentials for the AI Check tool. The app's
   // only online feature — kept opt-in and configured in Settings; the key is
@@ -126,6 +122,10 @@
   let aiWrongWords = $state<Record<number, string[]>>({});
   // Whether the toolbar shows the "Fix spelling" checkbox (Myanmar only).
   // The toggle's own state is independent and stays sticky when hidden.
+  // Currently dormant: the checkbox is parked behind {#if false} in
+  // Toolbar.svelte (rule-based fix is behind AI spell check) and the
+  // Settings section that controlled this was removed — kept wired so the
+  // toggle returns with its preference when the fix improves.
   let showFixSpelling = $state(lastShowFixSpelling());
 
   // Remember the chosen engine + language so they are pre-selected on the next
@@ -150,9 +150,6 @@
   });
   $effect(() => {
     saveMergeParagraphs(mergeParagraphs);
-  });
-  $effect(() => {
-    saveExportIncludePageName(exportIncludePageName);
   });
   $effect(() => {
     saveLlmApiKey(llmApiKey);
@@ -619,7 +616,6 @@
     await exportResults(jobs, {
       mergeParagraphs,
       fixSpelling: opts.fixBurmeseSpelling,
-      includePageName: exportIncludePageName,
     });
   }
 
@@ -756,12 +752,8 @@
     onchangetheme={changeTheme}
     onclose={() => (showSettings = false)}
     {updateAvailable}
-    {exportIncludePageName}
-    onchangeexportpage={(v: boolean) => (exportIncludePageName = v)}
     {llmApiKey}
     onchangeapikey={(v: string) => (llmApiKey = v)}
-    {showFixSpelling}
-    onchangeShowfixspelling={(v: boolean) => (showFixSpelling = v)}
   />
 {/if}
 
