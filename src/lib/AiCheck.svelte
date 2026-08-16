@@ -100,18 +100,25 @@
     ),
   );
 
-  let selectedCount = $derived(
-    suggestions.reduce((n, s) => n + s.fixes.filter((f) => f.checked).length, 0),
-  );
-  let totalFixCount = $derived(
-    suggestions.reduce(
-      (n, s) => n + s.fixes.filter((f) => !f.reverted).length,
-      0,
-    ),
-  );
-  let pagesWithFixes = $derived(
-    suggestions.filter((s) => s.fixes.length > 0).length,
-  );
+  // One pass over every fix for all three header counters — with a big check
+  // (thousands of rows) three separate reduces per checkbox toggle add up;
+  // a single loop is effectively free.
+  let stats = $derived.by(() => {
+    let selected = 0;
+    let total = 0;
+    let pages = 0;
+    for (const s of suggestions) {
+      if (s.fixes.length) pages += 1;
+      for (const f of s.fixes) {
+        if (f.checked) selected += 1;
+        if (!f.reverted) total += 1;
+      }
+    }
+    return { selected, total, pages };
+  });
+  let selectedCount = $derived(stats.selected);
+  let totalFixCount = $derived(stats.total);
+  let pagesWithFixes = $derived(stats.pages);
 
   // ── Free-tier quota guidance ────────────────────────────────────────────────
   // Requests the planned check needs vs. the model's free daily cap. Warning
@@ -126,8 +133,27 @@
    * Reviewing and fixing the displayed text keeps the review honest and
    * lets AI fixes stack on top of the offline spell-fix.
    */
+  // Basis lines are read by every validation pass (`invalidKeys` re-derives
+  // on each keystroke in a correction editor) and by apply — cache the
+  // mapped array per job so huge lists don't re-allocate it each time.
+  // Both identities are tracked because either swap changes the basis:
+  // `spellFix` when the spelling toggle recomputes the projection, and
+  // `result` when the page is re-OCR'd in place (processJob assigns a fresh
+  // result AND nulls spellFix — checking spellFix alone would return the
+  // pre-re-OCR lines when the old and new spellFix are both null).
+  const basisCache = new WeakMap<
+    Job,
+    { spell: Job["spellFix"]; result: Job["result"]; lines: string[] }
+  >();
+
   function basisLines(job: Job): string[] {
-    return job.spellFix?.fixedLines ?? job.result!.lines.map((l) => l.text);
+    const hit = basisCache.get(job);
+    if (hit && hit.spell === job.spellFix && hit.result === job.result) {
+      return hit.lines;
+    }
+    const lines = job.spellFix?.fixedLines ?? job.result!.lines.map((l) => l.text);
+    basisCache.set(job, { spell: job.spellFix, result: job.result, lines });
+    return lines;
   }
 
   function pageText(job: Job): string {
@@ -153,6 +179,7 @@
     }
     nextBatch = 0;
     suggestions = [];
+    renderedSections = SECTION_CHUNK;
     appliedJobIds = [];
     checkMode = mode;
     applied = null;
@@ -453,14 +480,78 @@
     }
   });
 
+  // ── Chunked list rendering ──────────────────────────────────────────────────
+  // A big check can produce thousands of rows; mounting them all at once
+  // freezes the UI on one long layout/paint and makes scrolling heavy. Page
+  // sections mount in chunks: a sentinel at the end of the list extends the
+  // mounted prefix as the user scrolls toward it, and keyboard moves extend
+  // it themselves (moveCursor). Mounted sections stay mounted — DOM nodes
+  // are only created once — while offscreen ones cost nothing to paint
+  // thanks to `content-visibility` (see the .page rule).
+  const SECTION_CHUNK = 12;
+  let listSections = $derived(
+    // Rewrite mode: only pages with actual changes — the "no changes" filler
+    // sections are noise when the corrections are already applied. Review
+    // mode keeps them as confirmation of coverage.
+    checkMode === "rewrite"
+      ? suggestions.filter((s) => s.fixes.length > 0)
+      : suggestions,
+  );
+  let renderedSections = $state(SECTION_CHUNK);
+  let visibleSections = $derived(listSections.slice(0, renderedSections));
+  let sentinelEl = $state<HTMLElement | null>(null);
+
+  // Extend while the sentinel is near the viewport (a screenful of lookahead
+  // so fast scrolls don't hit pop-in). Re-arming is automatic in the other
+  // direction: the sentinel remounts whenever the list grows past the
+  // mounted prefix (e.g. a resumed Retry adds more pages).
+  $effect(() => {
+    const el = sentinelEl;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        renderedSections = Math.min(
+          listSections.length,
+          renderedSections + SECTION_CHUNK,
+        );
+        // The observer only fires on visibility TRANSITIONS — extending can
+        // leave the sentinel still intersecting (short sections), which
+        // would strand the list before the fold. Re-observing forces a
+        // fresh initial callback, so the chain continues until the sentinel
+        // really leaves the margin (or the list runs out).
+        io.disconnect();
+        io.observe(el);
+      },
+      // Null root = viewport (the panel body is the actual scroller, but
+      // viewport intersection tracks its scroll just fine).
+      { rootMargin: "600px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  });
+
   function moveCursor(delta: number) {
     if (!flatRows.length) return;
     let idx = flatRows.findIndex((r) => r.key === cursorKey);
     idx = Math.min(flatRows.length - 1, Math.max(0, (idx === -1 ? 0 : idx) + delta));
-    cursorKey = flatRows[idx].key;
-    pagesEl
-      ?.querySelector(`[data-key="${cursorKey}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+    const row = flatRows[idx];
+    cursorKey = row.key;
+    // The row's section may not be mounted yet — extend first, then scroll
+    // after Svelte flushes the new DOM (rAF is past that flush).
+    const secIdx = listSections.indexOf(row.s);
+    if (secIdx >= 0 && secIdx >= renderedSections) {
+      renderedSections = Math.min(listSections.length, secIdx + SECTION_CHUNK);
+      requestAnimationFrame(() =>
+        pagesEl
+          ?.querySelector(`[data-key="${row.key}"]`)
+          ?.scrollIntoView({ block: "nearest" }),
+      );
+    } else {
+      pagesEl
+        ?.querySelector(`[data-key="${row.key}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    }
   }
 
   // Sync the Preview/thumbnail panels with the review cursor: whatever row
@@ -753,12 +844,10 @@
         {/if}
 
         <div class="bind-pages" bind:this={pagesEl}>
-          <!-- Rewrite mode: only pages with actual changes — the "no changes"
-               filler sections are noise when the corrections are already
-               applied. Review mode keeps them as confirmation of coverage. -->
-          {#each checkMode === "rewrite"
-            ? suggestions.filter((s) => s.fixes.length > 0)
-            : suggestions as s (s.jobId)}
+          <!-- Only the first `renderedSections` sections mount (chunked
+               rendering — see script); the sentinel below extends that as
+               the user scrolls. -->
+          {#each visibleSections as s (s.jobId)}
             <section class="page">
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
@@ -929,6 +1018,11 @@
               {/if}
             </section>
           {/each}
+          {#if renderedSections < listSections.length}
+            <!-- Invisible tripwire: intersecting the viewport (or its 600px
+                 lookahead) mounts the next chunk of page sections. -->
+            <div class="more-sentinel" bind:this={sentinelEl} aria-hidden="true"></div>
+          {/if}
         </div>
       {:else if !error}
         <div class="notice">
@@ -1221,10 +1315,21 @@
     flex-direction: column;
     gap: 10px;
   }
+  /* Bottom tripwire for chunked rendering — 1px tall, fully invisible. */
+  .more-sentinel {
+    height: 1px;
+  }
   .page {
     border: 1px solid var(--border);
     border-radius: 9px;
     overflow: hidden;
+    /* Offscreen sections skip layout/paint entirely — with a big check the
+       list holds thousands of rows and only the visible window should cost
+       anything. `contain-intrinsic-size` keeps the scrollbar steady by
+       remembering each section's last real height once rendered (48px ≈ a
+       bare header before that). No-op on engines without content-visibility. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 48px;
   }
   .page-head {
     display: flex;
