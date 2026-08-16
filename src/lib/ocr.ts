@@ -915,10 +915,12 @@ export const LLM_BATCH_SIZES = [10, 20, 30, 40, 50] as const;
 
 export type LlmBatchSize = (typeof LLM_BATCH_SIZES)[number];
 
-/** How the AI Check talks to Gemini. "review" (default) returns wrong→correct
- *  word pairs the user picks from; "rewrite" returns each page's corrected
- *  text, diffed per line for review — broader fixes (punctuation, spacing,
- *  phrasing) at higher output-token cost, so smaller batches are wise. */
+/** How the AI Check talks to Gemini. "rewrite" (default, labeled "Auto
+ *  apply") returns each page's corrected text, diffed per line and applied
+ *  the moment each batch lands — broader fixes (punctuation, spacing,
+ *  phrasing) at higher output-token cost, so smaller batches are wise.
+ *  "review" (labeled "Manual apply") returns wrong→correct word pairs the
+ *  user picks from before anything changes. */
 export type AiCheckMode = "review" | "rewrite";
 
 /** Read the chosen batch size; defaults to 30 (LLM_BATCH_SIZES[2]).
@@ -977,15 +979,17 @@ export function saveLlmConcurrency(concurrency: LlmConcurrency): void {
 
 const AI_CHECK_MODE_KEY = "just-ocr:ai-check-mode";
 
-/** Read the AI Check mode preference; defaults to "review" (word pairs). */
+/** Read the AI Check mode preference; defaults to "rewrite" (Auto apply —
+ *  instant corrected text with per-line revert is the smoother first run;
+ *  anyone who wants to approve each fix switches to Manual apply). */
 export function lastAiCheckMode(): AiCheckMode {
   try {
-    return localStorage.getItem(AI_CHECK_MODE_KEY) === "rewrite"
-      ? "rewrite"
-      : "review";
+    return localStorage.getItem(AI_CHECK_MODE_KEY) === "review"
+      ? "review"
+      : "rewrite";
   } catch {
     // storage may be unavailable (private mode) — use the default
-    return "review";
+    return "rewrite";
   }
 }
 

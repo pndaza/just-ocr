@@ -774,16 +774,16 @@
 
 <svelte:window onkeydown={onKey} />
 
-<section class="panel" role="region" aria-label="AI spell check">
+<section class="panel" role="region" aria-label="AI spell fix">
   <div class="head">
-    <span class="title">AI Check</span>
+    <span class="title">AI Spell Fix</span>
     <!-- Model chip only when the model selector isn't on screen (checking /
          review / applied). In the ready phase it would sit right above the
          selector and crowd it in a narrow panel. -->
     {#if phase !== "ready"}
       <span class="model-chip" title="Gemini model — change on the start screen">{modelLabel}</span>
     {/if}
-    <button class="close" onclick={onclose} aria-label="Close AI check panel">✕</button>
+    <button class="close" onclick={onclose} aria-label="Close AI spell fix panel">✕</button>
   </div>
 
   <div class="body">
@@ -792,7 +792,7 @@
         <div class="notice">
           <p><strong>No API key configured.</strong></p>
           <p class="hint">
-            The AI check sends recognized text to Gemini (Google AI Studio)
+            The spell fix sends recognized text to Gemini (Google AI Studio)
             to find spelling errors. Add your free API key in Settings —
             this is the app's only online feature.
           </p>
@@ -807,38 +807,40 @@
         </div>
       {:else}
           <div class="intro">
-            <p>
-              {checkSlice.length}
-              {checkSlice.length === 1 ? "page" : "pages"} will be proofread by
-              Gemini.
-            </p>
-            <div class="seg" role="radiogroup" aria-label="Fix mode">
-              <button
-                class="seg-btn"
-                class:active={mode === "review"}
-                onclick={() => (mode = "review")}
-                role="radio"
-                aria-checked={mode === "review"}
-                title="The model returns wrong→correct word pairs you pick from"
-              >Review fixes</button>
+            <!-- Section label over the mode toggle — same tiny-uppercase
+                 typography as the option-row labels below, and a bare noun
+                 like them: the Auto/Manual buttons supply the "how". The old
+                 "{N} pages will be proofread" intro lived here but said
+                 nothing the range inputs and request count don't show. -->
+            <span class="mode-lbl">Spell fixes</span>
+            <div class="seg" role="radiogroup" aria-label="How to apply spell fixes">
               <button
                 class="seg-btn"
                 class:active={mode === "rewrite"}
                 onclick={() => (mode = "rewrite")}
                 role="radio"
                 aria-checked={mode === "rewrite"}
-                title="The model returns each page's corrected text; changed lines are listed for review"
-              >Rewrite text</button>
+                title="The model returns each page's corrected text, applied instantly — changed lines are listed so you can revert any"
+              >Auto apply</button>
+              <button
+                class="seg-btn"
+                class:active={mode === "review"}
+                onclick={() => (mode = "review")}
+                role="radio"
+                aria-checked={mode === "review"}
+                title="The model returns wrong→correct word pairs — you pick which to apply"
+              >Manual apply</button>
             </div>
             <p class="hint">
               {#if mode === "review"}
                 Gemini returns only the words it believes are wrong, with a
-                suggested correction — you review and pick which to apply.
+                suggested correction — you pick which to apply.
               {:else}
                 Gemini rewrites each page's text — catches punctuation,
-                spacing and phrasing too. Changed lines are listed for review
-                before applying; this uses more output tokens, so prefer a
-                smaller batch size.
+                spacing and phrasing too. Fixes apply the moment each batch
+                returns; changed lines are listed so you can revert any (or
+                Undo all). Uses more output tokens, so prefer a smaller
+                batch size.
               {/if}
             </p>
             <!-- Four option rows (Pages / Model / Pages/req / Parallel) with
@@ -1401,7 +1403,16 @@
     border-radius: 8px;
     padding: 10px 12px;
   }
-  /* Fix-mode segmented control (same visual language as Settings). */
+  /* Fix-mode segmented control (same visual language as Settings). The
+     label above it shares typography with the option-row labels — the
+     sizing lives with .opt-lbl so the two stay in sync. */
+  .mode-lbl {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+  }
   .seg {
     display: flex;
     background: var(--bg-inset);
