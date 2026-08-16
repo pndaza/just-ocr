@@ -7,6 +7,8 @@ import {
   lastLlmBatchSize,
   llmDailyLimit,
   saveLlmBatchSize,
+  lastLlmConcurrency,
+  saveLlmConcurrency,
   type LlmModel,
 } from "./ocr";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -74,15 +76,19 @@ describe("AI spell check prefs", () => {
     expect(lastLlmApiKey()).toBe("AIzaSy-test-key");
   });
 
-  it("model defaults to the newest flash and validates stored values", () => {
-    expect(lastLlmModel()).toBe("gemini-3.7-flash");
+  it("model defaults to flash-lite-latest (quota over quality) and validates stored values", () => {
+    expect(lastLlmModel()).toBe("gemini-flash-lite-latest");
     saveLlmModel("gemini-3.6-flash");
     expect(lastLlmModel()).toBe("gemini-3.6-flash");
     // A retired/unknown model id falls back to the default rather than
-    // surfacing a broken selection after an update.
+    // surfacing a broken selection after an update — including the
+    // speculative "3.7" entry that never shipped in the API.
+    ls.clear();
+    localStorage.setItem("just-ocr:llm-model", "gemini-3.7-flash");
+    expect(lastLlmModel() satisfies LlmModel).toBe("gemini-flash-lite-latest");
     ls.clear();
     localStorage.setItem("just-ocr:llm-model", "gemini-1.0-nano");
-    expect(lastLlmModel() satisfies LlmModel).toBe("gemini-3.7-flash");
+    expect(lastLlmModel() satisfies LlmModel).toBe("gemini-flash-lite-latest");
   });
 
   it("batch size defaults to 30, round-trips, and rejects stale values", () => {
@@ -96,6 +102,19 @@ describe("AI spell check prefs", () => {
     ls.clear();
     localStorage.setItem("just-ocr:llm-batch-size", "not-a-number");
     expect(lastLlmBatchSize()).toBe(30);
+  });
+
+  it("concurrency defaults to 2, round-trips, and rejects stale values", () => {
+    expect(lastLlmConcurrency()).toBe(2);
+    saveLlmConcurrency(3);
+    expect(lastLlmConcurrency()).toBe(3);
+    // Anything not in the offered levels (1/2/3) falls back to 2.
+    ls.clear();
+    localStorage.setItem("just-ocr:llm-concurrency", "5");
+    expect(lastLlmConcurrency()).toBe(2);
+    ls.clear();
+    localStorage.setItem("just-ocr:llm-concurrency", "");
+    expect(lastLlmConcurrency()).toBe(2);
   });
 });
 

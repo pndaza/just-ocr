@@ -219,7 +219,7 @@
       onclick={onaicheck}
       title="Toggle the AI spell-check panel (Gemini) — configure the API key in Settings"
     >
-      ✦ AI Check
+      ✦ AI Spell Fix
     </button>
   {/if}
 
