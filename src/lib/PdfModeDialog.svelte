@@ -9,19 +9,36 @@
     { value: "gray", label: "Gray", hint: "Best for OCR (default)" },
   ];
 
+  // Page-height choices (px). "none" = native resolution, extract only —
+  // very high-res scans produce line heights the segmentation models handle
+  // poorly, so a bounded downscale often OCRs better. Render mode rasterizes
+  // at a fixed height, so it has no "original" to keep and none isn't offered.
+  const heights = [1000, 1200, 1400, 1600, 1800, 2000];
+
+  // Long-form mode explanations, shown on hover of the ⓘ icon next to each
+  // segment label (the segments themselves stay terse).
+  const extractTip =
+    "Pulls the embedded scan image straight out of the PDF — fast, and keeps " +
+    "the scan's own pixels (capped by the height above). Best for scanned PDFs.";
+  const renderTip =
+    "Rasterizes each page from its text and vector content at the chosen " +
+    "height — slower, but works for PDFs with no embedded image (vector " +
+    "text, mixed content).";
+
   interface Props {
     /** The PDF file name being processed (shown in the dialog). */
     name: string;
     /** "choosing" shows the mode buttons; "working" shows the progress UI. */
     status: "choosing" | "working";
-    /** The mode the user picked (set once they click a button). */
+    /** The mode the user picked (set once they hit Process). */
     mode: PdfMode | null;
     /** Pages processed so far (from the backend pdf-progress event). */
     done: number;
     /** Total page count (0 until the backend reports it). */
     total: number;
-    /** Called with the chosen mode + image format when the user picks a mode. */
-    onprocess: (mode: PdfMode, imageMode: ImageMode) => void;
+    /** Called with the chosen mode + image format + page height when the user
+     *  hits Process. `maxHeight` is null only for extract (native size). */
+    onprocess: (mode: PdfMode, imageMode: ImageMode, maxHeight: number | null) => void;
     /** Called when the user cancels (backdrop click, Cancel button, or Esc). */
     oncancel: () => void;
   }
@@ -29,6 +46,28 @@
 
   // Per-PDF image format; defaults to grayscale, the OCR-friendly choice.
   let imageMode = $state<ImageMode>("gray");
+
+  // Mode + height are picked first, then confirmed with Process (the height
+  // dropdown depends on the mode, so clicking a mode can't start immediately).
+  // Extract is the default — it's the right choice for most (scanned) PDFs.
+  let selectedMode = $state<PdfMode | null>("extract");
+  // 1600px default for both modes: high-res scans hurt segmentation in
+  // extract, and render needs a fixed height anyway. "None" stays available
+  // for extract users who want the native scan.
+  let heightSel = $state("1600");
+  let maxHeight = $derived(heightSel === "none" ? null : Number(heightSel));
+  let isRender = $derived(selectedMode === "render");
+
+  function selectMode(m: PdfMode) {
+    selectedMode = m;
+    // Render can't keep native size and its semantics differ from extract's
+    // cap, so selecting it always resets to the 1600px default — the "None"
+    // option isn't rendered in render mode, and a height picked for extract
+    // doesn't silently carry over.
+    if (m === "render") {
+      heightSel = "1600";
+    }
+  }
 
   function onKey(e: KeyboardEvent) {
     if (e.key === "Escape") {
@@ -51,6 +90,30 @@
 
 <svelte:window onkeydown={onKey} />
 
+{#snippet infoIcon(tip: string)}
+  <span class="info" role="img" aria-label={tip} data-tip={tip}>
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      aria-hidden="true"
+      fill="none"
+    >
+      <circle cx="8" cy="8" r="6.7" stroke="currentColor" stroke-width="1.4" />
+      <circle cx="8" cy="4.9" r="0.95" fill="currentColor" />
+      <line
+        x1="8"
+        y1="7.1"
+        x2="8"
+        y2="11.6"
+        stroke="currentColor"
+        stroke-width="1.4"
+        stroke-linecap="round"
+      />
+    </svg>
+  </span>
+{/snippet}
+
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="backdrop" onclick={oncancel} role="presentation">
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_interactive_supports_focus -->
@@ -66,20 +129,42 @@
     {#if status === "choosing"}
       <p class="sub">How should this PDF be turned into images for OCR?</p>
 
-      <div class="options">
-        <button class="opt" onclick={() => onprocess("extract", imageMode)}>
-          <span class="opt-title">Extract</span>
-          <span class="opt-desc">
-            Pull the embedded scan at native resolution. Fast for already-rasterized
-            pages.
-          </span>
-        </button>
-        <button class="opt" onclick={() => onprocess("render", imageMode)}>
-          <span class="opt-title">Render</span>
-          <span class="opt-desc">
-            Rasterize each page at 1600px height. Best for vector or mixed content.
-          </span>
-        </button>
+      <div class="mode-row">
+        <span class="lbl">Mode</span>
+        <div class="seg mode-seg" role="radiogroup" aria-label="PDF processing mode">
+          <button
+            class="seg-btn"
+            class:active={selectedMode === "extract"}
+            onclick={() => selectMode("extract")}
+            role="radio"
+            aria-checked={selectedMode === "extract"}
+          >
+            Extract
+            {@render infoIcon(extractTip)}
+          </button>
+          <button
+            class="seg-btn"
+            class:active={selectedMode === "render"}
+            onclick={() => selectMode("render")}
+            role="radio"
+            aria-checked={selectedMode === "render"}
+          >
+            Render
+            {@render infoIcon(renderTip)}
+          </button>
+        </div>
+      </div>
+
+      <div class="height-row">
+        <span class="lbl">Page height</span>
+        <select class="select" bind:value={heightSel} disabled={!selectedMode}>
+          {#if !isRender}
+            <option value="none">None (native)</option>
+          {/if}
+          {#each heights as h (h)}
+            <option value={String(h)}>{h} px</option>
+          {/each}
+        </select>
       </div>
 
       <div class="image-mode">
@@ -101,6 +186,11 @@
 
       <div class="actions">
         <button class="cancel" onclick={oncancel}>Cancel</button>
+        <button
+          class="primary"
+          disabled={!selectedMode}
+          onclick={() => selectedMode && onprocess(selectedMode, imageMode, maxHeight)}
+        >Process</button>
       </div>
     {:else}
       <p class="sub">{statusText}</p>
@@ -194,38 +284,89 @@
     font-size: 11px;
     color: var(--text-faint);
   }
-  .options {
-    display: grid;
-    gap: 10px;
-  }
-  .opt {
+  .mode-row {
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 16px;
+  }
+  .mode-seg {
+    flex: 1;
+  }
+  .mode-seg .seg-btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .info {
+    position: relative;
+    display: inline-flex;
+    color: var(--text-faint);
+    cursor: help;
+  }
+  .seg-btn.active .info {
+    color: var(--bg);
+  }
+  .info::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 230px;
+    background: var(--text);
+    color: var(--bg-elev);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.45;
     text-align: left;
-    padding: 13px 15px;
-    border-radius: 10px;
+    white-space: normal;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.12s ease 0.15s;
+    pointer-events: none;
+    z-index: 10;
+    box-shadow: 0 8px 24px var(--overlay);
+  }
+  .info:hover::after,
+  .info:focus-visible::after {
+    opacity: 1;
+    visibility: visible;
+  }
+  .height-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 16px 0 0;
+  }
+  .select {
+    flex: 1;
+    font-size: 12px;
+    padding: 6px 8px;
+    border-radius: 7px;
     border: 1px solid var(--border-strong);
     background: var(--bg-inset);
     color: var(--text);
-    transition:
-      border-color 0.12s,
-      background 0.12s;
   }
-  .opt:hover {
-    border-color: var(--accent-dim);
-    background: var(--accent-soft);
+  .select:disabled {
+    opacity: 0.5;
   }
-  .opt-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--accent);
-  }
-  .opt-desc {
+  .primary {
     font-size: 12px;
-    line-height: 1.4;
-    color: var(--text-dim);
+    font-weight: 600;
+    padding: 7px 16px;
+    border-radius: 7px;
+    border: none;
+    background: var(--accent-dim);
+    color: var(--bg);
+  }
+  .primary:disabled {
+    opacity: 0.45;
   }
   .progress {
     height: 8px;

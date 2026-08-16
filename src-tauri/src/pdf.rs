@@ -3,11 +3,13 @@
 //! - **Extract** (default): pull the embedded raster image straight off each
 //!   page via `lopdf`. No rendering, so it's fast and preserves the native scan
 //!   resolution — correct for Tesseract. Best for scanned PDFs, which are just
-//!   containers around full-page images.
-//! - **Render**: rasterize each page with `hayro` at a fixed output height of
-//!   1600 px (see `PDF_RENDER_HEIGHT` in `lib.rs`). Slower, but handles PDFs
-//!   with no extractable image (vector text, mixed content) by producing a
-//!   faithful bitmap of the page.
+//!   containers around full-page images. An optional `max_height` bound can
+//!   downscale oversized scans (see `maybe_downscale`) when native resolution
+//!   is too high for good segmentation.
+//! - **Render**: rasterize each page with `hayro` at a user-chosen output
+//!   height (falling back to `PDF_RENDER_HEIGHT` in `lib.rs` when unset).
+//!   Slower, but handles PDFs with no extractable image (vector text, mixed
+//!   content) by producing a faithful bitmap of the page.
 //!
 //! Both return one PNG per page so the result drops straight into the existing
 //! image-based OCR pipeline.
@@ -51,6 +53,34 @@ fn to_target(img: image::DynamicImage, mode: ImageMode) -> image::DynamicImage {
     }
 }
 
+/// Downscale `img` so it is at most `max_height` px tall (width scaled to
+/// preserve aspect ratio). Never upscales — pages already at or below the
+/// limit pass through untouched. `None` disables resizing entirely (native
+/// resolution, the historical default).
+///
+/// Exists because scans embedded at very high resolution (3000px+ page
+/// height) produce line heights far above what the segmentation models were
+/// trained on, degrading layout detection; a bounded downscale restores
+/// workable proportions. Triangle (bilinear) filtering is chosen over sharper
+/// kernels (Lanczos/CatmullRom) because large reductions with sharp kernels
+/// alias high-frequency detail into noise, which hurts the recognizers more
+/// than the slight softness of bilinear does.
+fn maybe_downscale(
+    img: image::DynamicImage,
+    max_height: Option<u16>,
+) -> image::DynamicImage {
+    let Some(max) = max_height else {
+        return img;
+    };
+    let h = img.height();
+    if h == 0 || h <= max as u32 {
+        return img;
+    }
+    let scale = max as f32 / h as f32;
+    let w = ((img.width() as f32 * scale).round() as u32).max(1);
+    img.resize_exact(w, max as u32, image::imageops::FilterType::Triangle)
+}
+
 /// Formats the display name for a page extracted from a PDF.
 ///
 /// `pdf_name` is the original file name (e.g. `"scan_3.pdf"`); `page` is the
@@ -68,6 +98,10 @@ pub(crate) fn page_name(pdf_name: &str, page: usize) -> String {
 /// Returns one entry per page that yielded an image, in page order. Pages with
 /// no extractable image are skipped; the caller surfaces the count.
 ///
+/// `max_height` optionally bounds each page's pixel height (see
+/// `maybe_downscale`) — pages taller than the limit are downscaled, aspect
+/// preserved; shorter pages are untouched.
+///
 /// `on_progress(done, total)` is called once with the total page count, then
 /// once per page after it is processed, so the UI can show progress.
 ///
@@ -79,6 +113,7 @@ pub(crate) fn extract_pages(
     pdf_bytes: &[u8],
     on_progress: impl Fn(usize, usize) + Send + Sync,
     image_mode: ImageMode,
+    max_height: Option<u16>,
 ) -> Result<Vec<Vec<u8>>, String> {
     // Load from memory via a temp file: lopdf's Document::load takes a path,
     // and load_from takes a Read. Bytes in memory satisfy the latter.
@@ -130,6 +165,9 @@ pub(crate) fn extract_pages(
                                     return None;
                                 }
                             };
+                            // Bound the page height before re-encoding —
+                            // oversized scans are what this option exists for.
+                            let dyn_img = maybe_downscale(dyn_img, max_height);
                             match reencode_png(&to_target(dyn_img, image_mode)) {
                                 Ok(png) => Some(png),
                                 Err(e) => {
@@ -156,10 +194,12 @@ pub(crate) fn extract_pages(
     Ok(pngs.into_iter().flatten().collect())
 }
 
-/// Render every page of `pdf_bytes` to a PNG at a fixed output height of
+/// Render every page of `pdf_bytes` to a PNG at an output height of
 /// `target_height` pixels (width scales to preserve aspect ratio). Used when a
 /// PDF has no extractable image (vector text, mixed content) or when the user
-/// explicitly wants a page bitmap rather than the embedded scan.
+/// explicitly wants a page bitmap rather than the embedded scan. The height is
+/// user-selectable from the frontend; `PDF_RENDER_HEIGHT` is the fallback when
+/// none is supplied.
 ///
 /// Scaling is derived from each page's own dimensions so every page ends up
 /// the same pixel height regardless of its MediaBox — important because scanned
@@ -868,8 +908,26 @@ mod tests {
 
 #[cfg(test)]
 mod extract_tests {
-    use super::{extract_pages, ImageMode};
+    use super::{extract_pages, maybe_downscale, ImageMode};
     use std::path::PathBuf;
+
+    #[test]
+    fn downscale_bounds_height_without_upscaling() {
+        // 3000×4000 capped at 1600 → 1200×1600 (aspect preserved, rounded).
+        let big = image::DynamicImage::new_rgb8(3000, 4000);
+        let out = maybe_downscale(big, Some(1600));
+        assert_eq!((out.width(), out.height()), (1200, 1600));
+
+        // Already at/below the cap → untouched, no upscale.
+        let small = image::DynamicImage::new_rgb8(600, 800);
+        let out = maybe_downscale(small, Some(1600));
+        assert_eq!((out.width(), out.height()), (600, 800));
+
+        // None → native resolution passthrough.
+        let native = image::DynamicImage::new_rgb8(3000, 4000);
+        let out = maybe_downscale(native, None);
+        assert_eq!((out.width(), out.height()), (3000, 4000));
+    }
 
     #[test]
     fn lzw_round_trips_through_apply_filter() {
@@ -1013,7 +1071,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read fixture");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
         assert!(!pages.is_empty(), "expected at least one extracted page");
         for png in &pages {
             assert!(!png.is_empty(), "extracted page PNG must be non-empty");
@@ -1035,7 +1093,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read tmp.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
         // tmp.pdf has 5 pages, every one a FlateDecode→DCTDecode image.
         assert_eq!(pages.len(), 5, "all 5 pages should extract, got {}", pages.len());
         for (i, png) in pages.iter().enumerate() {
@@ -1063,7 +1121,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read sample_png.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
         assert_eq!(
             pages.len(),
             5,
@@ -1097,7 +1155,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read tmp_2.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
         assert!(
             pages.len() >= 130,
             "expected >=130 of 135 pages, got {}",
@@ -1127,7 +1185,7 @@ mod extract_tests {
             return;
         };
         let bytes = std::fs::read(&path).expect("read sample_ccitt.pdf");
-        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray).expect("extract succeeds");
+        let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None).expect("extract succeeds");
         assert_eq!(pages.len(), 5, "expected 5 pages, got {}", pages.len());
 
         // Each page should be predominantly white (a text scan), not inverted.
@@ -1200,7 +1258,7 @@ mod extract_tests {
 
     #[test]
     fn rejects_garbage_bytes() {
-        let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray).unwrap_err();
+        let err = extract_pages(b"not a pdf", |_, _| {}, ImageMode::Gray, None).unwrap_err();
         assert!(
             err.to_lowercase().contains("load") || err.to_lowercase().contains("pdf"),
             "expected a load error, got: {err}"
