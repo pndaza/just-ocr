@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ensureThumb } from "./ocr";
+  import { ensureThumb, exportImages, type ImageExportFormat } from "./ocr";
   import type { Job } from "./ocr";
 
   interface Props {
@@ -21,6 +21,34 @@
 
   let dragging = $state(false);
   let input: HTMLInputElement;
+
+  // ── Export images to folder ───────────────────────────────────────────────
+  // The format popover ("PNG or JPG?") opens from the bottom-bar button; the
+  // pick kicks off exportImages (folder dialog → write/convert per image).
+  let fmtOpen = $state(false);
+  // Progress while exporting: null when idle, else processed/total; `doneMsg`
+  // holds a short-lived "✓ n exported" confirmation afterwards.
+  let exporting = $state<{ done: number; total: number } | null>(null);
+  let doneMsg = $state("");
+
+  async function pickFormat(fmt: ImageExportFormat) {
+    fmtOpen = false;
+    if (exporting) return;
+    exporting = { done: 0, total: jobs.length };
+    doneMsg = "";
+    try {
+      const n = await exportImages(jobs, fmt, (done, total) => {
+        exporting = { done, total };
+      });
+      if (n) {
+        doneMsg = `✓ ${n} exported`;
+        setTimeout(() => (doneMsg = ""), 2500);
+      }
+    } catch (e) {
+      console.warn("Image export failed:", e);
+    }
+    exporting = null;
+  }
 
   function drop(e: DragEvent) {
     e.preventDefault();
@@ -170,6 +198,39 @@
     onchange={(e) => e.currentTarget.files && onfiles(e.currentTarget.files)}
     hidden
   />
+
+  {#if jobs.length}
+    <div class="foot">
+      {#if exporting}
+        <span class="exp-status">Exporting {exporting.done}/{exporting.total}…</span>
+      {:else if doneMsg}
+        <span class="exp-status ok">{doneMsg}</span>
+      {:else}
+        <span class="exp-hint">{jobs.length} image{jobs.length === 1 ? "" : "s"} in queue</span>
+        <div class="exp-wrap">
+          {#if fmtOpen}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="pop-backdrop" onclick={() => (fmtOpen = false)}></div>
+            <div class="fmt-pop" role="menu" aria-label="Export image format">
+              <button class="fmt-btn" role="menuitem" onclick={() => pickFormat("png")}>
+                <span class="fmt-name">PNG</span>
+                <span class="fmt-sub">lossless, larger</span>
+              </button>
+              <button class="fmt-btn" role="menuitem" onclick={() => pickFormat("jpg")}>
+                <span class="fmt-name">JPG</span>
+                <span class="fmt-sub">smaller files</span>
+              </button>
+            </div>
+          {/if}
+          <button
+            class="text-btn export"
+            onclick={() => (fmtOpen = !fmtOpen)}
+            title="Export images to a folder"
+          >⤓ Export images</button>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -385,4 +446,81 @@
   .empty-icon { font-size: 28px; color: var(--accent); }
   .empty-title { font-weight: 600; color: var(--text-dim); font-size: 13px; }
   .empty-sub { font-size: 11px; }
+
+  /* Bottom bar: queue summary at left, image-export button at right. The
+     format popover anchors to the button via .exp-wrap (position: relative). */
+  .foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    min-height: 34px;
+  }
+  .exp-hint {
+    font-size: 11px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .exp-status {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+  }
+  .exp-status.ok { color: var(--ok); }
+  .exp-wrap {
+    position: relative;
+    display: inline-flex;
+    margin-left: auto;
+  }
+  .export {
+    white-space: nowrap;
+  }
+  .pop-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+  }
+  .fmt-pop {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    right: 0;
+    z-index: 41;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 148px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 4px;
+    box-shadow: 0 12px 32px var(--overlay);
+  }
+  .fmt-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    border: none;
+    background: none;
+    text-align: left;
+  }
+  .fmt-btn:hover {
+    background: var(--accent-soft);
+  }
+  .fmt-name {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .fmt-sub {
+    font-size: 10px;
+    color: var(--text-faint);
+  }
 </style>

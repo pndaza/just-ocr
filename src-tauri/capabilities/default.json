@@ -6,9 +6,11 @@
   "permissions": [
     "core:default",
     "dialog:allow-save",
+    "dialog:allow-open",
     "fs:allow-write-file",
     "fs:allow-read-file",
     "fs:allow-remove",
+    "fs:allow-mkdir",
     "opener:allow-reveal-item-in-dir",
     "updater:default",
     "process:default",
