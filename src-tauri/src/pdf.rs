@@ -602,7 +602,10 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 /// Interpret raw decoded pixel data as RGB8 by color space + bits-per-component.
 /// CMYK is converted to RGB; grayscale is expanded to RGB triplets. Sub-byte
-/// samples (bpc 1/2/4) are expanded to one byte per sample first.
+/// samples (bpc 1/2/4) are expanded to one byte per sample and stretched to
+/// the full 0–255 range — for every color space, not just gray. Skipping the
+/// stretch on RGB left every channel at 0..2^bpc-1 (e.g. 0–3 for 2-bpc scans),
+/// which renders as a solid black page.
 fn interpret_raw(
     raw: &[u8],
     width: u32,
@@ -617,7 +620,8 @@ fn interpret_raw(
             "DeviceCMYK" => 4,
             _ => return Err(format!("color space {color_space} not supported for raw")),
         };
-        expand_samples(raw, width, height, colors, bpc)?
+        let expanded = expand_samples(raw, width, height, colors, bpc)?;
+        scale_samples(&expanded, bpc)
     } else if bpc == 8 {
         raw.to_vec()
     } else {
@@ -637,8 +641,7 @@ fn interpret_raw(
             if raw.len() < expected {
                 return Err(format!("raw Gray: expected {expected} bytes, got {}", raw.len()));
             }
-            let scaled = scale_gray(&raw[..expected], bpc);
-            Ok(scaled.iter().flat_map(|&v| [v, v, v]).collect())
+            Ok(raw[..expected].iter().flat_map(|&v| [v, v, v]).collect())
         }
         "DeviceCMYK" => {
             let mut rgb = Vec::with_capacity((width * height * 3) as usize);
@@ -703,8 +706,9 @@ fn expand_samples(
     Ok(out)
 }
 
-/// Scale gray sample values to the full 0–255 range based on bpc.
-fn scale_gray(data: &[u8], bpc: u32) -> Vec<u8> {
+/// Scale sub-byte sample values (already expanded to one byte each) to the
+/// full 0–255 range based on bpc. Color-space agnostic.
+fn scale_samples(data: &[u8], bpc: u32) -> Vec<u8> {
     if bpc == 8 {
         return data.to_vec();
     }
@@ -1121,6 +1125,20 @@ mod extract_tests {
         assert!(depngify(short, colors, bpc, columns).is_err());
     }
 
+    /// Regression for the solid-black 2-bpc RGB page (`gt_01.pdf` page 4:
+    /// /DeviceRGB /BitsPerComponent 2, Flate+RunLength): `interpret_raw`
+    /// expanded sub-byte samples but only Gray stretched them to 0–255, so
+    /// every RGB channel stayed at 0..=3 and the page rendered black.
+    #[test]
+    fn interpret_raw_scales_2bpc_rgb_to_full_range() {
+        use super::interpret_raw;
+        // 2×1 RGB image, 6 samples at 2 bpc = 12 bits → 2 bytes/row (4 pad
+        // bits). Samples (3,0,2, 1,3,0) pack MSB-first to 0xC9 0xC0.
+        let packed = [0b11_00_10_01, 0b11_00_0000];
+        let rgb = interpret_raw(&packed, 2, 1, "DeviceRGB", 2).expect("decode");
+        assert_eq!(rgb, vec![255, 0, 170, 85, 255, 0]);
+    }
+
     fn fixture() -> Option<PathBuf> {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny.pdf");
         if p.exists() { Some(p) } else { None }
@@ -1217,6 +1235,35 @@ mod extract_tests {
                 i + 1
             );
         }
+    }
+
+    /// Regression for the solid-black 2-bpc RGB page: `gt_01.pdf` mixes JBIG2
+    /// pages with one /DeviceRGB /BitsPerComponent 2 page (object 23, Flate +
+    /// RunLength). Before the fix its channels decoded to 0..=3 → mean
+    /// luminance ~1 (black). A white-background scan must be far brighter.
+    /// Skipped when the sample dir isn't present (not bundled in CI).
+    #[test]
+    fn extracts_2bpc_rgb_page_not_black() {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../sample_pdf/gt_01.pdf");
+        let Some(path) = (p.exists()).then_some(p) else {
+            eprintln!("skip: sample_pdf/gt_01.pdf not present");
+            return;
+        };
+        let bytes = std::fs::read(&path).expect("read gt_01.pdf");
+        let pages =
+            extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, Some((4, 4))).expect("extract succeeds");
+        assert_eq!(pages.len(), 1, "expected exactly page 4");
+        let img = image::load_from_memory(&pages[0].1).expect("decode page-4 PNG");
+        let lum = img.to_luma8();
+        let (w, h) = lum.dimensions();
+        assert_eq!((w, h), (2746, 4096), "native resolution expected");
+        let sum: u64 = lum.pixels().map(|p| p.0[0] as u64).sum();
+        let mean = sum as f64 / (w as f64 * h as f64);
+        assert!(
+            mean > 50.0,
+            "page 4 looks black (mean luminance {mean:.1}); 2-bpc scaling broken"
+        );
     }
 
     /// Regression for JBIG2-compressed scanned PDFs: previously every JBIG2
