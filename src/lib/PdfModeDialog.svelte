@@ -219,6 +219,7 @@
             <option value={String(h)}>{h} px</option>
           {/each}
         </select>
+        <span class="seg-hint">affects OCR accuracy</span>
       </div>
 
       <div class="range-row">
@@ -336,6 +337,10 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--text-faint);
+    /* Fixed label column so every row's control (segment, dropdown, inputs)
+     * starts at the same left edge regardless of label length. Sized to the
+     * longest label, "IMAGE FORMAT". */
+    flex: 0 0 84px;
   }
   .seg {
     display: flex;
@@ -512,6 +517,7 @@
   .actions {
     display: flex;
     justify-content: flex-end;
+    gap: 8px;
     margin-top: 16px;
   }
   .cancel {
