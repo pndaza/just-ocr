@@ -223,13 +223,21 @@
     });
   }
 
-  function onPdfModeChosen(mode: PdfMode, imageMode: ImageMode) {
+  function onPdfModeChosen(
+    mode: PdfMode,
+    imageMode: ImageMode,
+    maxHeight: number | null,
+  ) {
     if (!pdfDialog) return;
     pdfDialog = { ...pdfDialog, status: "working", mode };
-    runPdfRendering(mode, imageMode);
+    runPdfRendering(mode, imageMode, maxHeight);
   }
 
-  async function runPdfRendering(mode: PdfMode, imageMode: ImageMode) {
+  async function runPdfRendering(
+    mode: PdfMode,
+    imageMode: ImageMode,
+    maxHeight: number | null,
+  ) {
     const dlg = pdfDialog;
     if (!dlg) return;
     try {
@@ -241,6 +249,7 @@
           if (pdfDialog) pdfDialog = { ...pdfDialog, done, total };
         },
         imageMode,
+        maxHeight ?? undefined,
       );
       dlg.resolve(pages.length ? pages : null);
     } catch (e) {

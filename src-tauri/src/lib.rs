@@ -226,7 +226,9 @@ impl Default for PdfMode {
     }
 }
 
-/// Fixed output height for render mode. Chosen as a balance between OCR
+/// Default output height for render mode, used when the frontend sends no
+/// height (the UI always sends one — it offers a size dropdown — so this is a
+/// fallback for programmatic callers). Chosen as a balance between OCR
 /// accuracy and speed; ~53px per 30pt glyph (1600 / 30), tall enough to keep
 /// body text legible at any page size.
 const PDF_RENDER_HEIGHT: u16 = 1600;
@@ -282,6 +284,12 @@ fn remove_session_temp_dirs() {
 /// blocking thread so the UI stays responsive while large scans decode.
 /// `pdf_name` labels each page `<stem> · p<n>`.
 ///
+/// `max_height` bounds the output page height in both modes: extract
+/// downscales pages taller than it (never upscales — see `pdf::maybe_downscale`),
+/// render rasterizes at exactly this height. `None` keeps extract at native
+/// resolution; render falls back to the `PDF_RENDER_HEIGHT` default (the UI
+/// always sends a value for render, since it has no "native size" to keep).
+///
 /// Emits a `pdf-progress` event as each page is processed so the frontend can
 /// show a progress bar (extraction/rendering time scales with page count).
 #[tauri::command]
@@ -291,6 +299,7 @@ async fn render_pdf(
     bytes: Vec<u8>,
     mode: Option<PdfMode>,
     image_mode: Option<String>,
+    max_height: Option<u16>,
 ) -> Result<Vec<ReadFile>, String> {
     let mode = mode.unwrap_or_default();
     let image_mode = match image_mode.as_deref() {
@@ -306,8 +315,10 @@ async fn render_pdf(
             let _ = app_handle.emit("pdf-progress", PdfProgress { name: name.clone(), total, done });
         };
         let pages = match mode {
-            PdfMode::Extract => pdf::extract_pages(&bytes, &emit, image_mode)?,
-            PdfMode::Render => pdf::render_pages(&bytes, PDF_RENDER_HEIGHT, &emit, image_mode)?,
+            PdfMode::Extract => pdf::extract_pages(&bytes, &emit, image_mode, max_height)?,
+            PdfMode::Render => {
+                pdf::render_pages(&bytes, max_height.unwrap_or(PDF_RENDER_HEIGHT), &emit, image_mode)?
+            }
         };
 
         // Write each page PNG to a temp file and return only its path. Returning

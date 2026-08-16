@@ -220,6 +220,12 @@ export interface PdfProgress {
  * Extract or render each page of a PDF to a PNG via the Rust `render_pdf`
  * command. Returns one ReadFile per page, named `<stem> · p<n>`.
  *
+ * `maxHeight` bounds the output page height in both modes. Extract downscales
+ * pages taller than the limit (aspect preserved, never upscales); high-res
+ * scans can confuse line segmentation, so the dialog offers bounded sizes —
+ * `undefined` keeps native resolution. Render rasterizes at exactly this
+ * height, so the dialog always sends a value there.
+ *
  * `onProgress(done, total)` is called as each page is processed, driven by the
  * `pdf-progress` event the backend emits. Used to show a progress bar in the
  * PDF-mode dialog while a large PDF is read.
@@ -230,6 +236,7 @@ export async function renderPdf(
   mode: PdfMode,
   onProgress?: (done: number, total: number) => void,
   imageMode?: ImageMode,
+  maxHeight?: number,
 ): Promise<ReadFile[]> {
   let unlisten: UnlistenFn | null = null;
   if (onProgress) {
@@ -245,6 +252,7 @@ export async function renderPdf(
       bytes: Array.from(bytes),
       mode,
       imageMode,
+      maxHeight,
     });
   } finally {
     unlisten?.();
