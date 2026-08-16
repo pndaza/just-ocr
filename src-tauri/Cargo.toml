@@ -1,6 +1,6 @@
 [package]
 name = "just-ocr"
-version = "0.6.0"
+version = "0.7.0"
 description = "Offline Tesseract OCR GUI"
 authors = ["you"]
 edition = "2021"
