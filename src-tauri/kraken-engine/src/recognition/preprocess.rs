@@ -342,6 +342,48 @@ const BLEED_PROTECT_FRAC: f64 = 0.70;
 /// narrow.
 const BLEED_CHUNK_TARGET: u32 = 100;
 
+/// Rows of white required between a floating (band-disconnected) ink mark and
+/// the strip's top/bottom edge for the mark to count as a gap-separated
+/// diacritic of THIS line rather than bleed clipped from a neighbor line.
+///
+/// Bleed exists because the quad cut through the neighbor's glyphs, so it
+/// abuts the strip edge: PP-OCR's unclip pad (~4px) plus Sauvola's erosion of
+/// the outermost anti-aliased row put clipped bleed within ~5 rows of the
+/// edge (measured on the dump corpus: bleed bands start at rows 0–4). A
+/// genuine diacritic has real headroom above it (line 0056's leading vowel
+/// curl started at row 10). Combined with the height and width limits
+/// ([`BLEED_COMPONENT_FRAC`], [`BLEED_FLOAT_WIDTH_FRAC`]), only marks that are
+/// too tall to be a fragment, one glyph wide, and clear of the edges are
+/// protected from cuts.
+const BLEED_EDGE_CLEARANCE: i32 = 6;
+
+/// Width limit for a floating (band-disconnected) mark to count as a
+/// gap-separated diacritic: at most this multiple of the core body height.
+///
+/// TALL + edge-clear alone is not enough: the historic 0009 bleed was an
+/// 11-row, 50px-wide band of neighbor-line fragments floating clear of the
+/// edge — taller than half that line's body and 9 rows off the edge. A
+/// diacritic is one glyph wide (0056's vowel curl: 28px vs a 41px body; the
+/// 0009 band: 50px vs a 16px body — three glyphs). Only marks narrower than
+/// one body height earn the floating-diacritic protection.
+const BLEED_FLOAT_WIDTH_FRAC: f64 = 1.0;
+
+/// Minimum number of row-aligned floating fragments that constitutes a
+/// "ghost line" — the previous line's glyph bottoms hovering above the band.
+///
+/// One floating mark above the band is ambiguous (0028's gap-separated glyph
+/// top must keep its gap-path reprieve), but bleed comes as a LINE: an
+/// over-tall quad clips many glyphs of the neighbor line at once, leaving a
+/// horizontal band of fragments at the same rows. Line 0004's band had 8
+/// fragments; line 0009's had 3, one of which earned individual diacritic
+/// protection by a single pixel of height — so the chain pool includes
+/// protected marks too (band membership is stronger evidence than shape
+/// heuristics), and three aligned fragments already betray a line while
+/// legitimate marks have only ever appeared alone. Unprotected floating TOP
+/// components whose row spans overlap are chained; a chain this large is
+/// killed outright, smaller groups keep the reprieve.
+const BLEED_GHOST_MIN_FRAGS: usize = 3;
+
 /// Remove neighbor-line ink that bled into the top/bottom of an over-tall
 /// PP-OCR quad, returning the CROPPED text body.
 ///
@@ -632,13 +674,9 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
             continue;
         }
         let (cx0, cx1) = chunk_bounds[ci];
-        let (spans, body) = chunk_outer_components(image, cx0, cx1, lo, hi, threshold);
+        let spans = chunk_outer_components(image, cx0, cx1, lo, hi, threshold);
         // Top side: among components sitting entirely above `lo`, the lowest
         // bottom row defines where bleed ends. Set the boundary just below it.
-        // The cut is CLAMPED to the body extent: a floating speck anywhere in
-        // the outer region can otherwise drag the flat cut down through ink
-        // that is connected to the body (line 0010: a 1px speck at the top of
-        // a no-gap chunk pulled the cut 7 rows into a descender's tail).
         if !chunk_top_found[ci] {
             let mut cut_below = 0i32; // keep everything above by default
             let mut found_bleed = false;
@@ -649,14 +687,11 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
                 }
             }
             if found_bleed {
-                if let Some((body_top, _)) = body {
-                    cut_below = cut_below.min(body_top);
-                }
                 chunk_top[ci] = cut_below.max(0).min(lo);
             }
         }
         // Bottom side: mirror — components entirely below `hi`, set the
-        // boundary just above the topmost one, clamped to the body extent.
+        // boundary just above the topmost one.
         if !chunk_bot_found[ci] {
             let mut cut_above = (h - 1) as i32; // keep everything below by default
             let mut found_bleed = false;
@@ -667,11 +702,44 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
                 }
             }
             if found_bleed {
-                if let Some((_, body_bot)) = body {
-                    cut_above = cut_above.max(body_bot);
-                }
                 chunk_bot[ci] = cut_above.max(hi).min((h - 1) as i32);
             }
+        }
+    }
+
+    // --- Protected-ink clamp: no cut may sever ink that belongs to the line.---
+    //
+    // Every cut above — whole-width, chunk gap scan, or contour — is a FLAT
+    // row boundary, but connectivity is the ground truth for "belongs to this
+    // line". One full-strip 8-connectivity pass finds every component that
+    // touches the protect band; for each chunk we union the row spans of such
+    // components WITHIN the chunk's columns, and clamp its cuts to that
+    // extent. This catches what chunk-local analysis cannot: a glyph
+    // straddling a chunk boundary (loop in one chunk, stem in the next)
+    // connects to the body through the neighbor's columns, so the chunk
+    // holding the loop sees a chunk-wide white band beneath it — a false gap.
+    //
+    // The pass also protects tall, NARROW, edge-clear FLOATING marks
+    // (disconnected from the body) — gap-separated diacritics such as line
+    // 0056's leading vowel curl, which pokes 2 rows above the protect band
+    // with real white above it. Bleed never earns that protection: bands are
+    // wider than one body height or hug the edge where the quad clipped them
+    // (see [`BLEED_EDGE_CLEARANCE`], [`BLEED_FLOAT_WIDTH_FRAC`]). For
+    // genuinely separated bleed the clamp is a no-op, because ink beyond a
+    // true separator touches neither.
+    let (body_extents, kill) = strip_protected_extents(
+        image,
+        &chunk_bounds,
+        lo,
+        hi,
+        threshold,
+        max_bleed_h,
+        core_body_h,
+    );
+    for ci in 0..n_chunks {
+        if let Some((body_top, body_bot)) = body_extents[ci] {
+            chunk_top[ci] = chunk_top[ci].min(body_top);
+            chunk_bot[ci] = chunk_bot[ci].max(body_bot);
         }
     }
 
@@ -728,7 +796,13 @@ fn trim_neighbor_bleed(image: &GrayImage) -> GrayImage {
         for x in cx0..cx1 {
             for oy in 0..new_h as i32 {
                 let sy = crop_top + oy;
-                let px = if sy < t || sy > b {
+                // `sy ∈ [crop_top, crop_bottom] ⊆ [0, h)` by construction; the
+                // get() fallback only covers the impossible out-of-range case.
+                let killed = kill
+                    .get(sy as usize * w as usize + x as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let px = if sy < t || sy > b || killed {
                     Luma([255])
                 } else {
                     *image.get_pixel(x, sy as u32)
@@ -780,6 +854,205 @@ fn pad_white(image: &GrayImage, pad: u32) -> GrayImage {
 /// are short, genuine tall ascenders/descenders reach past it.
 const BLEED_COMPONENT_FRAC: f64 = 0.5;
 
+/// Per-chunk row extent of ink the trim must NOT remove, from ONE full-strip
+/// 8-connectivity flood-fill pass, plus a pixel mask of floating bottom-side
+/// ink to remove unconditionally. Two kinds of ink earn protection:
+///
+/// 1. **Body ink** — any component that touches the protect band `[lo, hi]`,
+///    however far its strokes reach or which chunks they pass through.
+/// 2. **Clear floating diacritics** — components disconnected from the body
+///    that are taller than `max_bleed_h` (too tall to be a bleed fragment),
+///    narrower than `core_body_h` (one glyph, not a multi-letter band), AND
+///    at least [`BLEED_EDGE_CLEARANCE`] rows clear of the strip's top/bottom
+///    edges (bleed is clipped by the quad and hugs the edge; a diacritic has
+///    real headroom above it).
+///
+/// For each chunk in `chunks`, the extent is the union — over protected
+/// components — of the component's row span RESTRICTED to the chunk's columns
+/// `[cx0, cx1)`. The restriction matters: a component may span several chunks
+/// while its tall excursions (ascenders, descenders) sit in only one of them,
+/// and a tall stroke in chunk k must not protect unrelated bleed in chunk j
+/// that the component merely spans. Chunks with no protected ink get `None`.
+///
+/// The returned kill mask covers two kinds of floating ink: components
+/// entirely BELOW the band (tops of the next line's glyphs — the gap scan
+/// alone cannot drop these, because a blob adjacent to the descender zone
+/// inks the rows between itself and the band, so the "first white row" lands
+/// below the blob and the flat cut keeps it, line 0056), and "ghost lines"
+/// ABOVE the band — row-aligned chains of at least [`BLEED_GHOST_MIN_FRAGS`]
+/// unprotected fragments, the previous line's glyph bottoms (line 0004).
+/// Lone floating top marks keep the gap-path reprieve: Burmese stacks
+/// gap-separated diacritics above the text (0028's glyph-top loop).
+///
+/// `trim_neighbor_bleed` clamps its flat cuts to the extents (so a cut can
+/// never sever protected ink — including glyphs whose connection to the body
+/// routes through a NEIGHBORING chunk's columns, which no chunk-local scan
+/// can see) and whites out the kill mask in the composited output.
+/// Ink = pixel < `threshold`.
+fn strip_protected_extents(
+    image: &GrayImage,
+    chunks: &[(u32, u32)],
+    lo: i32,
+    hi: i32,
+    threshold: u8,
+    max_bleed_h: i32,
+    core_body_h: i32,
+) -> (Vec<Option<(i32, i32)>>, Vec<bool>) {
+    let (w, h) = image.dimensions();
+    let hi_edge = h as i32 - 1 - BLEED_EDGE_CLEARANCE;
+    let n_chunks = chunks.len();
+    let mut extents: Vec<Option<(i32, i32)>> = vec![None; n_chunks];
+    let mut kill = vec![false; (w as usize) * (h as usize)];
+    // Column → chunk lookup (the chunks tile [0, w) as contiguous intervals).
+    let mut col_chunk = vec![usize::MAX; w as usize];
+    for (ci, &(cx0, cx1)) in chunks.iter().enumerate() {
+        for x in cx0..cx1 {
+            col_chunk[x as usize] = ci;
+        }
+    }
+    let mut visited = vec![false; (w as usize) * (h as usize)];
+    let idx = |x: u32, y: u32| (y as usize * w as usize + x as usize) as usize;
+    // Unprotected floating TOP components, deferred to the ghost-line pass.
+    let mut top_floats: Vec<(i32, i32, Vec<(u32, u32)>)> = Vec::new();
+
+    for sy in 0..h {
+        for sx in 0..w {
+            if visited[idx(sx, sy)] || image.get_pixel(sx, sy)[0] >= threshold {
+                continue;
+            }
+            // Flood-fill this component, recording its pixel list, its
+            // row/column span, its per-chunk row spans, and whether it
+            // reaches the protect band.
+            let mut stack = vec![(sx, sy)];
+            let mut comp_px: Vec<(u32, u32)> = Vec::new();
+            let mut comp_spans: Vec<Option<(i32, i32)>> = vec![None; n_chunks];
+            let mut comp_top = sy as i32;
+            let mut comp_bot = sy as i32;
+            let mut comp_x0 = sx;
+            let mut comp_x1 = sx;
+            let mut touches_band = false;
+            while let Some((x, y)) = stack.pop() {
+                if x >= w || y >= h {
+                    continue;
+                }
+                if visited[idx(x, y)] {
+                    continue;
+                }
+                if image.get_pixel(x, y)[0] >= threshold {
+                    continue;
+                }
+                visited[idx(x, y)] = true;
+                comp_px.push((x, y));
+                comp_top = comp_top.min(y as i32);
+                comp_bot = comp_bot.max(y as i32);
+                comp_x0 = comp_x0.min(x);
+                comp_x1 = comp_x1.max(x);
+                if let Some(&ci) = col_chunk.get(x as usize) {
+                    if ci != usize::MAX {
+                        comp_spans[ci] = Some(match comp_spans[ci] {
+                            None => (y as i32, y as i32),
+                            Some((t, b)) => (t.min(y as i32), b.max(y as i32)),
+                        });
+                    }
+                }
+                if y as i32 >= lo && y as i32 <= hi {
+                    touches_band = true;
+                }
+                for dx in -1i32..=1 {
+                    for dy in -1i32..=1 {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx >= 0 && ny >= 0 && (nx as u32) < w && (ny as u32) < h {
+                            stack.push((nx as u32, ny as u32));
+                        }
+                    }
+                }
+            }
+            // Protection test: body ink (band-touching), or a tall, narrow,
+            // edge-clear floating mark (gap-separated diacritic).
+            let tall = comp_bot - comp_top + 1 > max_bleed_h;
+            let narrow = (comp_x1 - comp_x0 + 1) as f64
+                <= core_body_h as f64 * BLEED_FLOAT_WIDTH_FRAC;
+            let clear = comp_top >= BLEED_EDGE_CLEARANCE && comp_bot <= hi_edge;
+            let protected_float = tall && narrow && clear;
+            if !touches_band {
+                // Floating BOTTOM-side ink that is not a protected mark is
+                // next-line bleed — kill its pixels outright. A flat cut
+                // cannot remove it: the blob inks the rows between itself
+                // and the band, so the gap scan's "first white row" lands
+                // below the blob (line 0056 kept three such blobs).
+                if comp_top > hi && !protected_float {
+                    for &(x, y) in &comp_px {
+                        kill[idx(x, y)] = true;
+                    }
+                    continue;
+                }
+                if comp_bot < lo {
+                    // Floating TOP-side ink goes into the ghost pool
+                    // REGARDLESS of individual protection: a row-aligned
+                    // band of >= BLEED_GHOST_MIN_FRAGS fragments is the
+                    // previous line's bottoms even when one fragment is
+                    // tall/narrow/clear by a hair (line 0009). Until such a
+                    // band forms, each mark keeps its own protection (0028).
+                    if !protected_float {
+                        top_floats.push((comp_top, comp_bot, comp_px));
+                        continue;
+                    }
+                    top_floats.push((comp_top, comp_bot, comp_px.clone()));
+                }
+            }
+            for ci in 0..n_chunks {
+                if let Some(span) = comp_spans[ci] {
+                    extents[ci] = Some(match extents[ci] {
+                        None => span,
+                        Some((t, b)) => (t.min(span.0), b.max(span.1)),
+                    });
+                }
+            }
+        }
+    }
+
+    // Ghost-line pass: chain the deferred top floats whose row spans overlap
+    // (union-find over interval intersection) and kill any chain holding at
+    // least BLEED_GHOST_MIN_FRAGS fragments — a horizontal band of floating
+    // marks is the previous line's glyph bottoms, not diacritics. Chains stay
+    // small (few floats, O(n²) pairs) so the simple double loop is fine.
+    let n_floats = top_floats.len();
+    if n_floats >= BLEED_GHOST_MIN_FRAGS {
+        let mut parent: Vec<usize> = (0..n_floats).collect();
+        fn find(parent: &mut [usize], mut a: usize) -> usize {
+            while parent[a] != a {
+                parent[a] = parent[parent[a]];
+                a = parent[a];
+            }
+            a
+        }
+        for i in 0..n_floats {
+            for j in (i + 1)..n_floats {
+                let (a0, a1, _) = top_floats[i];
+                let (b0, b1, _) = top_floats[j];
+                if a0 <= b1 && b0 <= a1 {
+                    let ra = find(&mut parent, i);
+                    let rb = find(&mut parent, j);
+                    parent[ra] = rb;
+                }
+            }
+        }
+        let mut counts = vec![0usize; n_floats];
+        for i in 0..n_floats {
+            counts[find(&mut parent, i)] += 1;
+        }
+        for i in 0..n_floats {
+            if counts[find(&mut parent, i)] >= BLEED_GHOST_MIN_FRAGS {
+                for &(x, y) in &top_floats[i].2 {
+                    kill[idx(x, y)] = true;
+                }
+            }
+        }
+    }
+    (extents, kill)
+}
+
 /// Find ink components that live entirely OUTSIDE the protect band `[lo, hi]`
 /// within a chunk's column range `[cx0, cx1)`, and return their row spans.
 ///
@@ -788,16 +1061,12 @@ const BLEED_COMPONENT_FRAC: f64 = 0.5;
 /// row density cannot separate body from bleed — but connectivity can: the
 /// bleed is almost always a distinct component floating near the edge.
 ///
-/// Returns `(floating_spans, body_extent)`:
-///  - `floating_spans`: a `Vec<(top, bottom)>` of inclusive row spans for
-///    every component whose rows are entirely above `lo` OR entirely below
-///    `hi`. The caller picks the top-side / bottom-side components to set the
-///    chunk boundary locally — no borrowing from neighbors, so it avoids the
-///    "blur" of interpolation when bleed heights differ across columns.
-///  - `body_extent`: `Some((top, bottom))` row span unioned over all
-///    components that DO touch the protect band (the line's real ink, however
-///    far it reaches). The caller clamps its cut to this so a floating speck
-///    can never drag the flat cut through ink that is connected to the body.
+/// Returns a `Vec<(top, bottom)>` of inclusive row spans for every component
+/// whose rows are entirely above `lo` OR entirely below `hi`. The caller picks
+/// the top-side / bottom-side components to set the chunk boundary locally — no
+/// borrowing from neighbors, so it avoids the "blur" of interpolation when bleed
+/// heights differ across columns. (The cut the caller derives is subsequently
+/// clamped by [`strip_protected_extents`] — see its docs.)
 ///
 /// The labeling is a simple 8-connectivity flood fill restricted to the chunk's
 /// columns. Ink = pixel < `threshold`; white = otherwise.
@@ -808,13 +1077,12 @@ fn chunk_outer_components(
     lo: i32,
     hi: i32,
     threshold: u8,
-) -> (Vec<(i32, i32)>, Option<(i32, i32)>) {
+) -> Vec<(i32, i32)> {
     let h = image.height() as i32;
     let cw = cx1 - cx0;
     // visited grid over the chunk's columns × full height.
     let mut visited = vec![false; (cw * h as u32) as usize];
     let mut spans: Vec<(i32, i32)> = Vec::new();
-    let mut body_extent: Option<(i32, i32)> = None;
 
     let idx = |x: u32, y: i32| -> usize {
         (y as u32 * cw + (x - cx0)) as usize
@@ -861,20 +1129,13 @@ fn chunk_outer_components(
                 }
             }
             // A component that never reaches the protect band is candidate
-            // bleed — it floats in the outer region disconnected from the
-            // body. One that DOES reach it is body ink; union its row span
-            // into body_extent so the caller can clamp its cut.
-            if touches_band {
-                body_extent = Some(match body_extent {
-                    None => (comp_top, comp_bot),
-                    Some((t, b)) => (t.min(comp_top), b.max(comp_bot)),
-                });
-            } else {
+            // bleed — it floats in the outer region disconnected from the body.
+            if !touches_band {
                 spans.push((comp_top, comp_bot));
             }
         }
     }
-    (spans, body_extent)
+    spans
 }
 
 #[cfg(test)]
@@ -1452,19 +1713,261 @@ mod tests {
 
         let out = trim_neighbor_bleed(&img);
 
-        // Body 1420 + descender 23 + speck 1 = 1444 must survive: the cut
-        // clamps to the descender's bottom (row 52), dropping only the blobs
-        // below it. (Unclamped, the speck's row set the cut at 48: 1439.)
+        // Body 1420 + descender 23 = 1443 must survive: the cut clamps to
+        // the descender's bottom (row 52) and the bottom-side floating speck
+        // is killed outright by the strip pass. (Unclamped and un-killed:
+        // 1444 with 5px of bleed surviving; a plain flat cut at 48 gave 1439.)
         let ink = out.iter().filter(|&&p| p == 0).count();
         assert_eq!(
-            ink, 1444,
-            "contour cut must not sever body-connected ink (expected 1444 px, got {ink})"
+            ink, 1443,
+            "contour cut must not sever body-connected ink, bottom float must die \
+             (expected 1443 px, got {ink})"
         );
         // The descender survives to its tip at row 52.
         assert_eq!(
             (0..out.height()).filter(|&y| out.get_pixel(60, y)[0] == 0).count(),
             43,
             "descender rows 10..=52 must all survive"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_chunk_gap_never_severs_straddling_glyph() {
+        // Regression (review finding): a glyph straddling a chunk boundary
+        // connects to the body through the NEIGHBOR chunk's columns. The chunk
+        // holding its upper loop then sees a chunk-wide white band beneath the
+        // loop — a false gap — and the gap scan cut the loop. 150px strip →
+        // two 75px chunks; loop cols 68-74 in chunk 0, stem cols 75-80 in
+        // chunk 1. The full-strip body clamp (strip_body_extents) sees the
+        // loop+stem+body as ONE band-touching component overlapping both
+        // chunks, so neither chunk's cut may enter it.
+        //
+        // Layout (150 wide × 40 tall):
+        //   Body:  rows 20-29, cols 10-140.
+        //   Loop:  rows 8-11, cols 68-74 (chunk 0 only) — diagonally adjacent
+        //          to the stem at (74,11)↔(75,12).
+        //   Stem:  rows 12-19, cols 75-80 (chunk 1), touching the body at
+        //          rows 19/20.
+        let (w, h) = (150u32, 40u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for y in 20..=29 {
+            for x in 10..=140 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 8..=11 {
+            for x in 68..=74 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 12..=19 {
+            for x in 75..=80 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body 1310 + loop 28 + stem 48 = 1386 — all must survive. (Without
+        // the clamp, chunk 0's gap scan cut at row 12 and dropped the loop:
+        // 1358.)
+        let ink = out.iter().filter(|&&p| p == 0).count();
+        assert_eq!(
+            ink, 1386,
+            "straddling glyph's loop must survive the chunk gap scan (expected 1386 px, got {ink})"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_keeps_clear_floating_diacritic_cuts_edge_bleed() {
+        // Regression for line 0056: the first character's vowel curl (rows
+        // 10-40, 31 tall, 28 wide) is gap-separated from the body and pokes
+        // 2 rows above the protect band, so the whole-width gap scan's flat
+        // cut removed it as bleed. A floating mark that is taller than a
+        // bleed fragment can be, narrower than one body height, and clear of
+        // the strip edges is a diacritic and must survive — while a band of
+        // equal height that is wide (multi-letter neighbor ink, 0009-style)
+        // and hugs the top edge (quad-clipped, 0049-style) must still go.
+        //
+        // Layout (300 wide × 100 tall, 3 chunks of 100; body sits low like
+        // an over-tall quad, core=28, lo=42, max_bleed_h=14):
+        //   Body:   rows 50-75, cols 10-290.
+        //   Mark:   rows 10-40, cols 30-54 — 31 tall, 25 wide, 10 rows
+        //           clear of the top edge, 1-row gap to the band → KEPT.
+        //   Band:   rows 0-30, cols 150-250 — 31 tall but 101 wide and
+        //           touching row 0 → CUT.
+        let (w, h) = (300u32, 100u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for y in 50..=75 {
+            for x in 10..=290 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 10..=40 {
+            for x in 30..=54 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 0..=30 {
+            for x in 150..=250 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body 26×281=7306 + mark 31×25=775 = 8081 survive; the band (3131px)
+        // is dropped. (Without the floating-mark protection the mark died:
+        // 7306.)
+        let ink = out.iter().filter(|&&p| p == 0).count();
+        assert_eq!(
+            ink, 8081,
+            "clear floating diacritic must survive, wide/edge bleed must not \
+             (expected 8081 px, got {ink})"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_kills_bottom_float_that_blocks_gap_scan() {
+        // Regression for line 0056 (c0/c4): a floating bleed blob sitting
+        // directly under the descender zone inks every row between the band
+        // and itself, so the gap scan's "first white row" lands BELOW the
+        // blob and the flat cut keeps it — the blob blocks its own separator.
+        // The strip pass kills bottom-side floating ink outright, while the
+        // connected descender keeps everything.
+        //
+        // Layout (150 wide × 60 tall, chunks [0,75) and [75,150); body rows
+        // 19-41, band lo=14 hi=46, max_bleed_h=12):
+        //   Body:     rows 20-40, cols 10-140.
+        //   Descender: col 60, rows 41-50 — connected, ends 4 past the band.
+        //   Blob:     rows 47-54, cols 100-115 — floating, first row hi+1:
+        //             without the kill, chunk 1's scan found its first white
+        //             row at 55 and kept rows ≤ 54 — blob included.
+        let (w, h) = (150u32, 60u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for y in 20..=40 {
+            for x in 10..=140 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 41..=50 {
+            img.put_pixel(60, y, Luma([0]));
+        }
+        for y in 47..=54 {
+            for x in 100..=115 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body 21×131=2751 + descender 10 = 2761 survive; the blob (128px)
+        // is killed. (Without the kill: 2889 — the blob survived whole.)
+        let ink = out.iter().filter(|&&p| p == 0).count();
+        assert_eq!(
+            ink, 2761,
+            "bottom floating blob must not block its own gap (expected 2761 px, got {ink})"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_kills_ghost_line_of_top_fragments() {
+        // Regression for line 0004 (c0): a row-aligned band of floating
+        // fragments above the band — the previous line's glyph bottoms —
+        // blocks the gap scan's white row (the fragments reach down to
+        // lo-1), so the flat cut landed ABOVE them and kept them. One
+        // floating mark is ambiguous (0028's glyph top keeps its reprieve),
+        // but a horizontal band of >= BLEED_GHOST_MIN_FRAGS fragments is a
+        // line's worth of neighbor ink and dies. The lone mark and the
+        // band-connected ascender survive untouched.
+        //
+        // Layout (300 wide × 60 tall, band lo=21 hi=59):
+        //   Body:     rows 30-55, cols 10-290.
+        //   Ascender: rows 5-29, cols 50-55 — connected to the body.
+        //   Lone:     rows 5-9, cols 70-80 — floats above the ascender;
+        //             its chunk's scan finds white only at row 4, so the
+        //             cut keeps it (the 0028 reprieve).
+        //   Frags:    rows 10-20 at cols 130-142, 170-182, 210-222,
+        //             250-262 — four fragments, rows 10-20 = lo-1 band;
+        //             each chunk's scan finds white only at row 9.
+        let (w, h) = (300u32, 60u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for y in 30..=55 {
+            for x in 10..=290 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 5..=29 {
+            for x in 50..=55 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for y in 5..=9 {
+            for x in 70..=80 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for &c0 in &[130u32, 170, 210, 250] {
+            for y in 10..=20 {
+                for x in c0..c0 + 12 {
+                    img.put_pixel(x, y, Luma([0]));
+                }
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body 7306 + ascender 150 + lone 55 = 7511 survive; the 572px ghost
+        // band is killed. (Without the ghost pass the frags survived: 8083.)
+        let ink = out.iter().filter(|&&p| p == 0).count();
+        assert_eq!(
+            ink, 7511,
+            "ghost line of top fragments must die, lone float must live \
+             (expected 7511 px, got {ink})"
+        );
+    }
+
+    #[test]
+    fn test_trim_neighbor_bleed_ghost_band_overrides_diacritic_protection() {
+        // Regression for line 0009 (c0): three row-aligned fragments formed
+        // the previous line's ghost band, but one was 11px tall vs
+        // max_bleed_h=10 — individually "protected" by a hair — and the
+        // chain of the remaining two fell short of the threshold, so all
+        // three survived. Band membership is stronger evidence than shape
+        // heuristics: the ghost pool includes protected marks, and a chain
+        // of three already betrays a line (legitimate marks have only ever
+        // appeared alone — 0028).
+        //
+        // Layout (300 wide × 60 tall, band lo=23 hi=59, max_bleed_h=14):
+        //   Body:     rows 30-55, cols 10-290.
+        //   Frag A/B: rows 7-16, cols 60-72 and 130-142.
+        //   Tall frag: rows 6-20, cols 200-212 — 15 tall (> 14), narrow,
+        //              edge-clear: individually protected, still banded.
+        let (w, h) = (300u32, 60u32);
+        let mut img: GrayImage = ImageBuffer::from_pixel(w, h, Luma([255]));
+        for y in 30..=55 {
+            for x in 10..=290 {
+                img.put_pixel(x, y, Luma([0]));
+            }
+        }
+        for &(y0, y1, x0) in &[(7u32, 16, 60u32), (7, 16, 130), (6, 20, 200)] {
+            for y in y0..=y1 {
+                for x in x0..x0 + 12 {
+                    img.put_pixel(x, y, Luma([0]));
+                }
+            }
+        }
+
+        let out = trim_neighbor_bleed(&img);
+
+        // Body 26×281 = 7306 survive; all three band members (455px) die,
+        // the tall one included. (Pre-fix: the chain held only the two
+        // unprotected frags — below the old threshold of 4 — all survived.)
+        let ink = out.iter().filter(|&&p| p == 0).count();
+        assert_eq!(
+            ink, 7306,
+            "ghost band must override individual diacritic protection \
+             (expected 7306 px, got {ink})"
         );
     }
 
