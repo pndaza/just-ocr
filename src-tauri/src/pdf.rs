@@ -188,7 +188,12 @@ pub(crate) fn extract_pages(
                     // shared-stream now — decode_image can't (no &Document).
                     // Cheap no-op for every non-JBIG2 image.
                     let globals = jbig2_globals(&doc, img);
-                    match decode_image(img, globals.as_deref()) {
+                    // Likewise resolve the effective color space here —
+                    // decode_image has no &Document to chase indirect
+                    // /ColorSpace references or read an ICC stream's /N.
+                    // Cheap for every plain-named space.
+                    let cs = resolve_color_space(&doc, img.origin_dict);
+                    match decode_image(img, globals.as_deref(), cs.as_deref()) {
                         Ok((rgb, w, h)) => {
                             let dyn_img = match image::RgbImage::from_raw(w, h, rgb) {
                                 Some(b) => image::DynamicImage::ImageRgb8(b),
@@ -338,9 +343,16 @@ pub(crate) fn render_pages(
 /// the `&Document` needed to dereference the indirect object — `PdfImage`
 /// exposes only the image dict + content, not the document. `None` for every
 /// non-JBIG2 image (zero overhead) and for JBIG2 images with no globals.
+///
+/// `color_space` is the caller-resolved device-space name (see
+/// `resolve_color_space`), also resolved with the `&Document`. It takes
+/// precedence over `PdfImage::color_space`, which lopdf leaves `None` for
+/// indirect `/ColorSpace` refs and reduces to the family name ("ICCBased")
+/// for arrays — neither usable by `interpret_raw`.
 fn decode_image(
     img: &lopdf::xobject::PdfImage,
     jbig2_globals: Option<&[u8]>,
+    color_space: Option<&str>,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let width = img.width as u32;
     let height = img.height as u32;
@@ -410,7 +422,9 @@ fn decode_image(
         data = apply_filter(&data, img.origin_dict, filter, i)?;
     }
     let bpc = img.bits_per_component.unwrap_or(8) as u32;
-    let cs = img.color_space.as_deref().unwrap_or("DeviceRGB");
+    let cs = color_space
+        .or(img.color_space.as_deref())
+        .unwrap_or("DeviceRGB");
     let rgb = interpret_raw(&data, width, height, cs, bpc)?;
     Ok((rgb, width, height))
 }
@@ -794,6 +808,76 @@ fn jbig2_globals(doc: &Document, img: &lopdf::xobject::PdfImage) -> Option<Vec<u
             log::warn!("[pdf] JBIG2Globals {:?} decode failed: {e}", globals_ref);
             None
         }
+    }
+}
+
+/// Resolve an image XObject's `/ColorSpace` to the device-space name
+/// `interpret_raw` understands ("DeviceGray" | "DeviceRGB" | "DeviceCMYK").
+///
+/// `PdfImage::color_space` (from lopdf) is only populated when /ColorSpace is
+/// a direct /Name or array, and in the array case it yields the *family*
+/// ("ICCBased") rather than a device space — neither is usable by
+/// `interpret_raw`. Worse, an *indirect* reference (`/ColorSpace 6 0 R`, what
+/// macOS Quartz writes) parses as `None`, and `decode_image`'s DeviceRGB
+/// fallback then mis-sizes a 1-bpc grayscale scan as 3 samples/pixel, failing
+/// `expand_samples`' length check and silently dropping the page (the
+/// `gt_page-*.pdf` failure).
+///
+/// Resolution follows PDF §8.6:
+/// - bare device names pass through;
+/// - `ICCBased` maps by the ICC stream's `/N` component count (1/3/4 →
+///   Gray/RGB/CMYK), falling back to `/Alternate` when `/N` is absent or
+///   unusual — the stream itself may sit behind an indirect ref;
+/// - `CalGray`/`CalRGB` have the same component layout as their device
+///   counterparts;
+/// - everything else (Indexed, Separation, DeviceN, Lab, Pattern) → `None`,
+///   so `decode_image` surfaces a clear "not supported" error instead of
+///   silently mis-decoding.
+fn resolve_color_space(doc: &Document, dict: &Dictionary) -> Option<String> {
+    let cs = dict.get(b"ColorSpace").ok()?;
+    // Indirect reference (`/ColorSpace 6 0 R`) — resolve one level.
+    let cs = match cs {
+        Object::Reference(id) => doc.get_object(*id).ok()?,
+        _ => cs,
+    };
+    match cs {
+        Object::Name(n) => device_name(&String::from_utf8_lossy(n)),
+        Object::Array(arr) => {
+            let family = String::from_utf8_lossy(arr.first()?.as_name().ok()?).into_owned();
+            match family.as_str() {
+                "CalGray" => Some("DeviceGray".into()),
+                "CalRGB" => Some("DeviceRGB".into()),
+                "ICCBased" => {
+                    // [/ICCBased <stream-ref>]: the ICC stream's /N is the
+                    // component count. /Alternate (a device space name per
+                    // spec) is the fallback when /N is absent or unusual.
+                    let stream = match arr.get(1)? {
+                        Object::Reference(id) => doc.get_object(*id).ok()?.as_stream().ok()?,
+                        _ => return None,
+                    };
+                    match stream.dict.get(b"N").and_then(|v| v.as_i64()) {
+                        Ok(1) => Some("DeviceGray".into()),
+                        Ok(3) => Some("DeviceRGB".into()),
+                        Ok(4) => Some("DeviceCMYK".into()),
+                        _ => {
+                            let alt = stream.dict.get(b"Alternate").ok()?;
+                            device_name(&String::from_utf8_lossy(alt.as_name().ok()?))
+                        }
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Map a bare color-space name to itself if it is one of the three device
+/// spaces, else `None`.
+fn device_name(name: &str) -> Option<String> {
+    match name {
+        "DeviceGray" | "DeviceRGB" | "DeviceCMYK" => Some(name.to_string()),
+        _ => None,
     }
 }
 
@@ -1263,6 +1347,136 @@ mod extract_tests {
         assert!(
             mean > 50.0,
             "page 4 looks black (mean luminance {mean:.1}); 2-bpc scaling broken"
+        );
+    }
+
+    /// Regression for indirectly-referenced ICCBased color spaces
+    /// (`sample_images/gt_page-030.pdf`, a macOS Quartz export: `/ColorSpace
+    /// 6 0 R` → `[/ICCBased 7 0 R]`, ICC `/N 1` = grayscale): lopdf leaves
+    /// `PdfImage::color_space` None for indirect references, and
+    /// `decode_image`'s DeviceRGB fallback mis-sized the 1-bpc grayscale scan
+    /// (3 samples/px instead of 1), failing `expand_samples`' length check
+    /// and dropping the page. `sample_images/gt_page-011.pdf` has the same
+    /// structure, so both files run. When the sibling ground-truth PNG is
+    /// present the extracted page is also diffed against it pixel-for-pixel.
+    /// Skipped when the samples aren't present.
+    #[test]
+    fn extracts_indirect_iccbased_grayscale_page() {
+        for name in ["gt_page-011.pdf", "gt_page-030.pdf"] {
+            let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../sample_images/")
+                .join(name);
+            let Some(path) = (p.exists()).then_some(p) else {
+                eprintln!("skip: sample_images/{name} not present");
+                continue;
+            };
+            let bytes = std::fs::read(&path).expect("read sample");
+            let pages = extract_pages(&bytes, |_, _| {}, ImageMode::Gray, None, None)
+                .expect("extract succeeds");
+            assert_eq!(pages.len(), 1, "{name}: expected the single page to extract");
+            let img = image::load_from_memory(&pages[0].1).expect("decode page PNG");
+
+            // A text scan is predominantly white — catches inverted/black decodes.
+            let g = img.to_luma8();
+            let total = (g.width() as usize) * (g.height() as usize);
+
+            // When the sibling ground-truth raster exists, require the native
+            // dimensions and a near-exact ink/no-ink pixel match — a packing,
+            // polarity, or sample-miscount bug shows up here, not in the
+            // coarse darkness check above.
+            let png_path = path.with_extension("png");
+            if png_path.exists() {
+                let truth = image::open(&png_path).expect("decode ground-truth PNG").to_luma8();
+                assert_eq!(
+                    (g.width(), g.height()),
+                    (truth.width(), truth.height()),
+                    "{name}: native resolution expected"
+                );
+                let mismatch = g
+                    .pixels()
+                    .zip(truth.pixels())
+                    .filter(|(a, b)| (a.0[0] < 128) != (b.0[0] < 128))
+                    .count();
+                let mismatch_pct = mismatch as f32 * 100.0 / total as f32;
+                assert!(
+                    mismatch_pct < 0.1,
+                    "{name}: {mismatch_pct:.2}% pixels differ from ground truth"
+                );
+            }
+            let dark = g.pixels().filter(|p| p.0[0] < 128).count();
+            let pct = dark as f32 * 100.0 / total as f32;
+            assert!(pct < 50.0, "{name}: page looks inverted/black ({pct:.1}% dark)");
+        }
+    }
+
+    /// Unit coverage for `resolve_color_space` paths the gt_page fixtures
+    /// don't hit: direct family arrays, bare names, unsupported families, and
+    /// the ICC `/Alternate` fallback. Builds the object graph by hand rather
+    /// than shipping another PDF fixture.
+    #[test]
+    fn resolve_color_space_maps_families_and_refs() {
+        use super::resolve_color_space;
+        use lopdf::{Dictionary, Document, Object, Stream};
+
+        let mut doc = Document::with_version("1.3");
+        // ICC stream with /N 1 + /Alternate /DeviceGray — the macOS Quartz
+        // shape from the gt_page files.
+        let mut icc_dict = Dictionary::new();
+        icc_dict.set("N", Object::Integer(1));
+        icc_dict.set("Alternate", Object::Name(b"DeviceGray".to_vec()));
+        let icc_id = doc.add_object(Stream::new(icc_dict, vec![]));
+        // [/ICCBased 7 0 R] behind an indirect ref, exactly obj 6 in those files.
+        let cs_arr = Object::Array(vec![
+            Object::Name(b"ICCBased".to_vec()),
+            Object::Reference(icc_id),
+        ]);
+        let cs_id = doc.add_object(cs_arr);
+
+        let mut dict = Dictionary::new();
+        dict.set("ColorSpace", Object::Reference(cs_id));
+        assert_eq!(
+            resolve_color_space(&doc, &dict).as_deref(),
+            Some("DeviceGray"),
+            "indirect ref → ICCBased /N 1 should resolve to DeviceGray"
+        );
+
+        // Direct CalRGB array.
+        let mut dict = Dictionary::new();
+        dict.set(
+            "ColorSpace",
+            Object::Array(vec![Object::Name(b"CalRGB".to_vec())]),
+        );
+        assert_eq!(resolve_color_space(&doc, &dict).as_deref(), Some("DeviceRGB"));
+
+        // Bare device name passthrough.
+        let mut dict = Dictionary::new();
+        dict.set("ColorSpace", Object::Name(b"DeviceCMYK".to_vec()));
+        assert_eq!(resolve_color_space(&doc, &dict).as_deref(), Some("DeviceCMYK"));
+
+        // Unsupported family → None (decode_image then errors clearly).
+        let mut dict = Dictionary::new();
+        dict.set(
+            "ColorSpace",
+            Object::Array(vec![Object::Name(b"Indexed".to_vec())]),
+        );
+        assert_eq!(resolve_color_space(&doc, &dict), None);
+
+        // ICC /N missing → /Alternate fallback.
+        let mut icc2 = Dictionary::new();
+        icc2.set("Alternate", Object::Name(b"DeviceRGB".to_vec()));
+        let icc2_id = doc.add_object(Stream::new(icc2, vec![]));
+        let mut dict = Dictionary::new();
+        dict.set(
+            "ColorSpace",
+            Object::Array(vec![
+                Object::Name(b"ICCBased".to_vec()),
+                Object::Reference(icc2_id),
+            ]),
+        );
+        assert_eq!(
+            resolve_color_space(&doc, &dict).as_deref(),
+            Some("DeviceRGB"),
+            "missing /N should fall back to /Alternate"
         );
     }
 
