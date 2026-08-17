@@ -72,9 +72,12 @@ export interface Job {
    *  Undefined for regular image files. */
   group?: string;
   bytes: Uint8Array;
-  /** For PDF pages, the temp PNG path. When set, `bytes` is empty and the
-   * pixels are read from disk on demand (thumbnail + OCR) instead of held in
-   * memory. `null` for regular image files. */
+  /** On-disk path when the pixels live on disk instead of in `bytes`: the
+   *  app-owned temp PNG for PDF pages, or the original location for
+   *  drag-dropped files (which arrive as paths only — see `readFiles`).
+   *  `null` for files added via the picker, which hold their bytes in memory.
+   *  Ownership matters: only paths inside our temp namespace are ever
+   *  deleted (see `disposeJobFile`). */
   path: string | null;
   url: string; // object URL for thumbnail (created lazily for path-based jobs)
   status: JobStatus;
@@ -122,9 +125,11 @@ export function makeJob(file: File): Promise<Job> {
   }));
 }
 
-/** Build jobs from pre-read files. A `path` (PDF page temp PNG) is used when
- * present; otherwise `bytes` (a regular image) is turned into a Blob URL. The
- * thumbnail for path-based jobs is loaded lazily via `ensureThumb`.
+/** Build jobs from pre-read files. A `path` is used when present — the temp
+ * PNG of a PDF page, or the original location of a drag-dropped image — with
+ * `bytes` left empty and pixels read lazily (`readJobBytes`); a byte-backed
+ * `ReadFile` (picker flow) is turned into a Blob URL instead. The thumbnail
+ * for path-based jobs is loaded lazily via `ensureThumb`.
  * `group` (the source PDF's name stem) is stamped on every job when given —
  * see `Job.group`. */
 export function makeJobsFromReadFiles(
@@ -194,9 +199,22 @@ export async function readJobBytes(job: Job): Promise<Uint8Array> {
   return job.bytes;
 }
 
-/** Best-effort removal of a path-based job's temp file (called on remove/clear). */
+/** True only for paths inside one of the app's own temp dirs —
+ * `<temp>/just-ocr-<pid>-<seq>/pN.png`, written by the backend's `render_pdf`
+ * (mirrors `just_ocr_temp_pid` in lib.rs, whose naming is load-bearing).
+ * Drag-dropped files keep `job.path` at their original location, so this
+ * check is what separates "ours, deletable" from "the user's file". */
+export function isAppTempPath(path: string): boolean {
+  return /[\\/]just-ocr-\d+-\d+[\\/]p\d+\.png$/.test(path);
+}
+
+/** Best-effort removal of a job's app-owned temp PNG (called on remove/clear).
+ * Guarded by `isAppTempPath` so a drag-dropped image — whose `path` is the
+ * user's original file — is never deleted; that was a data-destroying bug.
+ * If the guard ever skips a real temp PNG, the backend's startup sweep and
+ * shutdown cleanup reclaim it, so failing safe here costs nothing. */
 export async function disposeJobFile(job: Job): Promise<void> {
-  if (!job.path) return;
+  if (!job.path || !isAppTempPath(job.path)) return;
   try {
     await remove(job.path);
   } catch {
