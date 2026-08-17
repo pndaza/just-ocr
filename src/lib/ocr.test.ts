@@ -1,5 +1,6 @@
 import {
   isPdf,
+  isAppTempPath,
   lastLlmApiKey,
   saveLlmApiKey,
   lastLlmModel,
@@ -59,6 +60,32 @@ describe("isPdf", () => {
     expect(isPdf("photo.png")).toBe(false);
     expect(isPdf("scan.pdf.bak")).toBe(false);
     expect(isPdf("pdf")).toBe(false);
+  });
+});
+
+// Guards disposeJobFile: only files the backend's render_pdf wrote into its
+// `just-ocr-<pid>-<seq>` temp namespace may be deleted when a job is removed.
+// Drag-dropped images carry their ORIGINAL path on the job — deleting those
+// destroyed user data.
+describe("isAppTempPath", () => {
+  it("accepts render_pdf's temp page PNGs on both path styles", () => {
+    expect(isAppTempPath("/var/folders/xx/T/just-ocr-1234-0/p001.png")).toBe(true);
+    expect(isAppTempPath("C:\\Users\\me\\AppData\\Local\\Temp\\just-ocr-999-42\\p012.png")).toBe(true);
+    // Page numbers beyond the {:03} zero-pad are min-width, not max.
+    expect(isAppTempPath("/tmp/just-ocr-7-3/p1004.png")).toBe(true);
+  });
+  it("rejects user files — the drag-drop case the guard exists for", () => {
+    expect(isAppTempPath("/Users/me/Pictures/photo.png")).toBe(false);
+    expect(isAppTempPath("C:\\Users\\me\\Desktop\\scan.png")).toBe(false);
+    expect(isAppTempPath("/Users/me/Documents/report.pdf")).toBe(false);
+  });
+  it("rejects lookalike paths outside the exact namespace shape", () => {
+    // Prefix-sharing dir but no <pid>-<seq> components.
+    expect(isAppTempPath("/tmp/just-ocr-backup/photo.png")).toBe(false);
+    // Right dir shape but not a pN.png page inside it.
+    expect(isAppTempPath("/Users/me/just-ocr-123-4/photo.png")).toBe(false);
+    // Namespace dir as the final segment (path to the dir, not a page in it).
+    expect(isAppTempPath("/tmp/just-ocr-1234-0")).toBe(false);
   });
 });
 
