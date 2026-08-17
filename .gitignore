@@ -24,3 +24,6 @@ debug/
 sample_pdf/
 sample_images/
 .superpowers/
+
+# ZCode agent session plans (local scratch)
+.zcode/plans/

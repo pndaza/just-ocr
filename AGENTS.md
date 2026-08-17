@@ -39,7 +39,6 @@ src-tauri/                Rust backend (the app crate `just_ocr_lib`)
 kraken-models/            Burmese .safetensors (Git LFS — see below)
 ppocr-models/             PP-OCRv6 tiny-det .safetensors (Git LFS)
 .github/workflows/release.yml   tag-triggered multi-platform release CI
-docs/                     design notes + superpowers plans/specs
 ```
 
 ## Commands
@@ -179,10 +178,3 @@ Download & install). The updater is the Tauri v2 plugin: `tauri-plugin-updater`
 - **Bootstrap:** the first release that *includes* the updater cannot
   auto-update pre-existing installs — users on the prior version must download
   it manually once; from then on, auto-update works.
-
-## Docs worth reading before sensitive changes
-
-- `docs/superpowers/specs/2026-07-18-kraken-engine-design.md` — Kraken engine
-  integration design.
-- `docs/superpowers/plans/2026-07-12-pdf-support.md` — PDF support plan.
-- `docs/notes/2026-07-19-polygon-overlay.md` — line-box overlay notes.
