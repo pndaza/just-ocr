@@ -3,6 +3,13 @@
 //!
 //! Pipeline: probability map → threshold → connected components →
 //! rotated-box fit (PCA) → PaddleOCR DB unclip → score/area gates.
+//!
+//! The box fit runs in two passes: elongated components (text lines) are
+//! well-conditioned under PCA and vote for the page's text direction, then
+//! near-square components (page numbers, 1–3 glyphs) — whose own PCA axis is
+//! numerically ill-conditioned — are re-fitted with the axis locked to that
+//! page-consensus angle. Without this, page-number boxes come back rotated
+//! anywhere in ±90° and downstream baseline synthesis reads them as skewed.
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -188,7 +195,11 @@ pub fn extract_detections(
         .checked_mul(content_height)
         .context("detector content area overflow")?;
     let mut visited = vec![false; visited_len];
-    let mut detections = Vec::new();
+    // Components are collected first and fitted in a second pass: the axis of a
+    // near-square component (page numbers, 1–3 glyphs) is ill-conditioned under
+    // PCA and gets snapped to the page-consensus angle, which is only known
+    // after every component has been fitted once (see `pca_fit`).
+    let mut components = Vec::new();
     for y in 0..content_height {
         for x in 0..content_width {
             let active_index = y * content_width + x;
@@ -212,14 +223,39 @@ pub fn extract_detections(
             if score < options.box_threshold {
                 continue;
             }
-            let polygon = fit_rotated_box(&component.points, options.unclip_ratio).map(|point| {
-                Point(
-                    transform.map_x_to_source(point.0),
-                    transform.map_y_to_source(point.1),
-                )
-            });
-            detections.push(Detection { polygon, score });
+            components.push(component);
         }
+    }
+
+    // Pass 1: free-angle PCA fit per component. Elongated components have a
+    // numerically stable axis; their angles vote for the page's text direction.
+    let fits: Vec<BoxFit> = components.iter().map(|c| pca_fit(&c.points)).collect();
+    let mut voter_angles: Vec<f32> = fits
+        .iter()
+        .filter(|fit| fit.aspect() >= PAGE_ANGLE_VOTER_ASPECT)
+        .map(|fit| fit.angle())
+        .collect();
+    voter_angles.sort_by(|a, b| a.total_cmp(b));
+    let page_angle = median(&voter_angles).unwrap_or(0.0);
+
+    // Pass 2: emit detections. Near-square components are re-fitted with the
+    // axis locked to the page angle; everything else reuses the PCA fit
+    // unchanged.
+    let mut detections = Vec::with_capacity(components.len());
+    for (component, fit) in components.iter().zip(&fits) {
+        let score = (component.score_sum / component.points.len() as f64) as f32;
+        let resolved = if (SNAP_ASPECT_MIN..SNAP_ASPECT_MAX).contains(&fit.aspect()) {
+            fixed_axis_fit(&component.points, page_angle)
+        } else {
+            *fit
+        };
+        let polygon = unclip_corners(&resolved, options.unclip_ratio).map(|point| {
+            Point(
+                transform.map_x_to_source(point.0),
+                transform.map_y_to_source(point.1),
+            )
+        });
+        detections.push(Detection { polygon, score });
     }
     sort_detections(&mut detections);
     if detections.len() > options.max_boxes {
@@ -315,7 +351,55 @@ fn collect_component(
     Component { points, score_sum }
 }
 
-fn fit_rotated_box(points: &[Point], unclip_ratio: f32) -> [Point; 4] {
+/// Aspect (fitted width / height) at or above which a component's PCA axis is
+/// numerically trustworthy and votes for the page's text direction. Full text
+/// lines are 10:1 or better; 3:1 leaves a wide margin over the noise floor.
+const PAGE_ANGLE_VOTER_ASPECT: f32 = 3.0;
+
+/// Half-open aspect band in which the PCA axis is ill-conditioned and gets
+/// re-fitted with the axis locked to the page-consensus angle. The PCA angle is
+/// `0.5·atan2(2·cov_xy, cov_xx − cov_yy)`; for a blob whose pixel spread is
+/// near-isotropic (`cov_xx ≈ cov_yy`, i.e. width ≈ height) the denominator is
+/// noise-dominated and the fitted axis can land anywhere in ±90°. Measured on
+/// the sample corpus: aspect ≤ 1.5 produced angle errors of 15°–89° (page
+/// numbers read as vertical/diagonal), aspect ≥ 2.0 was always correct, so the
+/// band stops at 2.0. Components taller than wide (aspect < 0.5) are vertical
+/// text — their PCA axis is well-conditioned in the other direction and is
+/// left alone.
+const SNAP_ASPECT_MIN: f32 = 0.5;
+const SNAP_ASPECT_MAX: f32 = 2.0;
+
+/// A rotated-box fit of a component's pixels: axis direction, box center, and
+/// the raw (pre-unclip) extents. Shared by the free-angle PCA path and the
+/// page-angle-constrained path so both produce identical corner geometry for a
+/// given axis.
+#[derive(Clone, Copy)]
+struct BoxFit {
+    /// Unit vector along the fitted reading direction (x ≥ 0).
+    axis: Point,
+    /// Box center in image space (centroid corrected by projection offsets).
+    center: Point,
+    /// Raw extent along `axis`, +1.0 for the pixel-center sampling border.
+    width: f32,
+    /// Raw extent along the axis normal, +1.0 likewise.
+    height: f32,
+}
+
+impl BoxFit {
+    /// Fitted aspect (width / height). Drives the voter/snap classification.
+    fn aspect(&self) -> f32 {
+        self.width / self.height.max(f32::EPSILON)
+    }
+
+    /// Axis direction in radians (atan2 convention, x ≥ 0 after the flip).
+    fn angle(&self) -> f32 {
+        self.axis.1.atan2(self.axis.0)
+    }
+}
+
+/// Free-angle PCA fit: principal axis of the component's pixel distribution.
+/// Only trustworthy when the component is elongated (see `PAGE_ANGLE_VOTER_ASPECT`).
+fn pca_fit(points: &[Point]) -> BoxFit {
     let count = points.len() as f32;
     let center = Point(
         points.iter().map(|point| point.0).sum::<f32>() / count,
@@ -331,6 +415,28 @@ fn fit_rotated_box(points: &[Point], unclip_ratio: f32) -> [Point; 4] {
     if axis.0 < 0.0 || (axis.0.abs() < f32::EPSILON && axis.1 < 0.0) {
         axis = Point(-axis.0, -axis.1);
     }
+    fit_along_axis(points, center, axis)
+}
+
+/// Constrained fit: the reading direction is pinned to `angle` (the
+/// page-consensus angle) instead of estimated from the pixels. Used for
+/// near-square components whose own PCA axis is noise.
+fn fixed_axis_fit(points: &[Point], angle: f32) -> BoxFit {
+    let count = points.len() as f32;
+    let center = Point(
+        points.iter().map(|point| point.0).sum::<f32>() / count,
+        points.iter().map(|point| point.1).sum::<f32>() / count,
+    );
+    let mut axis = Point(angle.cos(), angle.sin());
+    if axis.0 < 0.0 || (axis.0.abs() < f32::EPSILON && axis.1 < 0.0) {
+        axis = Point(-axis.0, -axis.1);
+    }
+    fit_along_axis(points, center, axis)
+}
+
+/// Project the pixels onto `axis`/its normal and build the fit: raw extents
+/// (with the +1.0 pixel-center border) and the projection-corrected center.
+fn fit_along_axis(points: &[Point], centroid: Point, axis: Point) -> BoxFit {
     let normal = Point(-axis.1, axis.0);
     let (min_axis, max_axis, min_normal, max_normal) = points.iter().fold(
         (
@@ -340,7 +446,7 @@ fn fit_rotated_box(points: &[Point], unclip_ratio: f32) -> [Point; 4] {
             f32::NEG_INFINITY,
         ),
         |(min_axis, max_axis, min_normal, max_normal), point| {
-            let delta = Point(point.0 - center.0, point.1 - center.1);
+            let delta = Point(point.0 - centroid.0, point.1 - centroid.1);
             let along_axis = dot(delta, axis);
             let along_normal = dot(delta, normal);
             (
@@ -357,36 +463,63 @@ fn fit_rotated_box(points: &[Point], unclip_ratio: f32) -> [Point; 4] {
     // extent, since component points are sampled at pixel centers.
     let width = max_axis - min_axis + 1.0;
     let height = max_normal - min_normal + 1.0;
-    // Match PaddleOCR DB postprocess: offset every edge by a fixed distance
-    // proportional to text height, not text length. The previous formula scaled
-    // each extent by `unclip_ratio`, which over-expanded the long axis
-    // (left/right spilling past line ends) and under-expanded vertically.
-    //   distance = area * ratio / perimeter = W*H*ratio / (2*(W+H))
-    let distance = (width * height * unclip_ratio) / (2.0 * (width + height));
-    let half_axis = width * 0.5 + distance;
-    let half_normal = height * 0.5 + distance;
     let center = add(
-        center,
+        centroid,
         add(scale(axis, axis_center), scale(normal, normal_center)),
     );
+    BoxFit {
+        axis,
+        center,
+        width,
+        height,
+    }
+}
+
+/// Expand a fit by the PaddleOCR DB unclip and emit the quad corners as
+/// `[top_left, top_right, bottom_right, bottom_left]`.
+///
+/// Match PaddleOCR DB postprocess: offset every edge by a fixed distance
+/// proportional to text height, not text length. The previous formula scaled
+/// each extent by `unclip_ratio`, which over-expanded the long axis
+/// (left/right spilling past line ends) and under-expanded vertically.
+///   distance = area * ratio / perimeter = W*H*ratio / (2*(W+H))
+fn unclip_corners(fit: &BoxFit, unclip_ratio: f32) -> [Point; 4] {
+    let distance = (fit.width * fit.height * unclip_ratio) / (2.0 * (fit.width + fit.height));
+    let half_axis = fit.width * 0.5 + distance;
+    let half_normal = fit.height * 0.5 + distance;
+    let axis = fit.axis;
+    let normal = Point(-axis.1, axis.0);
     [
         add(
-            center,
+            fit.center,
             add(scale(axis, -half_axis), scale(normal, -half_normal)),
         ),
         add(
-            center,
+            fit.center,
             add(scale(axis, half_axis), scale(normal, -half_normal)),
         ),
         add(
-            center,
+            fit.center,
             add(scale(axis, half_axis), scale(normal, half_normal)),
         ),
         add(
-            center,
+            fit.center,
             add(scale(axis, -half_axis), scale(normal, half_normal)),
         ),
     ]
+}
+
+/// Median of a pre-sorted, non-empty slice; `None` when empty.
+fn median(sorted: &[f32]) -> Option<f32> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        Some(sorted[mid])
+    } else {
+        Some((sorted[mid - 1] + sorted[mid]) * 0.5)
+    }
 }
 
 fn sort_detections(detections: &mut [Detection]) {
@@ -476,5 +609,158 @@ mod tests {
     fn plan_rejects_zero_dimensions() {
         assert!(DetectorInputPlan::new(0, 100, Some(736)).is_err());
         assert!(DetectorInputPlan::new(100, 0, Some(736)).is_err());
+    }
+
+    /// Paints a skewed bar of `thickness` rows: for each column x in
+    /// [x0, x0+len), rows around y0 + slope·(x − x0). 8-connectivity keeps it a
+    /// single component. Returns the pixels to set.
+    fn skewed_bar(x0: usize, y0: usize, len: usize, thickness: usize, slope: f64) -> Vec<(usize, usize)> {
+        let mut px = Vec::new();
+        for x in x0..x0 + len {
+            let cy = y0 as f64 + slope * (x - x0) as f64;
+            for dy in 0..thickness {
+                px.push((x, (cy + dy as f64).round() as usize));
+            }
+        }
+        px
+    }
+
+    /// A near-square blob with strongly diagonal pixel mass — like a two-digit
+    /// page number where the ink distribution dominates cov_xy. Its raw PCA
+    /// axis is diagonal, which is exactly the false-skew failure mode.
+    /// Slightly wider than tall (36×30 bbox) so the snapped quad's top edge is
+    /// the longer one.
+    fn diagonal_blob(x0: usize, y0: usize, size: usize) -> Vec<(usize, usize)> {
+        let mut px = Vec::new();
+        for y in 0..size {
+            for x in 0..(size * 6 / 5) {
+                if (x as f64) / 1.2 + (y as f64) < size as f64 {
+                    px.push((x0 + x, y0 + y));
+                }
+            }
+        }
+        px
+    }
+
+    fn synth_map(w: usize, h: usize, blobs: &[Vec<(usize, usize)>]) -> (Vec<f32>, Vec<usize>, DetectorTransform) {
+        let mut values = vec![0.0f32; w * h];
+        for blob in blobs {
+            for &(x, y) in blob {
+                values[y * w + x] = 0.9;
+            }
+        }
+        let shape = vec![1, 1, h, w];
+        let transform = DetectorTransform::new(w as u32, h as u32, w as u32, h as u32).expect("transform");
+        (values, shape, transform)
+    }
+
+    /// Top-edge angle (degrees) of a detection's quad.
+    fn top_edge_angle_deg(poly: &[Point; 4]) -> f32 {
+        (poly[1].1 - poly[0].1).atan2(poly[1].0 - poly[0].0).to_degrees()
+    }
+
+    #[test]
+    fn near_square_blob_snaps_to_page_angle() {
+        // Page of horizontal lines + a near-square page number whose PCA axis
+        // alone would come out diagonal.
+        let (values, shape, transform) = synth_map(
+            640,
+            400,
+            &[
+                skewed_bar(40, 60, 400, 14, 0.0),
+                skewed_bar(40, 160, 400, 14, 0.0),
+                skewed_bar(40, 260, 400, 14, 0.0),
+                diagonal_blob(520, 50, 30),
+            ],
+        );
+        let detections =
+            extract_detections(&values, &shape, transform, DetectorPostprocessOptions::default())
+                .expect("detections");
+        assert_eq!(detections.len(), 4);
+        // Find the page number by center proximity to (535, 65).
+        let num = detections
+            .iter()
+            .min_by(|a, b| {
+                let d = |p: &[Point; 4]| ((p[0].0 + p[2].0) / 2.0 - 535.0).hypot((p[0].1 + p[2].1) / 2.0 - 65.0);
+                d(&a.polygon).total_cmp(&d(&b.polygon))
+            })
+            .expect("nearest detection");
+        let angle = top_edge_angle_deg(&num.polygon);
+        assert!(
+            angle.abs() < 3.0,
+            "page number should snap to the page angle (≈0°), got {angle:.2}°"
+        );
+        // The top edge must run horizontally: wider than tall.
+        let top = (num.polygon[1].0 - num.polygon[0].0).hypot(num.polygon[1].1 - num.polygon[0].1);
+        let left = (num.polygon[3].0 - num.polygon[0].0).hypot(num.polygon[3].1 - num.polygon[0].1);
+        assert!(top > left, "top edge should be the long edge, got {top:.1}x{left:.1}");
+    }
+
+    #[test]
+    fn near_square_blob_inherits_page_skew() {
+        // Lines skewed −3°: the page number must inherit ≈−3°, not its own
+        // diagonal PCA axis.
+        let (values, shape, transform) = synth_map(
+            640,
+            400,
+            &[
+                skewed_bar(40, 60, 400, 14, -0.0524),
+                skewed_bar(40, 160, 400, 14, -0.0524),
+                skewed_bar(40, 260, 400, 14, -0.0524),
+                diagonal_blob(520, 50, 30),
+            ],
+        );
+        let detections =
+            extract_detections(&values, &shape, transform, DetectorPostprocessOptions::default())
+                .expect("detections");
+        assert_eq!(detections.len(), 4);
+        let num = detections
+            .iter()
+            .min_by(|a, b| {
+                let d = |p: &[Point; 4]| ((p[0].0 + p[2].0) / 2.0 - 535.0).hypot((p[0].1 + p[2].1) / 2.0 - 65.0);
+                d(&a.polygon).total_cmp(&d(&b.polygon))
+            })
+            .expect("nearest detection");
+        let angle = top_edge_angle_deg(&num.polygon);
+        assert!(
+            (-4.5..=-1.5).contains(&angle),
+            "page number should inherit the −3° page skew, got {angle:.2}°"
+        );
+    }
+
+    #[test]
+    fn elongated_lines_keep_pca_fit() {
+        // Well-conditioned components are untouched by the snap: a −3° line
+        // stays at −3°.
+        let (values, shape, transform) = synth_map(
+            640,
+            400,
+            &[
+                skewed_bar(40, 60, 400, 14, -0.0524),
+                skewed_bar(40, 160, 400, 14, -0.0524),
+            ],
+        );
+        let detections =
+            extract_detections(&values, &shape, transform, DetectorPostprocessOptions::default())
+                .expect("detections");
+        assert_eq!(detections.len(), 2);
+        for d in &detections {
+            let angle = top_edge_angle_deg(&d.polygon);
+            assert!((angle + 3.0).abs() < 0.5, "line angle should stay ≈−3°, got {angle:.2}°");
+        }
+    }
+
+    #[test]
+    fn lone_near_square_blob_falls_back_to_horizontal() {
+        // No elongated voters on the page → consensus falls back to 0°, which
+        // is still far better than a diagonal PCA axis.
+        let (values, shape, transform) =
+            synth_map(640, 400, &[diagonal_blob(300, 200, 30)]);
+        let detections =
+            extract_detections(&values, &shape, transform, DetectorPostprocessOptions::default())
+                .expect("detections");
+        assert_eq!(detections.len(), 1);
+        let angle = top_edge_angle_deg(&detections[0].polygon);
+        assert!(angle.abs() < 1.0, "lone blob should be horizontal, got {angle:.2}°");
     }
 }
