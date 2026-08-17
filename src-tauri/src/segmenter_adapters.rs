@@ -202,15 +202,40 @@ impl Segmenter for PPOcrPolySegmenter {
         // Connected components over the binary mask (8-conn).
         let components = collect_components(&values, iw, cw, ch, POLY_THRESH, POLY_MIN_AREA);
 
+        // Two-pass fit, mirroring ppocr-engine's postprocess: pass 1 fits every
+        // component with free-angle PCA — elongated text lines have a stable
+        // axis and vote for the page's text direction. Pass 2 (the loop below)
+        // re-fits near-square components (page numbers, 1–3 glyphs) with the
+        // axis locked to that consensus angle, because their own PCA axis is
+        // numerically ill-conditioned (`atan2(2·cov_xy, cov_xx − cov_yy)` with
+        // a noise-dominated denominator) and comes out rotated anywhere in
+        // ±90° — false skew on the synthesized baseline and deskew quad.
+        let fits: Vec<Option<MinAreaFit>> =
+            components.iter().map(|px| fit_min_area_quad(px)).collect();
+        let mut voter_angles: Vec<f64> = fits
+            .iter()
+            .flatten()
+            .filter(|f| f.min_side() >= POLY_MIN_SIDE && f.aspect() >= PAGE_ANGLE_VOTER_ASPECT)
+            .map(|f| f.axis_angle)
+            .collect();
+        voter_angles.sort_by(|a, b| a.total_cmp(b));
+        let page_angle = median_angle(&voter_angles).unwrap_or(0.0);
+
         let mut out = Vec::with_capacity(components.len());
-        for px in &components {
+        for (px, fit) in components.iter().zip(&fits) {
+            let fit = match fit {
+                Some(f) if (SNAP_ASPECT_MIN..SNAP_ASPECT_MAX).contains(&f.aspect()) => {
+                    fit_min_area_quad_at_angle(px, page_angle)
+                }
+                other => *other,
+            };
             // 4-corner quad via PCA min-area box (same shape `fit_rotated_box`
             // produces in the quad segmenter). Carried on `DetectedLine.quad`
             // so `recognize_line_direct`'s deskew (which indexes [0]/[1] as the
             // top edge) keeps working — the multi-point boundary can't be
             // indexed that way.
-            let (quad, quad_min_side) = match fit_min_area_quad(px) {
-                Some(q) => q,
+            let fit = match fit {
+                Some(f) => f,
                 None => continue,
             };
             // Pre-unclip min-side guard: drop speckle whose min-area-rect
@@ -222,9 +247,10 @@ impl Segmenter for PPOcrPolySegmenter {
             // check on the component shape is a robust second gate that doesn't
             // depend on absolute score values. Real text lines have min-side
             // >10px at this stage; score-map speckle is <5px.
-            if quad_min_side < POLY_MIN_SIDE {
+            if fit.min_side() < POLY_MIN_SIDE {
                 continue;
             }
+            let quad = fit.quad;
 
             // Ordered contour via Moore boundary trace (kraken_engine). Input
             // wants (y, x) tuples; returns Vec<Point> in (x, y) space.
@@ -367,14 +393,54 @@ fn collect_components(
     out
 }
 
+/// Aspect (fitted width / height) at or above which a component's PCA axis is
+/// trusted and votes for the page's text direction. Mirrors
+/// `PAGE_ANGLE_VOTER_ASPECT` in ppocr-engine's postprocess.
+const PAGE_ANGLE_VOTER_ASPECT: f64 = 3.0;
+/// Half-open aspect band in which the PCA axis is ill-conditioned (near-square
+/// components: page numbers) and gets re-fitted with the axis locked to the
+/// page-consensus angle. Mirrors `SNAP_ASPECT_MIN/MAX` in ppocr-engine.
+const SNAP_ASPECT_MIN: f64 = 0.5;
+const SNAP_ASPECT_MAX: f64 = 2.0;
+
+/// A component's rotated-box fit: quad corners `[TL, TR, BR, BL]` plus the raw
+/// (pre-unclip) extents and axis angle needed for page-consensus
+/// classification.
+#[derive(Clone, Copy)]
+struct MinAreaFit {
+    quad: [(f64, f64); 4],
+    width: f64,
+    height: f64,
+    axis_angle: f64,
+}
+
+impl MinAreaFit {
+    fn aspect(&self) -> f64 {
+        self.width / self.height.max(1e-9)
+    }
+    fn min_side(&self) -> f64 {
+        self.width.min(self.height)
+    }
+}
+
+/// Median of a pre-sorted, non-empty angle slice; `None` when empty.
+fn median_angle(sorted: &[f64]) -> Option<f64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        Some(sorted[mid])
+    } else {
+        Some((sorted[mid - 1] + sorted[mid]) * 0.5)
+    }
+}
+
 /// PCA min-area rotated box for a pixel set — same algorithm as
-/// `fit_rotated_box` (ppocr-engine postprocess.rs:318), ported here so we can
+/// `fit_rotated_box` (ppocr-engine postprocess.rs), ported here so we can
 /// compute the quad from the component pixels directly (the engine's version
-/// is `pub(crate)`). Returns `([TL, TR, BR, BL], min_side)` in pixel coords,
-/// where `min_side` is the min-area-rect's smaller side (matches the value
-/// `get_mini_boxes` returns at db_postprocess.py:187). `None` for degenerate
-/// (near-zero-area) components.
-fn fit_min_area_quad(points: &[(i32, i32)]) -> Option<([(f64, f64); 4], f64)> {
+/// is `pub(crate)`). `None` for degenerate (near-zero-area) components.
+fn fit_min_area_quad(points: &[(i32, i32)]) -> Option<MinAreaFit> {
     if points.len() < 3 {
         return None;
     }
@@ -390,6 +456,29 @@ fn fit_min_area_quad(points: &[(i32, i32)]) -> Option<([(f64, f64); 4], f64)> {
         (sxx + dx * dx, sxy + dx * dy, syy + dy * dy)
     });
     let angle = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    Some(fit_along_axis(points, angle))
+}
+
+/// Constrained variant: the reading direction is pinned to `angle` (the
+/// page-consensus angle) instead of estimated from the pixels. Used for
+/// near-square components whose own PCA axis is noise (see the two-pass
+/// comment in `PPOcrPolySegmenter::segment`).
+fn fit_min_area_quad_at_angle(points: &[(i32, i32)], angle: f64) -> Option<MinAreaFit> {
+    if points.len() < 3 {
+        return None;
+    }
+    Some(fit_along_axis(points, angle))
+}
+
+/// Project the pixels onto the given axis direction and build the rotated box.
+fn fit_along_axis(points: &[(i32, i32)], angle: f64) -> MinAreaFit {
+    let count = points.len() as f64;
+    let (cx, cy) = {
+        let (sx, sy): (f64, f64) = points.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| {
+            (sx + x as f64, sy + y as f64)
+        });
+        (sx / count, sy / count)
+    };
     let mut axis = (angle.cos(), angle.sin());
     if axis.0 < 0.0 || (axis.0.abs() < f64::EPSILON && axis.1 < 0.0) {
         axis = (-axis.0, -axis.1);
@@ -408,9 +497,6 @@ fn fit_min_area_quad(points: &[(i32, i32)]) -> Option<([(f64, f64); 4], f64)> {
     }
     let width = max_a - min_a + 1.0;
     let height = max_n - min_n + 1.0;
-    if width < 1.0 || height < 1.0 {
-        return None;
-    }
     // Center of the fitted box in (axis, normal) space, mapped back to xy.
     let a_center = (min_a + max_a) * 0.5;
     let n_center = (min_n + max_n) * 0.5;
@@ -424,7 +510,12 @@ fn fit_min_area_quad(points: &[(i32, i32)]) -> Option<([(f64, f64); 4], f64)> {
     let tr = (bx + axis.0 * ha + normal.0 * -hn, by + axis.1 * ha + normal.1 * -hn);
     let br = (bx + axis.0 * ha + normal.0 * hn, by + axis.1 * ha + normal.1 * hn);
     let bl = (bx + axis.0 * -ha + normal.0 * hn, by + axis.1 * -ha + normal.1 * hn);
-    Some(([tl, tr, br, bl], width.min(height)))
+    MinAreaFit {
+        quad: [tl, tr, br, bl],
+        width,
+        height,
+        axis_angle: axis.1.atan2(axis.0),
+    }
 }
 
 /// Smaller side of the min-area rotated rect for an arbitrary polygon
@@ -713,5 +804,55 @@ mod tests {
             "xmin {xmin} should be ≈ -2.1 (sub-pixel preserved); -2.5 would mean \
              the fractional vertex was rounded away (the int-rounding bug)"
         );
+    }
+
+    /// Pixels of a skewed bar: for each x in [x0, x0+len), rows around
+    /// y0 + slope·(x − x0). 8-connectivity keeps it one component.
+    fn bar_pixels(x0: i32, y0: i32, len: i32, thickness: i32, slope: f64) -> Vec<(i32, i32)> {
+        let mut px = Vec::new();
+        for x in x0..x0 + len {
+            let cy = y0 as f64 + slope * (x - x0) as f64;
+            for dy in 0..thickness {
+                px.push((x, (cy + dy as f64).round() as i32));
+            }
+        }
+        px
+    }
+
+    /// A near-square blob with strongly diagonal pixel mass — its raw PCA axis
+    /// comes out diagonal (the false-skew failure mode on page numbers).
+    fn diagonal_blob_pixels(x0: i32, y0: i32, size: i32) -> Vec<(i32, i32)> {
+        let mut px = Vec::new();
+        for y in 0..size {
+            for x in 0..(size * 6 / 5) {
+                if (x as f64) / 1.2 + (y as f64) < size as f64 {
+                    px.push((x0 + x, y0 + y));
+                }
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn pca_fit_on_diagonal_blob_is_ill_conditioned() {
+        // Sanity-checks the premise of the two-pass fix: a near-square blob's
+        // free-angle PCA fit lands on a diagonal axis...
+        let fit = fit_min_area_quad(&diagonal_blob_pixels(0, 0, 30)).expect("fit");
+        let deg = fit.axis_angle.to_degrees();
+        assert!(deg.abs() > 10.0, "PCA axis should be diagonal, got {deg:.1}°");
+        // ...while the constrained fit at 0° is horizontal and wider than tall.
+        let snapped = fit_min_area_quad_at_angle(&diagonal_blob_pixels(0, 0, 30), 0.0).expect("fit");
+        assert!(snapped.axis_angle.abs() < 1e-6);
+        assert!(snapped.quad[1].1 - snapped.quad[0].1 < 1.0, "top edge should be horizontal");
+        assert!(snapped.width > snapped.height);
+    }
+
+    #[test]
+    fn elongated_pca_fit_is_stable_under_skew() {
+        // The voting population: a −3° bar must come back at ≈−3°.
+        let fit = fit_min_area_quad(&bar_pixels(10, 50, 400, 12, -0.0524)).expect("fit");
+        let deg = fit.axis_angle.to_degrees();
+        assert!((deg + 3.0).abs() < 0.5, "expected ≈−3°, got {deg:.2}°");
+        assert!(fit.aspect() >= PAGE_ANGLE_VOTER_ASPECT);
     }
 }
