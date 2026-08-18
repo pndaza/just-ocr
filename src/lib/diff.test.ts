@@ -37,10 +37,29 @@ describe("diffWords", () => {
   });
 
   it("diffs Burmese chunks space-delimited", () => {
-    // No intra-word splitting: the changed chunk is flagged whole.
+    // Fully-changed chunks share no clusters, so they still flag whole.
     const segs = diffWords("အ တစ် နှစ်", "အ တစ် သုံး");
     expect(segs).toContainEqual({ type: "del", text: "နှစ်" });
     expect(segs).toContainEqual({ type: "add", text: "သုံး" });
+  });
+
+  it("localizes a one-syllable change inside an unspaced Burmese phrase", () => {
+    // Without cluster-splitting, the whole phrase would be one del+add pair
+    // (no "same" context at all) — the diff view would carry no information.
+    const base = "ကခဂဃငစဆဇဉညဋဌဍဎဏ";
+    const changed = base.replace("င", "ဗ");
+    const segs = diffWords(base, changed);
+    expect(segs.some((s) => s.type === "same" && s.text.length > 0)).toBe(true);
+    expect(segs.filter((s) => s.type === "del").map((s) => s.text).join("")).toBe("င");
+    expect(segs.filter((s) => s.type === "add").map((s) => s.text).join("")).toBe("ဗ");
+  });
+
+  it("keeps the concatenation invariant for Burmese (nothing dropped or duplicated)", () => {
+    const a = "ကျွန်တော်သည် စာဖတ်သည်";
+    const b = "ကျွန်မသည် စာဖတ်၏";
+    const segs = diffWords(a, b);
+    expect(segs.filter((s) => s.type !== "add").map((s) => s.text).join("")).toBe(a);
+    expect(segs.filter((s) => s.type !== "del").map((s) => s.text).join("")).toBe(b);
   });
 
   it("merges adjacent same-type segments", () => {

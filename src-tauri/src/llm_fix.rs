@@ -293,36 +293,53 @@ fn parse_rewrite_response(body: &str, pages: &[String]) -> Result<Vec<LlmPageTex
         .collect();
     for page in &mut out {
         strip_echoed_line_numbers(&mut page.lines);
+        if let Some(text) = pages.get((page.page - 1) as usize) {
+            let original: Vec<&str> = text.split('\n').collect();
+            strip_exact_echoes(&mut page.lines, &original);
+        }
     }
     out.sort_by_key(|p| p.page);
     Ok(out)
 }
 
-/// If `line` starts with an input-style `N: ` number prefix (1–4 digits,
-/// colon, optional single space), return the content after it.
+/// A digit that can start a line-number prefix: ASCII, or Myanmar (the
+/// model localizes the numbering to the page's script — Burmese pages come
+/// back with "၁၂:" style prefixes that an ASCII-only matcher misses, which
+/// made every line "change" and left the numbers in the applied text).
+fn is_number_digit(c: char) -> bool {
+    c.is_ascii_digit() || ('၀'..='၉').contains(&c)
+}
+
+/// If `line` starts with an input-style line-number prefix — 1–4 digits
+/// (ASCII or Myanmar), a separator (`:`, `.`, `)`, or `။`), and any run of
+/// spaces — return the content after it.
 fn line_no_prefix(line: &str) -> Option<&str> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    let digits = i;
-    if digits == 0 || digits > 4 || i >= bytes.len() || bytes[i] != b':' {
+    let digit_end = line
+        .char_indices()
+        .take_while(|&(_, c)| is_number_digit(c))
+        .last()
+        .map(|(i, c)| i + c.len_utf8())?;
+    if line[..digit_end].chars().count() > 4 {
         return None;
     }
-    i += 1; // colon
-    if i < bytes.len() && bytes[i] == b' ' {
-        i += 1;
+    let rest = &line[digit_end..];
+    let sep = rest.chars().next()?;
+    if !matches!(sep, ':' | '.' | ')' | '။') {
+        return None;
     }
-    // Safe cut: digits/colon/space are single-byte, so i is a char boundary.
-    Some(&line[i..])
+    let after = &rest[sep.len_utf8()..];
+    let cut = after
+        .find(|c: char| !c.is_whitespace())
+        .unwrap_or(after.len());
+    Some(&after[cut..])
 }
 
 /// Models sometimes echo the prompt's `N: ` line-number prefixes in their
 /// rewritten lines, which would make EVERY line "change" (identical lines
-/// diff as a lone "1:" fragment). When ALL non-empty lines of a page carry
-/// such a prefix, treat it as an echo and strip them; pages where only some
-/// lines look numbered are left alone (could be genuine numbered content).
+/// diff as a lone prefix fragment, and the numbers land in the applied
+/// text). When ALL non-empty lines of a page carry such a prefix, treat it
+/// as an echo and strip them; pages where only some lines look numbered are
+/// left alone (could be genuine numbered content).
 fn strip_echoed_line_numbers(lines: &mut [String]) {
     let all_numbered = lines
         .iter()
@@ -334,6 +351,23 @@ fn strip_echoed_line_numbers(lines: &mut [String]) {
     for line in lines.iter_mut() {
         if let Some(rest) = line_no_prefix(line) {
             *line = rest.to_string();
+        }
+    }
+}
+
+/// Per-line echo strip: a returned line that is EXACTLY its original with a
+/// number prefix prepended is the model restating an unchanged line in the
+/// prompt's numbering, not a correction — drop the prefix. This catches
+/// PARTIAL echoes the all-or-nothing pass above leaves alone (pages where
+/// only some lines came back numbered); a genuinely corrected line never
+/// equals its original, so it is never touched here.
+fn strip_exact_echoes(lines: &mut [String], original: &[&str]) {
+    for (l, line) in lines.iter_mut().enumerate() {
+        let Some(orig) = original.get(l) else { continue };
+        if let Some(rest) = line_no_prefix(line) {
+            if rest == *orig {
+                *line = rest.to_string();
+            }
         }
     }
 }
@@ -787,6 +821,32 @@ mod tests {
         let out = parse_rewrite_response(&response_body(model), &pages).unwrap();
         assert_eq!(out[0].lines, vec!["cat", "dog"]);
         assert_eq!(out[1].lines, vec!["dogs"]);
+    }
+
+    /// The model can localize the numbering to the page's script — Burmese
+    /// pages come back with Myanmar-digit prefixes the ASCII matcher missed,
+    /// so every line "changed" and the numbers reached the applied text.
+    #[test]
+    fn rewrite_strips_myanmar_digit_echoes() {
+        let pages = vec!["မန္တလေးမြို့\nရန်ကုန်မြို့".to_string()];
+        let model = r#"[
+            {"page":1,"lines":["၁: မန္တလေးမြို့","၂: ရန်ကုန်မြို့"]}
+        ]"#;
+        let out = parse_rewrite_response(&response_body(model), &pages).unwrap();
+        assert_eq!(out[0].lines, vec!["မန္တလေးမြို့", "ရန်ကုန်မြို့"]);
+    }
+
+    /// Partial echoes: only the unchanged lines carry prefixes (the
+    /// corrected ones were rewritten properly). The all-or-nothing pass
+    /// can't fire; the per-line exact-echo pass must still clean them.
+    #[test]
+    fn rewrite_strips_partial_exact_echoes() {
+        let pages = vec!["ဖျော်စုံ\nစာအုပ်".to_string()];
+        let model = r#"[
+            {"page":1,"lines":["၁: ဖျော်စုံ","စာအုပ်များ"]}
+        ]"#;
+        let out = parse_rewrite_response(&response_body(model), &pages).unwrap();
+        assert_eq!(out[0].lines, vec!["ဖျော်စုံ", "စာအုပ်များ"]);
     }
 
     #[test]

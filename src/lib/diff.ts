@@ -1,10 +1,11 @@
 //! Word-level inline diff for the AI Check's rewrite-mode review.
 //!
 //! Tokenizes by whitespace boundaries (whitespace kept as its own tokens so
-//! spacing renders in place) and computes an LCS-based diff. For unspaced
-//! scripts like Burmese a "word" degrades to a whole space-delimited chunk —
-//! the diff then flags the chunk, which still localizes the change better
-//! than showing whole lines.
+//! spacing renders in place) and computes an LCS-based diff. Tokens that
+//! contain Myanmar script — an unspaced script where a whole phrase would
+//! be a single token — are further split into base+combining-mark clusters,
+//! so a one-syllable correction highlights just that syllable instead of
+//! flagging the entire phrase.
 
 /** One rendered piece of a diff: unchanged, removed (old), added (new), or
  *  a marker for elided unchanged text (compact edit view). */
@@ -13,10 +14,42 @@ export interface DiffSeg {
   text: string;
 }
 
+const MYANMAR = /\p{Script=Myanmar}/u;
+const IS_MARK = /\p{M}/u;
+
+/** Split a token into clusters — one base char plus its following combining
+ *  marks (Burmese vowel/asat signs stack onto their consonant). Keeps every
+ *  character: a leading mark (broken OCR) simply opens its own cluster, so
+ *  `clusters(t).join("") === t` always holds. */
+function clusters(tok: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  for (const ch of tok) {
+    if (cur && IS_MARK.test(ch)) cur += ch;
+    else {
+      if (cur) out.push(cur);
+      cur = ch;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 /** Split into word and whitespace tokens, alternating; whitespace tokens
- *  participate in matching so runs of spaces diff like words. */
+ *  participate in matching so runs of spaces diff like words. Myanmar-
+ *  script tokens are cluster-split (see `clusters`) — Burmese has no spaces
+ *  between words, so without that split any edit to a phrase would diff the
+ *  whole phrase as one del+add pair and the inline diff view would be
+ *  useless. Cluster granularity localizes the edit to the changed syllable
+ *  while keeping syllable stacks (base + marks) intact. */
 function tokenize(text: string): string[] {
-  return text.split(/(\s+)/).filter((t) => t.length > 0);
+  const out: string[] = [];
+  for (const tok of text.split(/(\s+)/)) {
+    if (!tok) continue;
+    if (MYANMAR.test(tok)) out.push(...clusters(tok));
+    else out.push(tok);
+  }
+  return out;
 }
 
 /**
