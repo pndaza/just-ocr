@@ -91,6 +91,25 @@
   // Jobs whose llmFix was set by THIS rewrite-mode check — drives the
   // "Undo all" control (instant apply needs an escape hatch).
   let appliedJobIds = $state<number[]>([]);
+  // Pages this rewrite-mode check applied to, snapshotted so Undo all /
+  // per-line revert can restore what was there BEFORE the check — the
+  // manual text for manually-edited pages, and the pre-check llmFix for
+  // projection pages (which may hold verified fixes from earlier rounds;
+  // nulling it would throw those away). Kept in sync with `appliedJobIds`;
+  // plain (non-reactive) because every mutation that matters for rendering
+  // also bumps appliedJobIds.
+  let appliedOriginals = new Map<
+    number,
+    {
+      /** Pre-check manual text — manual-basis pages only, else null. */
+      manual: string | null;
+      /** Pre-check llmFix — projection pages only, else null. */
+      llm: Job["llmFix"];
+      /** The text as this check applied it, joined — the undo guard for the
+       *  manual tier (skip the restore when the user edited since). */
+      applied: string;
+    }
+  >();
 
   let hasKey = $derived(apiKey.trim().length > 0);
   // Quota/rate-limit errors (parsed + phrased by the backend from Gemini's
@@ -195,36 +214,86 @@
   let overLimit = $derived(requestCount > dailyLimit);
 
   /**
-   * The basis lines for a page: whatever the user currently sees — the
-   * spell-fix projection when that toggle is on, raw lines otherwise.
-   * Reviewing and fixing the displayed text keeps the review honest and
-   * lets AI fixes stack on top of the offline spell-fix.
+   * The basis lines for a page: whatever the user currently sees — manual
+   * edits first, then an applied AI fix, then the spell-fix projection when
+   * that toggle is on, raw lines otherwise. Reviewing and fixing the
+   * displayed text keeps the review honest and lets AI fixes stack on top
+   * of manual edits, earlier AI rounds and the offline spell-fix alike.
+   * Matching the display/export precedence (manualText > llmFix > spellFix
+   * > raw) matters in both directions: the model must be shown the text the
+   * user reads, and apply must write back to the tier the fixes were
+   * computed on (see `applyFixes`) — writing llmFix onto a manually-edited
+   * page would be silently shadowed by manualText in the Text panel and in
+   * exports. Including the llmFix tier is what makes RE-CHECKS safe: a
+   * second check over pages that already have applied fixes reviews the
+   * fixed text and applies on top of it, so verified fixes from earlier
+   * rounds can never be overwritten away (check 1-20, then 1-40, keeps
+   * round one's corrections).
    */
   // Basis lines are read by every validation pass (`invalidKeys` re-derives
   // on each keystroke in a correction editor) and by apply — cache the
   // mapped array per job so huge lists don't re-allocate it each time.
-  // Both identities are tracked because either swap changes the basis:
+  // All four identities are tracked because any swap changes the basis:
+  // `manualText` when an edit (or an apply that writes the manual tier)
+  // replaces the text, `llmFix` when an apply writes the projection,
   // `spellFix` when the spelling toggle recomputes the projection, and
   // `result` when the page is re-OCR'd in place (processJob assigns a fresh
-  // result AND nulls spellFix — checking spellFix alone would return the
-  // pre-re-OCR lines when the old and new spellFix are both null).
+  // result AND nulls the caches — checking the caches alone would return
+  // the pre-re-OCR lines when old and new are both null).
   const basisCache = new WeakMap<
     Job,
-    { spell: Job["spellFix"]; result: Job["result"]; lines: string[] }
+    {
+      manual: Job["manualText"];
+      llm: Job["llmFix"];
+      spell: Job["spellFix"];
+      result: Job["result"];
+      lines: string[];
+    }
   >();
 
   function basisLines(job: Job): string[] {
     const hit = basisCache.get(job);
-    if (hit && hit.spell === job.spellFix && hit.result === job.result) {
+    if (
+      hit &&
+      hit.manual === job.manualText &&
+      hit.llm === job.llmFix &&
+      hit.spell === job.spellFix &&
+      hit.result === job.result
+    ) {
       return hit.lines;
     }
-    const lines = job.spellFix?.fixedLines ?? job.result!.lines.map((l) => l.text);
-    basisCache.set(job, { spell: job.spellFix, result: job.result, lines });
+    const lines =
+      job.manualText != null
+        ? job.manualText.split("\n")
+        : job.llmFix?.fixedLines ??
+          job.spellFix?.fixedLines ??
+          job.result!.lines.map((l) => l.text);
+    basisCache.set(job, {
+      manual: job.manualText,
+      llm: job.llmFix,
+      spell: job.spellFix,
+      result: job.result,
+      lines,
+    });
     return lines;
   }
 
   function pageText(job: Job): string {
     return basisLines(job).join("\n");
+  }
+
+  /** `llmFix.fixes` bookkeeping: how many lines differ from the raw OCR
+   *  text. With fixes stacking across re-checks, a per-round replacement
+   *  count would reset (or double-count) on every later apply; "corrected
+   *  lines vs raw" stays honest no matter how many rounds contributed. */
+  function llmFixCount(job: Job, fixedLines: string[]): number {
+    const raw = job.result!.lines;
+    let n = 0;
+    const len = Math.min(raw.length, fixedLines.length);
+    for (let i = 0; i < len; i++) {
+      if (raw[i].text !== fixedLines[i]) n += 1;
+    }
+    return n;
   }
 
   // Batch plan for the in-flight check plus resume state, all indexed by
@@ -254,6 +323,7 @@
     suggestions = [];
     renderedSections = SECTION_CHUNK;
     appliedJobIds = [];
+    appliedOriginals = new Map();
     checkMode = mode;
     applied = null;
     void runBatches();
@@ -307,7 +377,28 @@
             }
           }
           if (changed > 0) {
-            job.llmFix = { fixedLines: out, fixes: changed };
+            // Write back to the tier the diff was computed on — a manual
+            // basis must land in manualText (an llmFix there would be
+            // shadowed on screen and in exports). `out` was built on the
+            // basis, which includes any earlier llmFix, so the projection
+            // write is cumulative. The snapshot powers Undo all / per-line
+            // revert for both tiers.
+            if (job.manualText != null) {
+              appliedOriginals.set(job.id, {
+                manual: job.manualText,
+                llm: null,
+                applied: out.join("\n"),
+              });
+              job.manualText = out.join("\n");
+              job.llmFix = null; // stale pre-edit projection must not resurface
+            } else {
+              appliedOriginals.set(job.id, {
+                manual: null,
+                llm: job.llmFix,
+                applied: out.join("\n"),
+              });
+              job.llmFix = { fixedLines: out, fixes: llmFixCount(job, out) };
+            }
             appliedJobIds = [...appliedJobIds, job.id];
           }
         }
@@ -414,47 +505,88 @@
     cancelRequested = true;
   }
 
-  /** Revert every llmFix this rewrite-mode check applied. The diff rows stay
-   *  as a reference of what the model proposed. */
+  /** Revert every correction this rewrite-mode check applied — restoring
+   *  what each page had BEFORE this check (its pre-check llmFix for
+   *  projection pages, so verified fixes from earlier rounds survive the
+   *  undo; its pre-check manual text for manually-edited pages, but only
+   *  when the user hasn't edited since — their newer edit is authoritative,
+   *  same precedence as the Text panel). The diff rows stay as a reference
+   *  of what the model proposed. */
   function undoAll() {
     for (const id of appliedJobIds) {
       const job = jobs.find((j) => j.id === id);
-      if (job) job.llmFix = null;
+      if (!job) continue;
+      const rec = appliedOriginals.get(id);
+      if (rec) {
+        if (rec.manual != null && job.manualText === rec.applied) {
+          job.manualText = rec.manual;
+        }
+        job.llmFix = rec.llm;
+      } else {
+        job.llmFix = null;
+      }
     }
     appliedJobIds = [];
   }
 
   /** Rewrite mode: keep ONE line's original text — the model sometimes
    *  "corrects" old/traditional spelling to the modern form, which isn't
-   *  always wanted. Restores the line in the applied projection and dims the
-   *  row; the last revert on a page drops its (now no-op) llmFix. */
+   *  always wanted. Restores the line in the applied projection (the manual
+   *  tier for manually-edited pages) and dims the row; the last revert on a
+   *  page restores its pre-check state rather than dropping to raw. */
   function revertFix(s: PageReview, i: number) {
     const f = s.fixes[i];
     if (f.reverted) return;
     const job = jobs.find((j) => j.id === s.jobId);
     // Nothing applied left to revert (Undo all already ran, or the job went
     // away) — bail before marking the row so it doesn't dim for a no-op.
-    if (!job?.result || !job.llmFix || f.line == null) return;
+    if (!job?.result || f.line == null) return;
+    const rec = appliedOriginals.get(s.jobId);
+    if (rec?.manual != null) {
+      // Manual-basis page: the applied lines live in manualText.
+      const lines = job.manualText?.split("\n");
+      if (!lines || f.line < 1 || f.line > lines.length) return;
+      f.reverted = true;
+      lines[f.line - 1] = f.wrong;
+      const remaining = s.fixes.filter((x) => !x.reverted).length;
+      job.manualText = remaining === 0 ? rec.manual : lines.join("\n");
+      return;
+    }
+    if (!job.llmFix) return;
     const fixed = job.llmFix.fixedLines;
     if (f.line < 1 || f.line > fixed.length) return;
     f.reverted = true;
     fixed[f.line - 1] = f.wrong;
     const remaining = s.fixes.filter((x) => !x.reverted).length;
-    job.llmFix = remaining === 0 ? null : { fixedLines: fixed, fixes: remaining };
+    job.llmFix =
+      remaining === 0
+        ? rec?.llm ?? null
+        : { fixedLines: fixed, fixes: llmFixCount(job, fixed) };
   }
 
   /** Whether this page still has its rewrite corrections applied — drives
-   *  the per-row revert buttons (after Undo all there's nothing to revert). */
+   *  the per-row revert buttons (after Undo all there's nothing to revert).
+   *  Manual-basis pages carry no llmFix, so they're tracked via this
+   *  check's applied set instead. */
   function pageApplied(s: PageReview): boolean {
-    return jobs.find((j) => j.id === s.jobId)?.llmFix != null;
+    return (
+      appliedJobIds.includes(s.jobId) ||
+      jobs.find((j) => j.id === s.jobId)?.llmFix != null
+    );
   }
 
   /**
    * Apply the checked items. For each page with ≥1 checked item, transform
-   * that job's basis lines (spell-fixed when present, raw otherwise) and
-   * cache the result on `job.llmFix` — a display-time projection exactly
-   * like the offline spell-fix; `job.result` is never mutated. The Text
-   * panel and exports pick the projection up reactively.
+   * that job's basis lines (manual edits when present, then an applied AI
+   * fix, then spell-fixed when cached, raw otherwise) and write the result
+   * back to the SAME tier the basis came from: `job.manualText` for
+   * manually-edited pages (manual text is authoritative in the Text panel
+   * and exports — an llmFix written there would be silently shadowed),
+   * `job.llmFix` otherwise. Because the basis already contains earlier
+   * rounds' fixes, the write is cumulative — re-checking a page (or a wider
+   * range that includes it) never discards fixes applied before. Either way
+   * it's a display-time projection; `job.result` is never mutated. The Text
+   * panel and exports pick the write-back up reactively.
    *
    * Review mode replaces wrong→correct word pairs (line-scoped when the
    * model addressed a line). Rewrite mode replaces whole lines: `correct` is
@@ -491,7 +623,20 @@
         fixedLines = lines;
         jobCount = count;
       }
-      job.llmFix = { fixedLines, fixes: jobCount };
+      if (job.manualText != null) {
+        // Manual basis: the fixed lines ARE the new manual text (split/join
+        // round-trips the original, including blank lines). Clear any stale
+        // llmFix from an earlier check — the manual text now carries those
+        // fixes, and a leftover projection would resurface if the user later
+        // reverts the manual text.
+        job.manualText = fixedLines.join("\n");
+        job.llmFix = null;
+      } else {
+        // llmFix/raw basis: `fixedLines` was computed ON TOP of the existing
+        // projection (see basisLines), so this overwrite is cumulative —
+        // earlier rounds' fixes are baked into the basis and survive.
+        job.llmFix = { fixedLines, fixes: llmFixCount(job, fixedLines) };
+      }
       pages += 1;
       fixes += jobCount;
     }
