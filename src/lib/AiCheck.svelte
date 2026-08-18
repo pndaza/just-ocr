@@ -106,7 +106,9 @@
       /** Pre-check llmFix — projection pages only, else null. */
       llm: Job["llmFix"];
       /** The text as this check applied it, joined — the undo guard for the
-       *  manual tier (skip the restore when the user edited since). */
+       *  manual tier (skip the restore when the user edited since). Kept in
+       *  sync by revertFix: a per-line revert updates it so Undo all still
+       *  restores the remaining auto-applied lines. */
       applied: string;
     }
   >();
@@ -521,7 +523,11 @@
         if (rec.manual != null && job.manualText === rec.applied) {
           job.manualText = rec.manual;
         }
-        job.llmFix = rec.llm;
+        // Restore a COPY of the pre-check projection — assigning the
+        // snapshot object itself would alias it with the live job.llmFix,
+        // and any later mutation (defensive paths) would corrupt the
+        // snapshot too.
+        job.llmFix = rec.llm && { ...rec.llm, fixedLines: [...rec.llm.fixedLines] };
       } else {
         job.llmFix = null;
       }
@@ -550,6 +556,12 @@
       lines[f.line - 1] = f.wrong;
       const remaining = s.fixes.filter((x) => !x.reverted).length;
       job.manualText = remaining === 0 ? rec.manual : lines.join("\n");
+      // Track the panel's OWN revert in the snapshot so Undo all's
+      // edited-since guard doesn't mistake it for a user edit and skip
+      // restoring (i.e. leave un-reverting) the remaining auto-applied
+      // lines. Real edits typed into the Text panel never touch the
+      // snapshot, so the guard still protects those.
+      rec.applied = job.manualText;
       return;
     }
     if (!job.llmFix) return;
@@ -560,19 +572,19 @@
     const remaining = s.fixes.filter((x) => !x.reverted).length;
     job.llmFix =
       remaining === 0
-        ? rec?.llm ?? null
+        ? // Copy, same aliasing rationale as undoAll's restore.
+          (rec?.llm && { ...rec.llm, fixedLines: [...rec.llm.fixedLines] }) ?? null
         : { fixedLines: fixed, fixes: llmFixCount(job, fixed) };
   }
 
   /** Whether this page still has its rewrite corrections applied — drives
-   *  the per-row revert buttons (after Undo all there's nothing to revert).
-   *  Manual-basis pages carry no llmFix, so they're tracked via this
-   *  check's applied set instead. */
+   *  the per-row revert buttons. ONLY this check's applied set counts: an
+   *  llmFix that survived Undo all belongs to an earlier round (restored,
+   *  not active), so testing it here would leave revert buttons enabled
+   *  with nothing of ours to revert — and clicking one would mutate the
+   *  earlier round's verified projection. */
   function pageApplied(s: PageReview): boolean {
-    return (
-      appliedJobIds.includes(s.jobId) ||
-      jobs.find((j) => j.id === s.jobId)?.llmFix != null
-    );
+    return appliedJobIds.includes(s.jobId);
   }
 
   /**

@@ -367,4 +367,55 @@ describe("AI Spell Fix tier coherence (manual apply → export)", () => {
     unmount(instance);
     target.remove();
   });
+
+  it("REGRESSION: Undo all still reverts the remaining lines after a per-line revert", async () => {
+    const job = doneJob();
+    job.manualText = "hte cat sat\non teh mat";
+    const { instance, target } = await runCheck([job], "rewrite");
+    expect(job.manualText).toBe("the cat sat\non the mat"); // both lines applied
+
+    // Keep the original on line 1 only.
+    await click(target.querySelector(".revert-btn")!);
+    expect(job.manualText).toBe("hte cat sat\non the mat");
+
+    // Undo all must revert line 2 as well — the panel's own revert must not
+    // trip the edited-since guard (only real Text-panel edits should).
+    const undoBtn = [...target.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Undo all"),
+    ) as HTMLButtonElement;
+    await click(undoBtn);
+    expect(job.manualText).toBe("hte cat sat\non teh mat");
+
+    unmount(instance);
+    target.remove();
+  });
+
+  it("REGRESSION: after Undo all, revert is disabled and the restored llmFix is not aliased", async () => {
+    const job = doneJob();
+    const seeded = { fixedLines: ["the cat sat", "on teh mat"], fixes: 1 };
+    job.llmFix = seeded;
+
+    const { instance, target } = await runCheck([job], "rewrite");
+    expect(job.llmFix?.fixedLines).toEqual(["the cat sat", "on the mat"]);
+
+    const undoBtn = [...target.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Undo all"),
+    ) as HTMLButtonElement;
+    await click(undoBtn);
+
+    // The earlier round's projection is restored by VALUE — the live job
+    // state must not share the snapshot's object/array.
+    expect(job.llmFix).toEqual(seeded);
+    expect(job.llmFix).not.toBe(seeded);
+    expect(job.llmFix!.fixedLines).not.toBe(seeded.fixedLines);
+
+    // Nothing of this check is applied anymore → revert disabled (an
+    // enabled button would mutate the earlier round's verified projection).
+    const revertBtn = target.querySelector(".revert-btn") as HTMLButtonElement;
+    expect(revertBtn).toBeTruthy();
+    expect(revertBtn.disabled).toBe(true);
+
+    unmount(instance);
+    target.remove();
+  });
 });
