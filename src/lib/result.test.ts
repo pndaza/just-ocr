@@ -108,13 +108,17 @@ describe("plainText — mergeParagraphs", () => {
     expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1");
   });
 
-  it("sorts unsorted input by y0 before grouping", () => {
+  it("preserves input order (backend reading order is trusted, not re-sorted)", () => {
+    // The old implementation re-sorted by y0, which re-interleaved columns
+    // on multi-column pages and undid the backend's reading-order pass.
+    // Grouping now trusts the incoming sequence; y-sorted single-column
+    // input still merges, and shuffled input stays shuffled.
     const r = result([
       line("three", 100, 40, FULL, 60),
       line("one", 100, 0, FULL, 20),
       line("two", 100, 20, FULL, 40),
     ]);
-    expect(plainText(r, { mergeParagraphs: true })).toBe("one two three");
+    expect(plainText(r, { mergeParagraphs: true })).toBe("three one two");
   });
 
   it("trims per-line whitespace and skips empty lines", () => {
@@ -146,6 +150,73 @@ describe("plainText — mergeParagraphs", () => {
       line("y", 100, 20, 100, 40),
     ]);
     expect(plainText(r, { mergeParagraphs: true })).toBe("x y");
+  });
+});
+
+describe("plainText — mergeParagraphs on multi-column pages", () => {
+  // Geometry mirrors the two-column textbook sample: left column x∈[100,300],
+  // right column x∈[350,550], staggered line y (right column sits a few px
+  // lower), gutter 50px. Columns arrive in reading order (all left lines,
+  // then all right) — the backend's column-aware ordering contract.
+  const L_FULL = 300; // x1 of a full left-column line
+  const R_X0 = 350;
+  const R_FULL = 550; // x1 of a full right-column line
+  // Enough lines per block that the 90th-percentile right margin isn't
+  // swayed by a single outlier line (real pages have 30+ lines/column).
+  const N = 12;
+
+  function twoColumnLines(): LineBox[] {
+    const lines: LineBox[] = [];
+    for (let i = 0; i < N; i++) {
+      const y = 60 + i * 25;
+      // Last line of each column ends short ⇒ paragraphEnd inside the column.
+      const x1 = i === N - 1 ? 250 : L_FULL;
+      lines.push(line(`L${i + 1}`, 100, y, x1, y + 20));
+    }
+    for (let i = 0; i < N; i++) {
+      const y = 65 + i * 25; // staggered vs the left column
+      const x1 = i === N - 1 ? 440 : R_FULL;
+      lines.push(line(`R${i + 1}`, R_X0, y, x1, y + 20));
+    }
+    return lines;
+  }
+
+  it("merges each column independently and keeps left-before-right order", () => {
+    const r = result(twoColumnLines());
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
+  });
+
+  it("keeps a full-width header its own paragraph above the columns", () => {
+    const lines = [line("HEADER", 100, 0, R_FULL, 20), ...twoColumnLines()];
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `HEADER\n\n` +
+        `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
+  });
+
+  it("a badge overlapping the gutter by a few px does not chain the columns", () => {
+    // Centered badge in the gutter: overlaps the left column by 20px (≥10%
+    // of its own 67px width → joins the left block, where its centering
+    // isolates it as its own paragraph) and the right column by 3px (< the
+    // 4px floor → splits). Without the tolerance the badge chained both
+    // columns into one block and the page shattered into one-line
+    // paragraphs against page-wide margins.
+    const lines = [
+      ...twoColumnLines().slice(0, N), // left column
+      line("BADGE", 280, 65, 347, 85),
+      ...twoColumnLines().slice(N), // right column
+    ];
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `BADGE\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
   });
 });
 

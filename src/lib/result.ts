@@ -31,9 +31,10 @@ export interface OcrResult {
 /** Options for {@link plainText}. */
 export interface PlainTextOpts {
   /** When true, group lines into paragraphs using a geometry heuristic on
-   *  the per-line bboxes (see {@link groupParagraphs}). Lines within a
-   *  paragraph join with a single space; paragraphs join with "\n\n".
-   *  Default false → every line joined with "\n" (legacy behaviour). */
+ *  the per-line bboxes (see {@link groupParagraphs}): lines are split into
+ *  column blocks first (reading order), then merged per block. Lines within
+ *  a paragraph join with a single space; paragraphs join with "\n\n".
+ *  Default false → every line joined with "\n" (legacy behaviour). */
   mergeParagraphs?: boolean;
 }
 
@@ -85,7 +86,25 @@ export function plainTextWithFix(
 // ── Paragraph grouping heuristic ─────────────────────────────────────────────
 //
 // Pure geometry — no ML, no font/baseline analysis. Uses only the per-line
-// bboxes every OCR path already produces. A line is classified as one of:
+// bboxes every OCR path already produces. Lines are expected in READING
+// ORDER — the backend's contract (the column-aware reading-order pass for
+// the Myanmar/segmenter paths, Tesseract's own iterator for full-page).
+// Grouping runs in two stages:
+//
+// Stage 1 — column blocks. Walking the lines in reading order, consecutive
+// lines stay in one block while their x-intervals overlap by a meaningful
+// amount (≥ BLOCK_OVERLAP_FRACTION of the narrower line, ≥ a small px
+// floor). A column switch — the left column's last line followed by the
+// right column's first, which share no x-overlap — opens a new block. The
+// fractional tolerance keeps a stray box sitting in the gutter (a centered
+// badge overlapping both columns by a few px) from chaining the columns
+// together. Zero-width boxes carry no horizontal signal and never split.
+//
+// Stage 2 — paragraphs within a block. Margins are computed PER BLOCK:
+// against page-wide margins every left-column line reads as a paragraph end
+// and every right-column line reads as centered, which is why multi-column
+// pages used to shatter into one-line paragraphs. Within a block, a line is
+// classified as one of:
 //
 //   body        — reaches the dominant left margin and the dominant right
 //                 margin. Mid-paragraph wrap.
@@ -104,13 +123,14 @@ export function plainTextWithFix(
 //      gap — the case pure gap detection misses).
 //   3. Line N+1 is centered (transition body → heading, or heading → heading
 //      with different centering) — symmetric with rule 2 for the start side.
+// Block boundaries always break (a column switch is always a new paragraph).
 //
 // Known limitation: a paragraph whose last line coincidentally fills the
 // full width with no following gap is indistinguishable from a mid-paragraph
 // wrap and won't be split. The merge-paragraphs toggle is the escape hatch
 // for documents where that matters.
 
-/** A line classified by its horizontal alignment within the text block. */
+/** A line classified by its horizontal alignment within its column block. */
 type LineKind = "body" | "paragraphEnd" | "centered";
 
 const LEFT_MARGIN_PCT = 10; // low percentile of x0 → dominant left margin
@@ -118,22 +138,71 @@ const RIGHT_MARGIN_PCT = 90; // high percentile of x1 → dominant right margin
 const INDENT_FRACTION = 0.1; // left inset > 10% of block width ⇒ centered
 const SHORT_RIGHT_FRACTION = 0.15; // right inset > 15% of block width ⇒ paragraphEnd
 const GAP_X_MEDIAN_HEIGHT = 0.5; // vertical gap > 0.5× median line height ⇒ break
+// Stage-1 column-block tolerance: consecutive lines belong to the same block
+// only when their x-intervals overlap by this fraction of the narrower line
+// (4px floor). Calibrated on the two-column sample: a centered badge in the
+// gutter overlaps the left column by ~19% of its own width (joins — harmless,
+// classification then isolates it) but the right column by ~1% (splits).
+const BLOCK_OVERLAP_FRACTION = 0.1;
+const BLOCK_OVERLAP_MIN_PX = 4;
 
-/** Group sorted-by-y0 lines into paragraphs. Exported for unit tests. */
+/** Group reading-ordered lines into paragraphs. Exported for unit tests. */
 export function groupParagraphs(lines: LineBox[]): LineBox[][] {
-  const sorted = [...lines].sort((a, b) => a.y0 - b.y0);
-  if (sorted.length === 0) return [];
-  if (sorted.length === 1) return [sorted];
+  if (lines.length === 0) return [];
+  if (lines.length === 1) return [lines];
+  return columnBlocks(lines).flatMap((block) => paragraphsInBlock(block));
+}
 
-  const leftMargin = percentile(sorted.map((l) => l.x0), LEFT_MARGIN_PCT);
-  const rightMargin = percentile(sorted.map((l) => l.x1), RIGHT_MARGIN_PCT);
+/**
+ * Split reading-ordered lines into column blocks: maximal runs of
+ * consecutive lines whose x-intervals overlap meaningfully. Pairwise
+ * (line vs line, not vs an accumulated extent) so a full-width header line
+ * at the top of a run can't keep both columns chained into one block.
+ */
+function columnBlocks(lines: LineBox[]): LineBox[][] {
+  const blocks: LineBox[][] = [];
+  let run: LineBox[] = [lines[0]];
+  let prev = lines[0];
+  for (let i = 1; i < lines.length; i++) {
+    const l = lines[i];
+    const overlap = Math.min(prev.x1, l.x1) - Math.max(prev.x0, l.x0);
+    // Zero-width boxes have no horizontal signal — keep them with their
+    // neighbours instead of splitting on `overlap <= 0`.
+    const overlapsEnough =
+      prev.x1 - prev.x0 <= 0 ||
+      l.x1 - l.x0 <= 0 ||
+      overlap >=
+        Math.max(
+          BLOCK_OVERLAP_MIN_PX,
+          BLOCK_OVERLAP_FRACTION *
+            Math.min(prev.x1 - prev.x0, l.x1 - l.x0),
+        );
+    if (overlapsEnough) {
+      run.push(l);
+    } else {
+      blocks.push(run);
+      run = [l];
+    }
+    prev = l;
+  }
+  blocks.push(run);
+  return blocks;
+}
+
+/**
+ * Paragraphs within one column block: the alignment classification and
+ * break rules above, against the block's own margins and median height.
+ */
+function paragraphsInBlock(block: LineBox[]): LineBox[][] {
+  const leftMargin = percentile(block.map((l) => l.x0), LEFT_MARGIN_PCT);
+  const rightMargin = percentile(block.map((l) => l.x1), RIGHT_MARGIN_PCT);
   const blockWidth = rightMargin - leftMargin;
-  const heights = sorted
+  const heights = block
     .map((l) => Math.max(1, l.y1 - l.y0))
     .sort((a, b) => a - b);
   const medianHeight = heights[Math.floor(heights.length / 2)];
 
-  const kinds = sorted.map((l) =>
+  const kinds = block.map((l) =>
     classify(l, leftMargin, rightMargin, blockWidth, medianHeight),
   );
 
@@ -143,10 +212,10 @@ export function groupParagraphs(lines: LineBox[]): LineBox[][] {
   //   — entering or leaving a centered run (heading ↔ body transition);
   //     consecutive centered lines stay together within their run.
   const paragraphs: LineBox[][] = [];
-  let current: LineBox[] = [sorted[0]];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1];
-    const cur = sorted[i];
+  let current: LineBox[] = [block[0]];
+  for (let i = 1; i < block.length; i++) {
+    const prev = block[i - 1];
+    const cur = block[i];
     const gap = cur.y0 - prev.y1;
     const enteringCentered = kinds[i] === "centered" && kinds[i - 1] !== "centered";
     const leavingCentered = kinds[i - 1] === "centered" && kinds[i] !== "centered";
