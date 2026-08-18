@@ -54,6 +54,7 @@
     type ImageMode,
     type PageRange,
     type ReadFile,
+    type WordHighlight,
   } from "./lib/ocr";
   import PdfModeDialog from "./lib/PdfModeDialog.svelte";
   import { currentTheme, setTheme, resolveTheme, type Theme } from "./theme";
@@ -125,8 +126,9 @@
   // by side), not a modal. Session-only: closed on each launch.
   let aiPanelOpen = $state(false);
   // Wrong words flagged by the AI check, per jobId — published by the panel
-  // so the Text panel can highlight them while reviewing.
-  let aiWrongWords = $state<Record<number, string[]>>({});
+  // (each with its flagged line) so the Text panel can highlight them while
+  // reviewing.
+  let aiWrongWords = $state<Record<number, WordHighlight[]>>({});
   // Whether the toolbar shows the "Fix spelling" checkbox (Myanmar only).
   // The toggle's own state is independent and stays sticky when hidden.
   // Currently dormant: the checkbox is parked behind {#if false} in

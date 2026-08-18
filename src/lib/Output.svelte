@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Job } from "./ocr";
+  import type { Job, WordHighlight } from "./ocr";
   import { plainText, plainTextWithFix, formatDuration } from "./result";
 
   interface Props {
@@ -16,10 +16,12 @@
      *  shows fixed text instead of raw. The toggle is a prop (not read from
      *  localStorage) so App remains the single source of truth for opts. */
     fixSpelling: boolean;
-    /** Wrong words flagged by the AI spell check for this page. Highlighted
-     *  in the displayed text while reviewing; words already replaced by an
-     *  applied fix simply no longer occur and don't match. */
-    highlights: string[];
+    /** Wrong words flagged by the AI spell check for this page, each with
+     *  the 1-based line it was flagged on (null = not line-scoped). Marked
+     *  in the displayed text only where flagged — a word that also occurs
+     *  on other lines of the page stays unmarked there. Words already
+     *  replaced by an applied fix simply no longer occur and don't match. */
+    highlights: WordHighlight[];
   }
   let { job, jobs, mergeParagraphs, fixSpelling, highlights }: Props = $props();
 
@@ -104,24 +106,127 @@
     doneJobs.reduce((sum, j) => sum + (j.llmFix?.fixes ?? 0), 0),
   );
 
-  // Split a text run into alternating plain/match segments for <mark>
-  // rendering against the AI-flagged words. Longest-first so overlapping
-  // words match greedily; regex-escaped since OCR words can contain
-  // punctuation. Null when nothing matches (keeps the plain path untouched).
-  // Runs per line (numbered view) or over the whole text (merged view).
-  function splitHighlights(text: string): string[] | null {
-    const words = [...new Set(highlights)].filter(
-      (w) => w && text.includes(w),
-    );
-    if (!words.length) return null;
-    words.sort((a, b) => b.length - a.length);
-    const pattern = words
-      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("|");
-    return text.split(new RegExp(`(${pattern})`, "g"));
+  // ── AI-flagged word highlighting ────────────────────────────────────────────
+  // Only the FLAGGED occurrence gets a <mark>: each entry carries the line it
+  // was flagged on (1-based, indexing the page's basis lines — the same
+  // lines the AI Check panel's L chips count), so a word that recurs on
+  // untouched lines of the same page doesn't light up there. In the
+  // line-numbered view each row knows its number, so scoping is a filter. In
+  // the merged-paragraph view rows are gone, but each line's text survives
+  // as a contiguous run inside the merged text (the merge only inserts
+  // " " / "\n\n" between trimmed line texts), so a forward cursor over the
+  // merged text locates every line's span without duplicating the
+  // paragraph-grouping heuristic that built it.
+
+  /** One rendered stretch of text — marked or plain. */
+  interface Seg {
+    text: string;
+    mark: boolean;
   }
 
-  let segments = $derived.by(() => splitHighlights(displayText));
+  /** Split `text` into plain/marked segments, marking occurrences of `words`
+   *  (longest-first so overlapping words match greedily; regex-escaped since
+   *  OCR words can contain punctuation). `allow` gates each match — the
+   *  merged view passes a flagged-line-span check. Null when nothing
+   *  matches (keeps the plain render path untouched). */
+  function markText(
+    text: string,
+    words: string[],
+    allow?: (word: string, start: number) => boolean,
+  ): Seg[] | null {
+    const ws = [...new Set(words)].filter((w) => w && text.includes(w));
+    if (!ws.length) return null;
+    ws.sort((a, b) => b.length - a.length);
+    const pattern = ws
+      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    const out: Seg[] = [];
+    let last = 0;
+    for (const m of text.matchAll(new RegExp(pattern, "g"))) {
+      const s = m.index!;
+      const e = s + m[0].length;
+      if (allow && !allow(m[0], s)) continue;
+      if (s > last) out.push({ text: text.slice(last, s), mark: false });
+      out.push({ text: m[0], mark: true });
+      last = e;
+    }
+    if (!out.length) return null;
+    if (last < text.length) out.push({ text: text.slice(last), mark: false });
+    return out;
+  }
+
+  /** Words eligible on line `lineNo` (1-based): those flagged on that line
+   *  plus the page-wide ones (line == null, from unscoped fixes). */
+  function wordsForLine(lineNo: number): string[] {
+    const words = new Set<string>();
+    for (const h of highlights) {
+      if (h.line === null || h.line === lineNo) words.add(h.wrong);
+    }
+    return [...words];
+  }
+
+  // The page's per-line texts in the same precedence as displayText (manual
+  // edits, then an applied AI fix, then the spell-fix projection, then raw) —
+  // the lines the highlight entries' line numbers refer to.
+  let basisLines = $derived.by(() => {
+    if (!job || job.status !== "done" || !job.result) return null;
+    if (job.manualText != null) return job.manualText.split("\n");
+    return (
+      job.llmFix?.fixedLines ??
+      (fixSpelling ? job.spellFix?.fixedLines : undefined) ??
+      job.result.lines.map((l) => l.text)
+    );
+  });
+
+  // Merged view only: each basis line's span (start, end exclusive) inside
+  // the merged displayText, located by a forward cursor (see the section
+  // comment). Null entries for lines without a locatable span (dropped
+  // empty lines, defensive misses) — they just never match.
+  let mergedSpans = $derived.by(() => {
+    if (numberedLines || !basisLines) return null;
+    const spans: ([number, number] | null)[] = [];
+    let cursor = 0;
+    for (const line of basisLines) {
+      const t = line.trim();
+      const at = t ? displayText.indexOf(t, cursor) : -1;
+      if (at === -1) {
+        spans.push(null);
+        continue;
+      }
+      spans.push([at, at + t.length]);
+      cursor = at + t.length;
+    }
+    return spans;
+  });
+
+  // Merged-view segments: all flagged words match text-wide, but a match
+  // only becomes a <mark> when it starts inside a flagged line's span — or
+  // the word was flagged page-wide (line == null).
+  let mergedSegs = $derived.by(() => {
+    if (!mergedSpans) return null;
+    const pageWide = new Set(
+      highlights.filter((h) => h.line === null).map((h) => h.wrong),
+    );
+    const linesByWord = new Map<string, Set<number>>();
+    for (const h of highlights) {
+      if (h.line == null) continue;
+      let set = linesByWord.get(h.wrong);
+      if (!set) linesByWord.set(h.wrong, (set = new Set()));
+      set.add(h.line);
+    }
+    return markText(
+      displayText,
+      highlights.map((h) => h.wrong),
+      (word, start) => {
+        if (pageWide.has(word)) return true;
+        for (const ln of linesByWord.get(word) ?? []) {
+          const sp = mergedSpans[ln - 1];
+          if (sp && start >= sp[0] && start < sp[1]) return true;
+        }
+        return false;
+      },
+    );
+  });
 
   // Line-numbered view: only in line-by-line mode, where each displayed row
   // IS a recognized line — the numbers then match the AI Check panel's L
@@ -211,12 +316,12 @@
              numbers match the AI Spell Fix panel's L chips. -->
         <div class="lines" aria-label="Recognized text">
           {#each numberedLines as line, i (i)}
-            {@const segs = splitHighlights(line)}
+            {@const segs = markText(line, wordsForLine(i + 1))}
             <div class="line-row">
               <span class="line-no" aria-hidden="true">{i + 1}</span>
               <span class="line-text">
                 {#if segs}
-                  {#each segs as seg, k (k)}{#if k % 2 === 1}<mark class="ai-hl">{seg}</mark>{:else}{seg}{/if}{/each}
+                  {#each segs as seg, k (k)}{#if seg.mark}<mark class="ai-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
                 {:else}{line}{/if}
               </span>
             </div>
@@ -224,8 +329,9 @@
         </div>
       {:else}
         <!-- Merged-paragraph view — no line numbers (no stable row mapping);
-             AI-highlight <mark>s still render (odd split indices match). -->
-        <pre class="text readonly">{#if segments}{#each segments as seg, i}{#if i % 2 === 1}<mark class="ai-hl">{seg}</mark>{:else}{seg}{/if}{/each}{:else}{displayText}{/if}</pre>
+             AI-highlight <mark>s still render, scoped to flagged lines via
+             the span map (see mergedSegs). -->
+        <pre class="text readonly">{#if mergedSegs}{#each mergedSegs as seg, i}{#if seg.mark}<mark class="ai-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}{:else}{displayText}{/if}</pre>
       {/if}
     {:else}
       <div class="placeholder">No text recognized. Try a different engine or image.</div>

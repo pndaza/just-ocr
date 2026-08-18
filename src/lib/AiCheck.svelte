@@ -3,6 +3,7 @@
     llmSpellCheck,
     llmRewritePages,
     llmDailyLimit,
+    exportSpellFixSuggestions,
     LLM_MODELS,
     LLM_BATCH_SIZES,
     LLM_CONCURRENCY,
@@ -12,6 +13,7 @@
     type LlmConcurrency,
     type LlmModel,
     type LlmWordFix,
+    type WordHighlight,
   } from "./ocr";
   import { applyWordFixes } from "./result";
   import { diffWords } from "./diff";
@@ -42,10 +44,11 @@
      *  called as the review cursor moves, keeping the image, text and fix
      *  list pointed at the same page. */
     onselectpage: (jobId: number) => void;
-    /** Reports the current suggestions (jobId → wrong words) so the Text
-     *  panel can highlight flagged words in the page text. Called whenever
-     *  the suggestion set changes (new results, re-check). */
-    onsuggestions: (wrong: Record<number, string[]>) => void;
+    /** Reports the current suggestions (jobId → flagged words with their
+     *  line) so the Text panel can highlight them in the page text — each
+     *  word only on the line it was flagged on. Called whenever the
+     *  suggestion set changes (new results, re-check). */
+    onsuggestions: (wrong: Record<number, WordHighlight[]>) => void;
   }
   let {
     jobs,
@@ -660,6 +663,27 @@
     return s.fixes.filter((f) => f.checked).length;
   }
 
+  /** Save the current suggestion list as CSV. The suggestions are ephemeral —
+   *  they're dropped when the panel closes or a new check starts — and the
+   *  wrong→correct pairs (with page/line provenance and the user's
+   *  accept/reject choice) are exactly what compiling a common-spelling-error
+   *  list needs, so keep an escape hatch. Review mode only: rewrite rows are
+   *  whole-line diffs, not word pairs. */
+  async function exportSuggestions() {
+    if (checkMode !== "review") return;
+    await exportSpellFixSuggestions(
+      suggestions.flatMap((s) =>
+        s.fixes.map((f) => ({
+          page: s.name,
+          line: f.line,
+          wrong: f.wrong,
+          correct: f.correct,
+          applied: f.checked,
+        })),
+      ),
+    );
+  }
+
   // ── Keyboard review ────────────────────────────────────────────────────────
   // Focus-independent cursor over the flattened list of checkbox rows (each
   // page's select-all row + its fix rows). Window-level keys drive it so
@@ -840,20 +864,30 @@
     if (row) onselectpage(row.s.jobId);
   });
 
-  // Publish the flagged wrong words per page so the Text panel can
-  // highlight them while reviewing. Review mode only — rewrite mode applies
-  // instantly, so the old text (and its highlights) is already replaced;
-  // publishing {} then clears any highlights left over from a previous
-  // review-mode check.
+  // Publish the flagged words per page so the Text panel can highlight
+  // them while reviewing. Review mode only — rewrite mode applies instantly,
+  // so the old text (and its highlights) is already replaced; publishing {}
+  // then clears any highlights left over from a previous review-mode check.
   $effect(() => {
     if (checkMode !== "review") {
       onsuggestions({});
       return;
     }
-    const map: Record<number, string[]> = {};
+    const map: Record<number, WordHighlight[]> = {};
     for (const s of suggestions) {
       if (s.fixes.length) {
-        map[s.jobId] = [...new Set(s.fixes.map((f) => f.wrong))];
+        // One entry per distinct line+word pair: the Text panel marks the
+        // word only on the line it was flagged on, not on every occurrence
+        // across the page (the same word elsewhere is usually fine).
+        const seen = new Set<string>();
+        const entries: WordHighlight[] = [];
+        for (const f of s.fixes) {
+          const key = `${f.line ?? "*"}\u0000${f.wrong}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          entries.push({ wrong: f.wrong, line: f.line ?? null });
+        }
+        map[s.jobId] = entries;
       }
     }
     onsuggestions(map);
@@ -1160,6 +1194,15 @@
             >
               Apply {selectedCount} {selectedCount === 1 ? "Fix" : "Fixes"}
             </button>
+            <!-- Icon-only and parked past Apply at the strip's right edge so
+                 the CSV escape hatch stays out of the review flow — a text
+                 button squeezed between None and Apply invited misclicks. -->
+            <button
+              class="icon-btn"
+              onclick={exportSuggestions}
+              title="Export suggestions as CSV — every wrong→correct pair with its page, line and whether it was applied. The list is discarded when this panel closes."
+              aria-label="Export suggestions as CSV"
+            >⤓</button>
           </div>
         {/if}
 
@@ -1367,6 +1410,16 @@
         </p>
         <div class="row">
           <button class="btn ghost" onclick={startCheck}>Check Again</button>
+          <!-- The list (with each row's applied/unapplied state) survives the
+               apply — this is the last chance to keep it as CSV before a new
+               check or closing the panel discards it. Icon-only, pushed to the
+               row's right edge, same as in the review controls. -->
+          <button
+            class="icon-btn"
+            onclick={exportSuggestions}
+            title="Export suggestions as CSV — applied rows are marked yes"
+            aria-label="Export suggestions as CSV"
+          >⤓</button>
         </div>
       </div>
     {/if}
@@ -1479,6 +1532,33 @@
   .btn:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+  /* Small square icon button (the suggestion export) — same shape as the
+     Toolbar's settings gear, so glyph buttons read alike across the app. */
+  .icon-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 14px;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .icon-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+    background: var(--accent-soft);
+  }
+  /* In the applied-phase row, push the export icon to the far edge so it
+     doesn't crowd "Check Again". */
+  .row .icon-btn {
+    margin-left: auto;
   }
   /* Run options on the ready screen: four rows (Pages / Model / Pages/req /
      Parallel) with a FIXED label column so every control starts at the same

@@ -397,6 +397,16 @@ export interface LlmWordFix {
   line?: number;
 }
 
+/** A flagged word the AI Check panel publishes for the Text panel to
+ *  highlight: the word plus the 1-based line it was flagged on (null = the
+ *  model didn't scope it to a line — any occurrence highlights). Carrying
+ *  the line lets the Text panel mark only the flagged occurrence instead of
+ *  every match across the page. */
+export interface WordHighlight {
+  wrong: string;
+  line: number | null;
+}
+
 /** All proposed corrections for one page of the batch. `page` is 1-based,
  *  indexing into the `pages` array sent with the request. Pages the model
  *  found no errors on are simply absent from the response. */
@@ -553,6 +563,84 @@ export async function exportResults(
   // window or hit Cmd+Shift+G. Revealing is the macOS convention and forces the
   // file to appear, selected, in its parent folder. Best-effort: a failure here
   // (e.g. headless, no file manager) doesn't undo a successful write.
+  try {
+    await revealItemInDir(dest);
+  } catch (e) {
+    console.warn(`Could not reveal "${dest}" in file manager:`, e);
+  }
+}
+
+// ── AI spell-fix suggestion export (review mode) ─────────────────────────────
+
+/** One suggestion row for {@link exportSpellFixSuggestions} — a wrong→correct
+ *  pair the model proposed in review mode, with its provenance and the user's
+ *  accept/reject decision. */
+export interface SpellFixExportRow {
+  /** Page (job) display name — where the flagged word was found. */
+  page: string;
+  /** 1-based line on that page, when the model scoped the fix to one. */
+  line?: number;
+  wrong: string;
+  correct: string;
+  /** The row's checkbox state at export time: yes = applied (or selected,
+   *  when exported mid-review), no = left out. The pairs a human accepted
+   *  are the verified signal; the rejected ones are still worth keeping. */
+  applied: boolean;
+}
+
+/** RFC-4180 quoting: wrap a field in double quotes when it contains a comma,
+ *  quote, or newline, doubling embedded quotes. */
+function csvField(v: string): string {
+  return /[",\r\n]/.test(v) ? `"${v.replaceAll('"', '""')}"` : v;
+}
+
+/**
+ * Write the review-mode spell-fix suggestions to a .csv file via a native
+ * save dialog — same flow as {@link exportResults} (default dir, write,
+ * best-effort reveal).
+ *
+ * The suggestions are otherwise ephemeral: they live only in the AI Check
+ * panel and are dropped when it closes or a new check starts. The export is
+ * the way to keep them — the wrong→correct pairs (with page/line and whether
+ * the user applied them) are exactly what compiling a common-spelling-error
+ * list needs. Rows are written verbatim, including repeats: how often a pair
+ * occurs across pages is itself the frequency signal, so deduping here would
+ * throw it away.
+ */
+export async function exportSpellFixSuggestions(
+  rows: SpellFixExportRow[],
+): Promise<void> {
+  if (!rows.length) return;
+
+  let defaultPath = "ai-spell-fixes.csv";
+  try {
+    const dir = await invoke<string>("default_save_dir");
+    if (dir) defaultPath = `${dir.replace(/\/$/, "")}/ai-spell-fixes.csv`;
+  } catch {
+    // fall back to the bare filename, as exportResults does
+  }
+
+  const dest = await save({
+    title: "Export spell-fix suggestions",
+    defaultPath,
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+  if (!dest) return; // user cancelled
+
+  const lines = [
+    "page,line,wrong,correct,applied",
+    ...rows.map((r) =>
+      [
+        csvField(r.page),
+        r.line == null ? "" : String(r.line),
+        csvField(r.wrong),
+        csvField(r.correct),
+        r.applied ? "yes" : "no",
+      ].join(","),
+    ),
+  ];
+  await writeFile(dest, new TextEncoder().encode(lines.join("\n") + "\n"));
+
   try {
     await revealItemInDir(dest);
   } catch (e) {

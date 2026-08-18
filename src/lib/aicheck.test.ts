@@ -52,7 +52,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const { exportResults } = await import("./ocr");
-import type { Job } from "./ocr";
+import type { Job, WordHighlight } from "./ocr";
 
 /** A done job whose raw OCR text still contains two typos. */
 function doneJob(): Job {
@@ -110,8 +110,12 @@ async function click(el: Element) {
 }
 
 /** Mount the panel and run a full check, resolving once the review list is
- *  up. Returns the mount handle + host element for further interaction. */
-async function runCheck(jobs: Job[], mode: "review" | "rewrite") {
+ * up. Returns the mount handle + host element for further interaction. */
+async function runCheck(
+  jobs: Job[],
+  mode: "review" | "rewrite",
+  onsuggestions: (m: Record<number, WordHighlight[]>) => void = () => {},
+) {
   const target = document.createElement("div");
   document.body.appendChild(target);
   const instance = mount(AiCheck, {
@@ -126,7 +130,7 @@ async function runCheck(jobs: Job[], mode: "review" | "rewrite") {
       onclose: () => {},
       onopensettings: () => {},
       onselectpage: () => {},
-      onsuggestions: () => {},
+      onsuggestions,
     },
   });
   const startBtn = [...target.querySelectorAll("button")].find((b) =>
@@ -414,6 +418,88 @@ describe("AI Spell Fix tier coherence (manual apply → export)", () => {
     const revertBtn = target.querySelector(".revert-btn") as HTMLButtonElement;
     expect(revertBtn).toBeTruthy();
     expect(revertBtn.disabled).toBe(true);
+
+    unmount(instance);
+    target.remove();
+  });
+
+  it("publishes line-scoped highlights so the Text panel marks only the flagged line", async () => {
+    const job = doneJob();
+    const got: Record<number, WordHighlight[]> = {};
+    const { instance, target } = await runCheck(
+      [job],
+      "review",
+      (m) => Object.assign(got, m),
+    );
+
+    // Both fixes carry their line; the Text panel scopes marks to it instead
+    // of lighting up every occurrence of the word across the page.
+    expect(got[job.id]).toEqual([
+      { wrong: "hte", line: 1 },
+      { wrong: "teh", line: 2 },
+    ]);
+
+    unmount(instance);
+    target.remove();
+  });
+});
+
+describe("AI Spell Fix suggestion export (review mode → CSV)", () => {
+  /** The CSV text the last export wrote to disk. */
+  function lastWrittenCsv(): string {
+    const bytes = writeFileMock.mock.calls.at(-1)![1] as Uint8Array;
+    return new TextDecoder().decode(bytes);
+  }
+
+  it("exports every suggestion with its checkbox state; commas in names are quoted", async () => {
+    const job = doneJob();
+    job.name = "scan, 01.png"; // comma forces RFC-4180 quoting of the page name
+    const { instance, target } = await runCheck([job], "review");
+
+    // Uncheck the second fix (teh → the) — the export must carry the
+    // accept/reject decision, not just the model's proposals.
+    const boxes = [
+      ...target.querySelectorAll('.fix input[type="checkbox"]'),
+    ] as HTMLInputElement[];
+    expect(boxes.length).toBe(2);
+    boxes[1].checked = false;
+    boxes[1].dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const exportBtn = target.querySelector(
+      'button[aria-label="Export suggestions as CSV"]',
+    ) as HTMLButtonElement;
+    expect(exportBtn).toBeTruthy();
+    await click(exportBtn);
+
+    const csv = lastWrittenCsv();
+    expect(csv.split("\n")[0]).toBe("page,line,wrong,correct,applied");
+    expect(csv).toContain('"scan, 01.png",1,hte,the,yes');
+    expect(csv).toContain('"scan, 01.png",2,teh,the,no');
+
+    unmount(instance);
+    target.remove();
+  });
+
+  it("the applied-phase export marks the rows that were actually applied", async () => {
+    const job = doneJob();
+    const { instance, target } = await runCheck([job], "review");
+
+    const applyBtn = [...target.querySelectorAll("button")].find((b) =>
+      b.textContent?.startsWith("Apply"),
+    ) as HTMLButtonElement;
+    await click(applyBtn);
+
+    // Suggestions survive the apply — this is the last chance to keep them.
+    const exportBtn = target.querySelector(
+      'button[aria-label="Export suggestions as CSV"]',
+    ) as HTMLButtonElement;
+    expect(exportBtn).toBeTruthy();
+    await click(exportBtn);
+
+    const csv = lastWrittenCsv();
+    expect(csv).toContain("page1.png,1,hte,the,yes");
+    expect(csv).toContain("page1.png,2,teh,the,yes");
 
     unmount(instance);
     target.remove();
