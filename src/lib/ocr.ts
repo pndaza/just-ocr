@@ -92,10 +92,17 @@ export interface Job {
    *  toggle changes. */
   spellFix: { fixedLines: string[]; fixes: number } | null;
   /** Word-level fixes the user accepted from the AI spell check (Gemini),
-   *  applied on top of the spell-fix basis lines (`spellFix.fixedLines` when
-   *  present, raw lines otherwise). Same non-destructive projection shape as
-   *  `spellFix`: `job.result` is never mutated, and re-running OCR clears
-   *  this. Null until the user applies fixes in the AI Check panel. */
+   *  applied on top of the page's current basis (manual text, an earlier
+   *  llmFix, the spell-fix projection, or raw lines — same precedence the
+   *  Text panel shows). Fixes STACK: a later check/apply builds on the
+   *  lines already here, so re-checking a page never discards earlier
+   *  rounds' verified fixes; `fixes` counts lines differing from the raw
+   *  OCR text. Manually-edited pages (see `manualText`) never carry an
+   *  llmFix — their AI fixes are written straight into the manual text,
+   *  which is authoritative and would shadow a projection here. Same
+   *  non-destructive shape as `spellFix`: `job.result` is never mutated,
+   *  and re-running OCR clears this. Null until the user applies fixes in
+   *  the AI Check panel. */
   llmFix: { fixedLines: string[]; fixes: number } | null;
   /** Manual edits typed into the Text panel. When set, it REPLACES all
    *  projections (raw/spell-fix/AI-fix) for display, copy and export — the
