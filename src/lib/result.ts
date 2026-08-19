@@ -88,7 +88,10 @@ export function plainTextWithFix(
 // Pure geometry — no ML, no font/baseline analysis. Uses only the per-line
 // bboxes every OCR path already produces. Lines are expected in READING
 // ORDER — the backend's contract (the column-aware reading-order pass for
-// the Myanmar/segmenter paths, Tesseract's own iterator for full-page).
+// the Myanmar/segmenter paths; Tesseract's own iterator for full-page,
+// which is reading-ordered under the auto-segmentation PSMs but can emit
+// raster order under sparse-text PSMs 11/12, where this grouping degrades
+// to per-line blocks — no worse than the old global y-sort).
 // Grouping runs in two stages:
 //
 // Stage 1 — column blocks. Walking the lines in reading order, consecutive
@@ -142,8 +145,11 @@ export function plainTextWithFix(
 // full width with no following gap is indistinguishable from a mid-paragraph
 // wrap and won't be split (unless the NEXT paragraph starts at a marked
 // level). Blocks with more than two x0 levels (hanging paragraphs plus
-// deeper-indented verse) mark each outlier level as starts. The merge
-// toggle is the escape hatch for documents where that matters.
+// deeper-indented verse) mark each outlier level as starts. A hanging
+// indent deeper than ~12.5% of the block width (with starts at the 40%
+// share cap) drags the mean-x0 reference toward the flush level far enough
+// that short tails can isolate as headings. The merge toggle is the escape
+// hatch for documents where that matters.
 
 /** A line classified by its horizontal alignment within its column block. */
 type LineKind = "body" | "start" | "paragraphEnd" | "centered";
@@ -154,13 +160,22 @@ const INDENT_FRACTION = 0.05; // left inset > 5% of block width ⇒ not body-lev
 const SHORT_RIGHT_FRACTION = 0.15; // right inset > 15% of block width ⇒ paragraphEnd
 const GAP_X_MEDIAN_HEIGHT = 0.5; // vertical gap > 0.5× median line height ⇒ break
 // Paragraph-start x0 clustering (`paragraphStarts`): the split gap must
-// clear an absolute floor (detector x0 jitter on body lines is ~±6px) and a
-// fraction of the block width, and each extracted level must stay under 40%
-// of its pool (above that — e.g. verse where most lines start paragraphs —
-// the level structure carries no start/end information).
-const X0_SPLIT_MIN_PX = 12;
+// clear an absolute floor — detector x0 jitter on body lines is ~±6px, so
+// adjacent jittered lines can present a gap of up to ~12px; 16 leaves
+// margin — and a fraction of the block width. Each extracted level must
+// stay under 40% of its pool (above that — e.g. verse where most lines
+// start paragraphs — the level structure carries no start/end
+// information).
+const X0_SPLIT_MIN_PX = 16;
 const X0_SPLIT_MIN_FRAC = 0.025;
 const START_LEVEL_MAX_SHARE = 0.4;
+// A line wider than this multiple of the page's median line width is
+// "spanning" (a full-width caption or rule BETWEEN columns, a section
+// heading over a two-column body): it overlaps both sides, and pairwise
+// overlap alone would chain the columns through it into one block.
+// Spanning lines become their own blocks instead. The page-wide median
+// can't be shifted by the handful of spanning lines a page carries.
+const SPANNING_WIDTH_MULTIPLE = 2;
 // Stage-1 column-block tolerance: consecutive lines belong to the same block
 // only when their x-intervals overlap by this fraction of the narrower line
 // (4px floor). Calibrated on the two-column sample: a centered badge in the
@@ -178,37 +193,47 @@ export function groupParagraphs(lines: LineBox[]): LineBox[][] {
 
 /**
  * Split reading-ordered lines into column blocks: maximal runs of
- * consecutive lines whose x-intervals overlap meaningfully. Pairwise
- * (line vs line, not vs an accumulated extent) so a full-width header line
- * at the top of a run can't keep both columns chained into one block.
+ * consecutive lines whose x-intervals overlap meaningfully (pairwise, line
+ * vs line, so an accumulated extent can't chain columns). Lines much wider
+ * than the page median (["spanning"][SPANNING_WIDTH_MULTIPLE] captions,
+ * rules, section headings) are emitted as their own blocks — they overlap
+ * whatever follows and would otherwise glue the columns on either side
+ * into one block with page-wide margins.
  */
 function columnBlocks(lines: LineBox[]): LineBox[][] {
+  const widths = lines
+    .map((l) => Math.max(1, l.x1 - l.x0))
+    .sort((a, b) => a - b);
+  const medianWidth = widths[Math.floor(widths.length / 2)];
   const blocks: LineBox[][] = [];
-  let run: LineBox[] = [lines[0]];
-  let prev = lines[0];
-  for (let i = 1; i < lines.length; i++) {
-    const l = lines[i];
-    const overlap = Math.min(prev.x1, l.x1) - Math.max(prev.x0, l.x0);
+  let run: LineBox[] = [];
+  let prev: LineBox | null = null;
+  for (const l of lines) {
+    const spanning = l.x1 - l.x0 > SPANNING_WIDTH_MULTIPLE * medianWidth;
     // Zero-width boxes have no horizontal signal — keep them with their
     // neighbours instead of splitting on `overlap <= 0`.
     const overlapsEnough =
+      !prev ||
       prev.x1 - prev.x0 <= 0 ||
       l.x1 - l.x0 <= 0 ||
-      overlap >=
+      Math.min(prev.x1, l.x1) - Math.max(prev.x0, l.x0) >=
         Math.max(
           BLOCK_OVERLAP_MIN_PX,
           BLOCK_OVERLAP_FRACTION *
             Math.min(prev.x1 - prev.x0, l.x1 - l.x0),
         );
-    if (overlapsEnough) {
-      run.push(l);
-    } else {
+    if (run.length && (spanning || !overlapsEnough)) {
       blocks.push(run);
-      run = [l];
+      run = [];
+    }
+    if (spanning) {
+      blocks.push([l]);
+    } else {
+      run.push(l);
     }
     prev = l;
   }
-  blocks.push(run);
+  if (run.length) blocks.push(run);
   return blocks;
 }
 

@@ -394,7 +394,7 @@ fn run_myanmar(
     let t = Instant::now();
     let (lines, cuts) = crate::reading_order::sort_lines(lines, (w, h));
     log::info!(
-        "[ocr] reading order: {:.2} ms ({} lines, {} column splits, {} band splits)",
+        "[ocr] reading order: {:.1} ms ({} lines, {} column splits, {} band splits)",
         t.elapsed().as_secs_f64() * 1000.0,
         lines.len(),
         cuts.columns,

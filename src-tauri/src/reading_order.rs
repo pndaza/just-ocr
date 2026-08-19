@@ -1,11 +1,17 @@
 //! Column-aware reading order over detected text lines.
 //!
-//! Both segmenters emit a flat, top-to-bottom line list: Kraken sorts
-//! baselines by y, and the PP-OCR port's `sort_detections` orders by
-//! polygon-center y-then-x across the whole page. On multi-column pages
-//! (textbook spreads like `sample_images/two_colums-1.png`) that interleaves
-//! the columns line by line — line 1 of the left column, line 1 of the right
-//! column, line 2 of the left, … — which garbles the extracted text.
+//! The three segmenter paths order lines differently, and none guarantees
+//! column-wise output on multi-column pages: the PP-OCR quad port's
+//! `sort_detections` orders by polygon-center y-then-x across the whole
+//! page (columns interleave line by line), the poly port emits raster
+//! order, and Kraken's `polygonal_reading_order` (partial order +
+//! topological sort) already groups well-separated columns but falls back
+//! to index order when a full-width header satisfies `separates_any` for
+//! every line pair. This pass normalizes all of them: on multi-column
+//! pages (textbook spreads like `sample_images/two_colums-1.png`) it
+//! recovers column-wise order; when no cut fires it re-sorts y-then-x,
+//! which matches the previous behavior of the ppocr-quad path (single
+//! columns are y-ordered under every segmenter, so they are unaffected).
 //!
 //! PaddleOCR solves this with a separate layout-detection model (PicoDet in
 //! legacy PP-Structure, RT-DETR-based PP-DocLayout in 3.x) whose region boxes
@@ -51,7 +57,9 @@
 //!
 //! Not handled: genuinely nested/irregular layouts (marginalia tied to
 //! paragraphs, side-by-side tables) — those need a real layout model. For
-//! those pages this degrades to the old y-then-x order.
+//! those pages this degrades to the old y-then-x order. Row-paired layouts
+//! (TOC entries + a narrow page-number column) are deliberately left in
+//! y-then-x order too — see [`COLUMN_MIN_WIDTH_SHARE`].
 //!
 //! All functions are pure over their inputs (no globals, no I/O), so the
 //! reorder is safe anywhere, including inside rayon workers.
@@ -82,6 +90,14 @@ const GAP_MIN_ABS_PX: f64 = 4.0;
 /// short line beside a column (stray artifact, footnote number) should not
 /// carve the page in two.
 const MIN_LINES_PER_COLUMN: usize = 2;
+
+/// A vertical cut is only taken when both sides look like real text
+/// columns, not a narrow companion column (table-of-contents page numbers,
+/// marginal numbering): the narrower side's median line width must be at
+/// least this share of the wider side's. Row-paired layouts — entry, page
+/// number, entry, page number — read correctly in plain y-then-x order; a
+/// column cut there would hoist all the numbers to the end.
+const COLUMN_MIN_WIDTH_SHARE: f64 = 0.3;
 
 /// Skip the pass entirely below this many lines: no vertical cut is possible
 /// (needs ≥ 2 + 2), and horizontal cuts never reorder versus y-sort.
@@ -234,7 +250,10 @@ fn order_region(indices: &[usize], rects: &[LineRect], stats: &mut CutStats) -> 
             .copied()
             .filter(|&i| rects[i].center_x() >= mid)
             .collect();
-        if left.len() >= MIN_LINES_PER_COLUMN && right.len() >= MIN_LINES_PER_COLUMN {
+        if left.len() >= MIN_LINES_PER_COLUMN
+            && right.len() >= MIN_LINES_PER_COLUMN
+            && columns_comparable(&left, &right, rects)
+        {
             stats.columns += 1;
             let mut out = order_region(&left, rects, stats);
             out.extend(order_region(&right, rects, stats));
@@ -313,6 +332,20 @@ fn median_height(indices: &[usize], rects: &[LineRect]) -> f64 {
     } else {
         (heights[mid - 1] + heights[mid]) / 2.0
     }
+}
+
+/// True when the two sides of a would-be column cut have comparable line
+/// widths (see [`COLUMN_MIN_WIDTH_SHARE`]). MEDIAN width per side so a few
+/// short paragraph tails can't flunk the gate for a genuine column.
+fn columns_comparable(a: &[usize], b: &[usize], rects: &[LineRect]) -> bool {
+    let widths = |idx: &[usize]| {
+        let mut w: Vec<f64> = idx.iter().map(|&i| rects[i].x1 - rects[i].x0).collect();
+        w.sort_by(|x, y| x.total_cmp(y));
+        w[w.len() / 2]
+    };
+    let (wa, wb) = (widths(a), widths(b));
+    let (narrow, wide) = if wa <= wb { (wa, wb) } else { (wb, wa) };
+    narrow >= COLUMN_MIN_WIDTH_SHARE * wide
 }
 
 #[cfg(test)]
@@ -449,6 +482,7 @@ mod tests {
         assert_eq!(xs, expected);
         let (_, stats) = reading_order(&rects);
         assert_eq!(stats.columns, 0);
+        assert_eq!(stats.bands, 1, "the band under the title is the only cut");
     }
 
     #[test]
@@ -522,6 +556,24 @@ mod tests {
     }
 
     #[test]
+    fn row_paired_toc_stays_row_wise() {
+        // TOC layout: entry [40,500] + page number [900,930] per row. The
+        // numbers form a "column" with a full-height gutter, but the sides'
+        // median line widths (420 vs 30) are far apart — a column cut would
+        // hoist every page number to the end. Row-wise y-then-x is correct.
+        let mut rects = Vec::new();
+        for row in 0..6 {
+            let y = 100.0 + row as f64 * 30.0;
+            rects.push(line(40.0, y, 460.0)); // entry
+            rects.push(line(900.0, y, 30.0)); // page number
+        }
+        let (perm, stats) = reading_order(&rects);
+        assert_eq!(stats, CutStats::default(), "narrow companion column must not cut");
+        // Already y-sorted input → identity (entry, number, entry, number…).
+        assert_eq!(perm, (0..rects.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn short_input_is_untouched() {
         let lines = vec![
             DetectedLine {
@@ -545,7 +597,9 @@ mod tests {
     /// this module: run the bundled PP-OCR small-det over
     /// `sample_images/two_colums-1.png`, reorder, and verify the reading
     /// order is column-wise instead of row-interleaved. Skips silently when
-    /// the sample dir isn't present (e.g. trimmed checkouts in CI).
+    /// the sample dir isn't present — note `sample_images/` is gitignored
+    /// and CI runs no `cargo test`, so in practice this exercises only on
+    /// dev machines that have the sample checked out.
     #[test]
     fn two_column_sample_page_reads_column_wise() {
         // Same include pattern as `engine.rs`'s BUNDLED_PPOCR_DET_SMALL;
