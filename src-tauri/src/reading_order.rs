@@ -9,9 +9,11 @@
 //! to index order when a full-width header satisfies `separates_any` for
 //! every line pair. This pass normalizes all of them: on multi-column
 //! pages (textbook spreads like `sample_images/two_colums-1.png`) it
-//! recovers column-wise order; when no cut fires it re-sorts y-then-x,
-//! which matches the previous behavior of the ppocr-quad path (single
-//! columns are y-ordered under every segmenter, so they are unaffected).
+//! recovers column-wise order; when no cut fires it re-sorts row-aware
+//! y-then-x — matching the ppocr-quad path's previous behavior on text
+//! (single columns are y-ordered under every segmenter) while reading
+//! side-by-side elements (header page number beside the author name)
+//! left-to-right instead of by a few px of quad skew.
 //!
 //! PaddleOCR solves this with a separate layout-detection model (PicoDet in
 //! legacy PP-Structure, RT-DETR-based PP-DocLayout in 3.x) whose region boxes
@@ -38,9 +40,11 @@
 //!    y-sorting — bands are strictly y-disjoint — it only exists to expose
 //!    vertical cuts; the largest gap is taken first so section separators
 //!    win over ordinary paragraph spacing.
-//! 3. **Else** the region is one block: sort by center y, then center x —
-//!    the same convention as `sort_detections`, so single-column pages come
-//!    out byte-identical to the previous behavior.
+//! 3. **Else** the region is one block, ordered row-aware: lines whose
+//!    vertical extents overlap by more than [`ROW_OVERLAP_SHARE`] of the
+//!    shorter height form a row and read left-to-right; rows read
+//!    top-to-bottom. Ordinary line spacing stays under the share, so text
+//!    keeps plain y-then-x order.
 //!
 //! Gates keep single-column pages untouched: a column gutter must be at
 //! least [`GUTTER_FRAC_OF_LINE_HEIGHT`] × and a band cut at least
@@ -222,6 +226,15 @@ fn line_rect(img_w: f64, img_h: f64, boundary: &[(f64, f64)]) -> Option<LineRect
     Some(LineRect { x0, y0, x1, y1 })
 }
 
+/// Same text row: vertical interval overlap exceeds this share of the
+/// shorter line's height. Side-by-side elements (header page number beside
+/// the author name) overlap vertically but not horizontally — a plain
+/// y-then-x center sort orders them by a few px of skew; row grouping
+/// orders them left-to-right. Consecutive text lines in these pages
+/// overlap well under half their height (tight pitch or negative gap), so
+/// they stay in y order.
+const ROW_OVERLAP_SHARE: f64 = 0.5;
+
 /// Order one region (subset of line indices) recursively.
 fn order_region(indices: &[usize], rects: &[LineRect], stats: &mut CutStats) -> Vec<usize> {
     if indices.len() <= 1 {
@@ -287,16 +300,53 @@ fn order_region(indices: &[usize], rects: &[LineRect], stats: &mut CutStats) -> 
         }
     }
 
-    // 3. Leaf region: one block of text. Center y-then-x, matching
-    //    `sort_detections` so single-column pages are unchanged.
+    // 3. Leaf region: one block of text, row-aware. Lines whose vertical
+    //    extents overlap by more than [`ROW_OVERLAP_SHARE`] of the shorter
+    //    height form a row and read left-to-right (side-by-side header
+    //    elements); everything else keeps top-to-bottom y order, matching
+    //    `sort_detections` so single-column text pages are unchanged.
     let mut sorted = indices.to_vec();
     sorted.sort_by(|&a, &b| {
         rects[a]
-            .center_y()
-            .total_cmp(&rects[b].center_y())
+            .y0
+            .total_cmp(&rects[b].y0)
+            .then_with(|| rects[a].center_y().total_cmp(&rects[b].center_y()))
             .then_with(|| rects[a].center_x().total_cmp(&rects[b].center_x()))
     });
-    sorted
+    let mut out: Vec<usize> = Vec::with_capacity(sorted.len());
+    let mut row: Vec<usize> = Vec::with_capacity(sorted.len());
+    let mut row_y0: f64 = 0.0;
+    let mut row_y1: f64 = 0.0;
+    for &i in &sorted {
+        let r = rects[i];
+        let joins = !row.is_empty() && {
+            let overlap = row_y1.min(r.y1) - row_y0.max(r.y0);
+            let shorter = (row_y1 - row_y0).min(r.y1 - r.y0);
+            overlap > ROW_OVERLAP_SHARE * shorter
+        };
+        if joins {
+            row.push(i);
+            row_y0 = row_y0.min(r.y0);
+            row_y1 = row_y1.max(r.y1);
+        } else {
+            emit_row(&mut out, &mut row, rects);
+            row.push(i);
+            row_y0 = r.y0;
+            row_y1 = r.y1;
+        }
+    }
+    emit_row(&mut out, &mut row, rects);
+    out
+}
+
+/// Sort a completed row by center x and append it to the output. Empty rows
+/// (region start) are a no-op.
+fn emit_row(out: &mut Vec<usize>, row: &mut Vec<usize>, rects: &[LineRect]) {
+    if row.is_empty() {
+        return;
+    }
+    row.sort_by(|&a, &b| rects[a].center_x().total_cmp(&rects[b].center_x()));
+    out.append(row);
 }
 
 /// The widest interior gap of at least `min_width` in the union of closed
@@ -556,6 +606,41 @@ mod tests {
     }
 
     #[test]
+    fn same_row_side_by_side_reads_left_to_right() {
+        // thawzin header, real geometry: the author quad (right) starts
+        // 11px higher than the page-number quad (left) — a plain y-then-x
+        // sort reads "author, page number". Substantial y-overlap makes
+        // them one row, so x wins: page number first.
+        let page_number = LineRect::new(72.0, 49.0, 127.0, 105.0);
+        let author = LineRect::new(762.0, 38.0, 913.0, 104.0);
+        let mut rects = vec![author, page_number]; // author arrives first
+        for row in 0..6 {
+            let y = 200.0 + row as f64 * 30.0;
+            rects.push(line(80.0, y, 800.0));
+        }
+        let xs = order_xs(&rects);
+        assert_eq!(
+            xs,
+            vec![72.0, 762.0, 80.0, 80.0, 80.0, 80.0, 80.0, 80.0],
+            "header row reads page number (left) then author (right)"
+        );
+    }
+
+    #[test]
+    fn consecutive_text_lines_stay_in_y_order() {
+        // Line pitch 30 with height 20 → zero vertical overlap between
+        // consecutive lines: every line is its own row, y order preserved
+        // even when a later line starts further left (x would scramble it).
+        let mut rects = Vec::new();
+        for row in 0..5 {
+            let x = 500.0 - row as f64 * 80.0; // staircase leftward
+            rects.push(line(x, 100.0 + row as f64 * 30.0, 100.0));
+        }
+        let xs = order_xs(&rects);
+        assert_eq!(xs, vec![500.0, 420.0, 340.0, 260.0, 180.0]);
+    }
+
+    #[test]
     fn row_paired_toc_stays_row_wise() {
         // TOC layout: entry [40,500] + page number [900,930] per row. The
         // numbers form a "column" with a full-height gutter, but the sides'
@@ -678,6 +763,61 @@ mod tests {
         assert!(
             left_run.1 < right_run.1 - right_run.0 + 1,
             "left column block ends after right column block starts (interleaved)"
+        );
+    }
+
+    /// The header of thawzin_02: page number (narrow, left) beside the
+    /// author (wider, right). The author's quad starts ~11px higher, so the
+    /// old y-then-x leaf sort emitted "author, page number". Same skip
+    /// conditions as the two-column e2e above (dev machines only).
+    #[test]
+    fn thawzin_header_reads_page_number_then_author() {
+        const SMALL_DET: &[u8] = include_bytes!("../../ppocr-models/small-det.safetensors");
+        let img = match image::open(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../sample_images/thawzin_02.png"
+        )) {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("skipping: sample image not available ({e})");
+                return;
+            }
+        };
+        let (w, h) = img.dimensions();
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let det = ppocr_engine::Detector::load_from_buffer_with_config(
+            SMALL_DET,
+            threads,
+            ppocr_engine::DetectorConfig::small(),
+        )
+        .expect("load bundled small-det");
+        let segmenter = crate::segmenter_adapters::PPOcrSegmenter::new(std::sync::Arc::new(det));
+        let lines = segmenter.segment(&img).expect("segment sample page");
+        let (ordered, _) = sort_lines(lines, (w, h));
+        assert!(ordered.len() > 10, "expected a full page of lines");
+
+        let bb = |l: &crate::segmentation::DetectedLine| {
+            line_rect(w as f64, h as f64, &l.boundary).expect("valid boundary")
+        };
+        let first = bb(&ordered[0]);
+        let second = bb(&ordered[1]);
+        assert!(
+            first.y1 < 150.0 && second.y1 < 150.0,
+            "first two lines should be the header row, got y1={} / {}",
+            first.y1,
+            second.y1
+        );
+        assert!(
+            first.x0 < second.x0,
+            "page number (left) must precede author (right): x0={} vs {}",
+            first.x0,
+            second.x0
+        );
+        assert!(
+            first.x1 - first.x0 < second.x1 - second.x0,
+            "the page number is the narrow quad"
         );
     }
 }
