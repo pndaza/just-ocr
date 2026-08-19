@@ -93,17 +93,34 @@
     scrollTop = (e.currentTarget as HTMLDivElement).scrollTop;
   }
 
+  // Measure with offsetWidth (border-box), NOT clientWidth. clientWidth
+  // loses the 10px styled scrollbar (::-webkit-scrollbar in styles.css)
+  // whenever the rows overflow, and rowH feeds straight back into the total
+  // scroll height — so for job counts whose content height sits near the
+  // viewport height the scrollbar toggles every frame: scrollbar appears →
+  // clientWidth drops → rowH shrinks → content fits → scrollbar hides → …
+  // That endless toggle resized every thumbnail each frame (visible as
+  // flicker until the panel was resized out of the unstable geometry).
+  // offsetWidth includes the scrollbar strip, so it is identical whether or
+  // not the scrollbar is showing — the loop can't start. The scroller also
+  // reserves its gutter (scrollbar-gutter: stable) so thumbs don't jump 10px
+  // when the queue starts/stops overflowing; where that property is
+  // unsupported, this measurement alone still holds.
+  function measureWidth(el: HTMLElement) {
+    return el.offsetWidth - 16; // minus row horizontal padding (6+8+8)
+  }
+
   $effect(() => {
     // Track viewport height + content width for virtualization and aspect ratio.
     const el = container;
     if (!el) return;
     const ro = new ResizeObserver(() => {
       viewportH = el.clientHeight;
-      contentW = el.clientWidth - 16; // minus row horizontal padding (6+8+8)
+      contentW = measureWidth(el);
     });
     ro.observe(el);
     viewportH = el.clientHeight;
-    contentW = el.clientWidth - 16;
+    contentW = measureWidth(el);
     return () => ro.disconnect();
   });
 
@@ -302,6 +319,11 @@
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Always reserve the scrollbar strip so row/thumb width stays constant
+       when the queue crosses the overflow threshold (and the ResizeObserver
+       measurement above stays quiet). Ignored on engines without support —
+       the offsetWidth measurement is what breaks the feedback loop there. */
+    scrollbar-gutter: stable;
   }
   .panel.dragging .scroller {
     outline: 2px dashed var(--accent-dim);
