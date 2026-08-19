@@ -124,7 +124,20 @@ jobs:
           # the version from src-tauri/tauri.conf.json.
           tagName: app-v__VERSION__
           releaseName: 'just-ocr v__VERSION__'
-          releaseBody: 'See the assets below to download and install this version.'
+          # Release notes for the version being shipped. The release
+          # auto-publishes on green CI, so curated "What's new" notes must
+          # ride along here — there is no post-publish window to edit them
+          # in. Update this body as part of each release bump.
+          releaseBody: |-
+            ## What's new
+
+            **Multi-column pages now read correctly, plus AI review improvements.**
+
+            - **Column-aware reading order.** Two-column pages (textbook spreads, etc.) previously read out with the columns interleaved line by line. A geometric XY-cut pass now detects the column gutter and reads each column top-to-bottom — for both Kraken and PP-OCR segmentation, with no new models or weights. Side-by-side header elements (page number beside the author name) read left-to-right, and row-paired layouts such as tables of contents keep their natural order.
+            - **Column-aware merge-paragraphs.** The merged-text view now groups paragraphs within each column instead of shattering multi-column pages into one-line paragraphs. Paragraph starts are detected by indent in both conventions — first-line indent and hanging indent — so paragraphs break where the author marked them.
+            - **AI review: suggestion CSV export.** Accept/reject suggestions can be saved as CSV (page, line, wrong, correct, applied) — the raw material for a common-spelling-error list. Flagged words now highlight only on the line they were flagged on, not on every occurrence across the page.
+            - **AI review: Burmese fixes.** Model echoes of line numbers in Myanmar digits (e.g. "၁:") are stripped instead of landing in the text; diffs of unspaced Burmese highlight just the changed syllable instead of the whole line; Undo all now correctly restores everything after per-line reverts.
+            - **UI fix: thumbnail flicker.** The image queue no longer oscillates thumbnail sizes when the scrollbar appears near the panel edge.
           # Auto-publish: the release (and its auto-generated latest.json) goes
           # live as soon as all platforms pass CI, so existing installs discover
           # the update via the releases/latest/download endpoint. The previous
