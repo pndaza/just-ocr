@@ -41,10 +41,10 @@
 //!    vertical cuts; the largest gap is taken first so section separators
 //!    win over ordinary paragraph spacing.
 //! 3. **Else** the region is one block, ordered row-aware: lines whose
-//!    vertical extents overlap by more than [`ROW_OVERLAP_SHARE`] of the
-//!    shorter height form a row and read left-to-right; rows read
-//!    top-to-bottom. Ordinary line spacing stays under the share, so text
-//!    keeps plain y-then-x order.
+//!    vertical extents overlap the row anchor's by more than
+//!    [`ROW_OVERLAP_SHARE`] of the shorter height form a row and read
+//!    left-to-right; rows read top-to-bottom. Ordinary line spacing stays
+//!    under the share, so text keeps plain y-then-x order.
 //!
 //! Gates keep single-column pages untouched: a column gutter must be at
 //! least [`GUTTER_FRAC_OF_LINE_HEIGHT`] × and a band cut at least
@@ -227,12 +227,13 @@ fn line_rect(img_w: f64, img_h: f64, boundary: &[(f64, f64)]) -> Option<LineRect
 }
 
 /// Same text row: vertical interval overlap exceeds this share of the
-/// shorter line's height. Side-by-side elements (header page number beside
-/// the author name) overlap vertically but not horizontally — a plain
-/// y-then-x center sort orders them by a few px of skew; row grouping
-/// orders them left-to-right. Consecutive text lines in these pages
-/// overlap well under half their height (tight pitch or negative gap), so
-/// they stay in y order.
+/// shorter height, measured against the row's ANCHOR (first, topmost line)
+/// — not the union extent of the row, which grows as members join and lets
+/// a tall quad (rotated or merged detection) overlap two staggered text
+/// lines and glue them into one x-sorted row. Side-by-side elements
+/// (header page number beside the author name) clear the share against the
+/// anchor; consecutive text lines in these pages overlap well under half
+/// their height (tight pitch or negative gap), so they stay in y order.
 const ROW_OVERLAP_SHARE: f64 = 0.5;
 
 /// Order one region (subset of line indices) recursively.
@@ -301,10 +302,13 @@ fn order_region(indices: &[usize], rects: &[LineRect], stats: &mut CutStats) -> 
     }
 
     // 3. Leaf region: one block of text, row-aware. Lines whose vertical
-    //    extents overlap by more than [`ROW_OVERLAP_SHARE`] of the shorter
-    //    height form a row and read left-to-right (side-by-side header
-    //    elements); everything else keeps top-to-bottom y order, matching
-    //    `sort_detections` so single-column text pages are unchanged.
+    //    extents overlap the row ANCHOR's by more than [`ROW_OVERLAP_SHARE`]
+    //    of the shorter height form a row and read left-to-right
+    //    (side-by-side header elements); everything else keeps
+    //    top-to-bottom y order, matching `sort_detections` so
+    //    single-column text pages are unchanged. Judging against the
+    //    anchor (not a grown union extent) keeps a tall bridging quad from
+    //    swallowing the text rows above and below it.
     let mut sorted = indices.to_vec();
     sorted.sort_by(|&a, &b| {
         rects[a]
@@ -315,24 +319,22 @@ fn order_region(indices: &[usize], rects: &[LineRect], stats: &mut CutStats) -> 
     });
     let mut out: Vec<usize> = Vec::with_capacity(sorted.len());
     let mut row: Vec<usize> = Vec::with_capacity(sorted.len());
-    let mut row_y0: f64 = 0.0;
-    let mut row_y1: f64 = 0.0;
+    let mut anchor_y0: f64 = 0.0;
+    let mut anchor_y1: f64 = 0.0;
     for &i in &sorted {
         let r = rects[i];
         let joins = !row.is_empty() && {
-            let overlap = row_y1.min(r.y1) - row_y0.max(r.y0);
-            let shorter = (row_y1 - row_y0).min(r.y1 - r.y0);
+            let overlap = anchor_y1.min(r.y1) - anchor_y0.max(r.y0);
+            let shorter = (anchor_y1 - anchor_y0).min(r.y1 - r.y0);
             overlap > ROW_OVERLAP_SHARE * shorter
         };
         if joins {
             row.push(i);
-            row_y0 = row_y0.min(r.y0);
-            row_y1 = row_y1.max(r.y1);
         } else {
             emit_row(&mut out, &mut row, rects);
             row.push(i);
-            row_y0 = r.y0;
-            row_y1 = r.y1;
+            anchor_y0 = r.y0;
+            anchor_y1 = r.y1;
         }
     }
     emit_row(&mut out, &mut row, rects);
@@ -638,6 +640,35 @@ mod tests {
         }
         let xs = order_xs(&rects);
         assert_eq!(xs, vec![500.0, 420.0, 340.0, 260.0, 180.0]);
+    }
+
+    #[test]
+    fn tight_pitch_staircase_stays_in_y_order() {
+        // Consecutive bboxes overlap ~35% of their height (pitch 13 vs
+        // height 20) while drifting left — under the 50% row share, so each
+        // line keeps its own row and the x-drift never reorders them. Pins
+        // the margin the real pages run at (~25% overlap).
+        let mut rects = Vec::new();
+        for row in 0..5 {
+            let x = 500.0 - row as f64 * 60.0;
+            rects.push(line(x, 100.0 + row as f64 * 13.0, 100.0));
+        }
+        let xs = order_xs(&rects);
+        assert_eq!(xs, vec![500.0, 440.0, 380.0, 320.0, 260.0]);
+    }
+
+    #[test]
+    fn tall_bridge_does_not_glue_staggered_rows() {
+        // A tall quad (rotated or merged detection, y 0..52) overlapping two
+        // text lines (y 0..22 and 30..52) that barely overlap each other.
+        // Judged against the row's grown union extent, the second text line
+        // would join the first's row and x-sort ABOVE it; judged against
+        // the row ANCHOR, it starts its own row and y order survives.
+        let t1 = line(200.0, 0.0, 300.0); // x [200,500], y [0,22]
+        let v = LineRect::new(600.0, 0.0, 650.0, 52.0); // tall box, y [0,52]
+        let t2 = line(40.0, 30.0, 300.0); // x [40,340], y [30,52]
+        let xs = order_xs(&[t1, v, t2]);
+        assert_eq!(xs, vec![200.0, 600.0, 40.0], "T1, V, T2 — texts keep y order");
     }
 
     #[test]
