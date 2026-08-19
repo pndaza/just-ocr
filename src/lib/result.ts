@@ -108,6 +108,12 @@ export function plainTextWithFix(
 //
 //   body        — reaches the dominant left margin and the dominant right
 //                 margin. Mid-paragraph wrap.
+//   indent      — starts right of the dominant left margin but still reaches
+//                 the right margin. A paragraph's first line (first-line
+//                 indent — the standard paragraph convention in Burmese
+//                 print, and often the ONLY signal: the previous paragraph's
+//                 last line can end close enough to the right margin that
+//                 the short-line rule below misses it).
 //   paragraphEnd— reaches the left margin but ends well short of the right
 //                 margin. Almost certainly the last line of a paragraph (the
 //                 only full-width line that ends short is a paragraph's tail).
@@ -116,26 +122,33 @@ export function plainTextWithFix(
 //                 heading's naturally-short right edge from being read as a
 //                 false paragraph-end.
 //
-// A paragraph break is inserted after line N when ANY of:
-//   1. The vertical gap to line N+1 exceeds ~0.5× the median line height
+// A paragraph break is inserted before line N+1 when ANY of:
+//   1. The vertical gap after line N exceeds ~0.5× the median line height
 //      (paragraphs separated by blank space).
 //   2. Line N is a paragraphEnd (tight/justified text with no inter-paragraph
 //      gap — the case pure gap detection misses).
-//   3. Line N+1 is centered (transition body → heading, or heading → heading
-//      with different centering) — symmetric with rule 2 for the start side.
+//   3. Line N+1 is an indent or centered (a paragraph start / heading);
+//      consecutive centered lines stay together within their run, but every
+//      indent line starts its own paragraph (list-item style, one line each).
 // Block boundaries always break (a column switch is always a new paragraph).
 //
-// Known limitation: a paragraph whose last line coincidentally fills the
+// Known limitations: a paragraph whose last line coincidentally fills the
 // full width with no following gap is indistinguishable from a mid-paragraph
-// wrap and won't be split. The merge-paragraphs toggle is the escape hatch
-// for documents where that matters.
+// wrap and won't be split (unless the NEXT paragraph starts indented). A
+// block quote where every line is indented breaks per line. The merge
+// toggle is the escape hatch for documents where that matters.
 
 /** A line classified by its horizontal alignment within its column block. */
-type LineKind = "body" | "paragraphEnd" | "centered";
+type LineKind = "body" | "indent" | "paragraphEnd" | "centered";
 
 const LEFT_MARGIN_PCT = 10; // low percentile of x0 → dominant left margin
 const RIGHT_MARGIN_PCT = 90; // high percentile of x1 → dominant right margin
-const INDENT_FRACTION = 0.1; // left inset > 10% of block width ⇒ centered
+// Left-inset thresholds. Calibrated on sample pages: detector x0 jitter on
+// body lines is ~±6px, real first-line indents run 9–11% of the block width
+// (thawzin_02: ~80px on an ~820px block). 5% sits well above jitter and
+// comfortably below every observed indent; the old 10% was one detector
+// wobble away from misreading an indented line as a heading.
+const INDENT_FRACTION = 0.05; // left inset > 5% of block width ⇒ indented
 const SHORT_RIGHT_FRACTION = 0.15; // right inset > 15% of block width ⇒ paragraphEnd
 const GAP_X_MEDIAN_HEIGHT = 0.5; // vertical gap > 0.5× median line height ⇒ break
 // Stage-1 column-block tolerance: consecutive lines belong to the same block
@@ -209,6 +222,7 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
   // Break before line i when any of:
   //   — large vertical gap (paragraphs separated by blank space)
   //   — previous line was a paragraphEnd (short last line, no gap)
+  //   — this line is an indent (first-line indent ⇒ paragraph start)
   //   — entering or leaving a centered run (heading ↔ body transition);
   //     consecutive centered lines stay together within their run.
   const paragraphs: LineBox[][] = [];
@@ -221,6 +235,7 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
     const leavingCentered = kinds[i - 1] === "centered" && kinds[i] !== "centered";
     const breakBefore = gap > GAP_X_MEDIAN_HEIGHT * medianHeight
       || kinds[i - 1] === "paragraphEnd"
+      || kinds[i] === "indent"
       || enteringCentered
       || leavingCentered;
     if (breakBefore) {
@@ -234,7 +249,7 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
   return paragraphs;
 }
 
-/** Classify a line by its horizontal position within the text block. */
+/** Classify a line by its horizontal position within its column block. */
 function classify(
   l: LineBox,
   leftMargin: number,
@@ -247,8 +262,13 @@ function classify(
   if (blockWidth <= 0) return "body";
   const leftInset = l.x0 - leftMargin;
   const rightInset = rightMargin - l.x1;
-  if (leftInset > INDENT_FRACTION * blockWidth) return "centered";
+  // Both sides inset → heading/title. Checked before `indent` so a one-line
+  // indented paragraph (short AND indented) still isolates correctly.
+  if (leftInset > INDENT_FRACTION * blockWidth && rightInset > SHORT_RIGHT_FRACTION * blockWidth) {
+    return "centered";
+  }
   if (rightInset > SHORT_RIGHT_FRACTION * blockWidth) return "paragraphEnd";
+  if (leftInset > INDENT_FRACTION * blockWidth) return "indent";
   return "body";
 }
 

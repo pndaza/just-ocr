@@ -151,6 +151,47 @@ describe("plainText — mergeParagraphs", () => {
     ]);
     expect(plainText(r, { mergeParagraphs: true })).toBe("x y");
   });
+
+  it("breaks before an indented first line even when the last line fills the width", () => {
+    // First-line indent as the ONLY break signal: the line before each
+    // indent reaches the right margin (not a paragraphEnd) and there is no
+    // vertical gap — the geometry of thawzin_02, where paragraph starts are
+    // marked by a ~80px indent on an ~820px block.
+    const r = result([
+      line("a1", 100, 0, FULL, 20),
+      line("a2", 100, 20, FULL, 40),
+      line("p2s", 180, 40, FULL, 60), // indented start, still reaches right
+      line("p2m", 100, 60, FULL, 80),
+      line("p3s", 180, 80, FULL, 100), // indented start
+      line("p3m", 100, 100, FULL, 120),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a1 a2\n\np2s p2m\n\np3s p3m");
+  });
+
+  it("keeps an indented start attached to its paragraph (breaks before, not after)", () => {
+    // The old classification read an indented full-width line as "centered",
+    // which isolated it: break before AND after. An indent must only START a
+    // paragraph.
+    const r = result([
+      line("one", 100, 0, FULL, 20),
+      line("IND", 180, 20, FULL, 40),
+      line("two", 100, 40, FULL, 60),
+      line("three", 100, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("one\n\nIND two three");
+  });
+
+  it("ignores detector x0 jitter well below the indent threshold", () => {
+    // Body lines wobble ±10px around the left margin — far under 5% of the
+    // 400px block (20px) — none of these may register as indents.
+    const r = result([
+      line("a", 105, 0, FULL, 20),
+      line("b", 96, 20, FULL, 40),
+      line("c", 108, 40, FULL, 60),
+      line("d", 100, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b c d");
+  });
 });
 
 describe("plainText — mergeParagraphs on multi-column pages", () => {
