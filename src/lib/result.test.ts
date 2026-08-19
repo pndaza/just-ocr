@@ -99,13 +99,17 @@ describe("plainText — mergeParagraphs", () => {
   });
 
   it("keeps a multi-line centered run together", () => {
-    // Two centered heading lines should stay in one block, separate from body.
+    // Two centered heading lines should stay in one block, separate from the
+    // body. (Two body lines: with a single body line the "majority level"
+    // degenerates to the headings themselves — majority reasoning needs the
+    // body to actually be the majority.)
     const r = result([
       line("TITLE A", 240, 0, 360, 20),
       line("TITLE B", 230, 20, 370, 40),
       line("body1", 100, 40, FULL, 60),
+      line("body2", 100, 60, FULL, 80),
     ]);
-    expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1");
+    expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1 body2");
   });
 
   it("preserves input order (backend reading order is trusted, not re-sorted)", () => {
@@ -189,6 +193,33 @@ describe("plainText — mergeParagraphs", () => {
       line("b", 96, 20, FULL, 40),
       line("c", 108, 40, FULL, 60),
       line("d", 100, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b c d");
+  });
+
+  it("hanging indent: flush first line starts a paragraph, indented majority merges", () => {
+    // two_colums-1 style — the opposite convention from thawzin_02: the
+    // FIRST line sits flush at the margin and the continuation lines are
+    // indented. The starts are the minority at the LOW x0 level; the
+    // indented majority must not shatter into per-line paragraphs.
+    const r = result([
+      line("s1", 100, 0, FULL, 20), // flush start
+      line("c1", 200, 20, FULL, 40), // indented continuation
+      line("c2", 200, 40, FULL, 60),
+      line("s2", 100, 60, FULL, 80), // flush start
+      line("c3", 200, 80, FULL, 100),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("s1 c1 c2\n\ns2 c3");
+  });
+
+  it("no start marking when the x0 levels split 50/50", () => {
+    // Two lines at each level — no majority to define "continuation", so the
+    // level structure carries no paragraph information. Everything merges.
+    const r = result([
+      line("a", 100, 0, FULL, 20),
+      line("b", 200, 20, FULL, 40),
+      line("c", 100, 40, FULL, 60),
+      line("d", 200, 60, FULL, 80),
     ]);
     expect(plainText(r, { mergeParagraphs: true })).toBe("a b c d");
   });

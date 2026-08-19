@@ -106,51 +106,61 @@ export function plainTextWithFix(
 // pages used to shatter into one-line paragraphs. Within a block, a line is
 // classified as one of:
 //
-//   body        — reaches the dominant left margin and the dominant right
-//                 margin. Mid-paragraph wrap.
-//   indent      — starts right of the dominant left margin but still reaches
-//                 the right margin. A paragraph's first line (first-line
-//                 indent — the standard paragraph convention in Burmese
-//                 print, and often the ONLY signal: the previous paragraph's
-//                 last line can end close enough to the right margin that
-//                 the short-line rule below misses it).
-//   paragraphEnd— reaches the left margin but ends well short of the right
-//                 margin. Almost certainly the last line of a paragraph (the
-//                 only full-width line that ends short is a paragraph's tail).
+//   body        — the dominant alignment: reaches the dominant right margin
+//                 and sits at the majority left level. Mid-paragraph wrap.
+//   start       — sits at a MINORITY level of the block's x0 distribution
+//                 (see `paragraphStarts`) while still reaching the right
+//                 margin. A paragraph's first line. This is style-agnostic:
+//                 first-line-indent style puts starts RIGHT of the dominant
+//                 edge (thawzin_02: starts ~160 vs body ~84), hanging-indent
+//                 style puts them flush LEFT of the indented majority
+//                 (two_colums-1: starts ~430 vs continuation ~560). Either
+//                 way the starts are the minority level — only the direction
+//                 differs, and the code doesn't care.
+//   paragraphEnd— reaches the majority left level but ends well short of the
+//                 right margin. Almost certainly the last line of a paragraph
+//                 (the only full-width line that ends short is a paragraph's
+//                 tail).
 //   centered    — inset on BOTH sides. Headings/titles/captions, not body.
 //                 Each centered run is its own block; this also keeps a
 //                 heading's naturally-short right edge from being read as a
-//                 false paragraph-end.
+//                 false paragraph-end. A marked start that ALSO ends short
+//                 isolates the same way (one-line paragraph / heading at the
+//                 marked level).
 //
 // A paragraph break is inserted before line N+1 when ANY of:
 //   1. The vertical gap after line N exceeds ~0.5× the median line height
 //      (paragraphs separated by blank space).
 //   2. Line N is a paragraphEnd (tight/justified text with no inter-paragraph
 //      gap — the case pure gap detection misses).
-//   3. Line N+1 is an indent or centered (a paragraph start / heading);
+//   3. Line N+1 is a start or centered (a paragraph start / heading);
 //      consecutive centered lines stay together within their run, but every
-//      indent line starts its own paragraph (list-item style, one line each).
+//      start line begins its own paragraph (list-item style, one line each).
 // Block boundaries always break (a column switch is always a new paragraph).
 //
 // Known limitations: a paragraph whose last line coincidentally fills the
 // full width with no following gap is indistinguishable from a mid-paragraph
-// wrap and won't be split (unless the NEXT paragraph starts indented). A
-// block quote where every line is indented breaks per line. The merge
+// wrap and won't be split (unless the NEXT paragraph starts at a marked
+// level). Blocks with more than two x0 levels (hanging paragraphs plus
+// deeper-indented verse) mark each outlier level as starts. The merge
 // toggle is the escape hatch for documents where that matters.
 
 /** A line classified by its horizontal alignment within its column block. */
-type LineKind = "body" | "indent" | "paragraphEnd" | "centered";
+type LineKind = "body" | "start" | "paragraphEnd" | "centered";
 
 const LEFT_MARGIN_PCT = 10; // low percentile of x0 → dominant left margin
 const RIGHT_MARGIN_PCT = 90; // high percentile of x1 → dominant right margin
-// Left-inset thresholds. Calibrated on sample pages: detector x0 jitter on
-// body lines is ~±6px, real first-line indents run 9–11% of the block width
-// (thawzin_02: ~80px on an ~820px block). 5% sits well above jitter and
-// comfortably below every observed indent; the old 10% was one detector
-// wobble away from misreading an indented line as a heading.
-const INDENT_FRACTION = 0.05; // left inset > 5% of block width ⇒ indented
+const INDENT_FRACTION = 0.05; // left inset > 5% of block width ⇒ not body-level
 const SHORT_RIGHT_FRACTION = 0.15; // right inset > 15% of block width ⇒ paragraphEnd
 const GAP_X_MEDIAN_HEIGHT = 0.5; // vertical gap > 0.5× median line height ⇒ break
+// Paragraph-start x0 clustering (`paragraphStarts`): the split gap must
+// clear an absolute floor (detector x0 jitter on body lines is ~±6px) and a
+// fraction of the block width, and each extracted level must stay under 40%
+// of its pool (above that — e.g. verse where most lines start paragraphs —
+// the level structure carries no start/end information).
+const X0_SPLIT_MIN_PX = 12;
+const X0_SPLIT_MIN_FRAC = 0.025;
+const START_LEVEL_MAX_SHARE = 0.4;
 // Stage-1 column-block tolerance: consecutive lines belong to the same block
 // only when their x-intervals overlap by this fraction of the narrower line
 // (4px floor). Calibrated on the two-column sample: a centered badge in the
@@ -215,14 +225,23 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
     .sort((a, b) => a - b);
   const medianHeight = heights[Math.floor(heights.length / 2)];
 
-  const kinds = block.map((l) =>
-    classify(l, leftMargin, rightMargin, blockWidth, medianHeight),
+  const minSplitGap = Math.max(X0_SPLIT_MIN_PX, X0_SPLIT_MIN_FRAC * blockWidth);
+  const starts = paragraphStarts(block, minSplitGap);
+  // Mean x0 ≈ the majority "continuation" level: the reference for the
+  // centered check. Against the 10th-percentile margin alone, a hanging
+  // block's short continuation lines (tails at the indented majority
+  // level) would read as inset-on-both-sides and isolate as fake headings.
+  // Mean rather than median: with small blocks a lower-median can land on
+  // the minority level itself.
+  const majorityLeft = block.reduce((s, l) => s + l.x0, 0) / block.length;
+  const kinds = block.map((l, i) =>
+    classify(l, starts.has(i), leftMargin, majorityLeft, rightMargin, blockWidth, medianHeight),
   );
 
   // Break before line i when any of:
   //   — large vertical gap (paragraphs separated by blank space)
   //   — previous line was a paragraphEnd (short last line, no gap)
-  //   — this line is an indent (first-line indent ⇒ paragraph start)
+  //   — this line is a start (minority x0 level ⇒ paragraph first line)
   //   — entering or leaving a centered run (heading ↔ body transition);
   //     consecutive centered lines stay together within their run.
   const paragraphs: LineBox[][] = [];
@@ -235,7 +254,7 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
     const leavingCentered = kinds[i - 1] === "centered" && kinds[i] !== "centered";
     const breakBefore = gap > GAP_X_MEDIAN_HEIGHT * medianHeight
       || kinds[i - 1] === "paragraphEnd"
-      || kinds[i] === "indent"
+      || kinds[i] === "start"
       || enteringCentered
       || leavingCentered;
     if (breakBefore) {
@@ -249,10 +268,54 @@ function paragraphsInBlock(block: LineBox[]): LineBox[][] {
   return paragraphs;
 }
 
+/**
+ * Indices of paragraph-start lines: the minority level(s) of the block's x0
+ * distribution. Sorts the pool's x0s, splits at the largest gap, and marks
+ * the smaller side; then recurses on the larger side, so a block can carry
+ * more than one marked level (e.g. a gutter badge at x0 ≈ 2135 hanging off
+ * a two-column block whose paragraphs are flush ~430 vs continuation ~560).
+ * Works for both indent conventions because only minority-ness matters:
+ * first-line-indent starts sit right of the dominant edge, hanging-indent
+ * starts sit flush left of the indented majority.
+ *
+ * Empty when no level structure clears the guards: gap below `minGap`
+ * (jitter), a 40%+ "minority" (verse-like blocks where the level carries no
+ * start information), or a degenerate pool.
+ */
+function paragraphStarts(block: LineBox[], minGap: number): Set<number> {
+  const marked = new Set<number>();
+  let pool = block.map((_, i) => i);
+  while (pool.length >= 3) {
+    pool.sort((a, b) => block[a].x0 - block[b].x0);
+    let bestGap = 0;
+    let splitAt = 0;
+    for (let k = 1; k < pool.length; k++) {
+      const gap = block[pool[k]].x0 - block[pool[k - 1]].x0;
+      if (gap > bestGap) {
+        bestGap = gap;
+        splitAt = k;
+      }
+    }
+    if (bestGap < minGap) break;
+    const low = pool.slice(0, splitAt);
+    const high = pool.slice(splitAt);
+    const minority = low.length <= high.length ? low : high;
+    const majority = minority === low ? high : low;
+    if (minority.length === 0 || minority.length > START_LEVEL_MAX_SHARE * pool.length) {
+      break;
+    }
+    for (const i of minority) marked.add(i);
+    pool = majority;
+  }
+  return marked;
+}
+
 /** Classify a line by its horizontal position within its column block. */
 function classify(
   l: LineBox,
+  isStart: boolean,
   leftMargin: number,
+  majorityLeft: number,
   rightMargin: number,
   blockWidth: number,
   _medianHeight: number,
@@ -260,15 +323,24 @@ function classify(
   // Degenerate geometry (zero-width block, e.g. all lines share x0/x1):
   // can't reason about alignment → treat as body so we join rather than split.
   if (blockWidth <= 0) return "body";
-  const leftInset = l.x0 - leftMargin;
   const rightInset = rightMargin - l.x1;
-  // Both sides inset → heading/title. Checked before `indent` so a one-line
-  // indented paragraph (short AND indented) still isolates correctly.
-  if (leftInset > INDENT_FRACTION * blockWidth && rightInset > SHORT_RIGHT_FRACTION * blockWidth) {
+  if (isStart) {
+    // A marked start that also ends well short of the right margin is a
+    // one-line paragraph or a heading at the marked level → isolate it
+    // (centered), don't glue it to the next paragraph.
+    return rightInset > SHORT_RIGHT_FRACTION * blockWidth ? "centered" : "start";
+  }
+  // Heading: short AND inset from the leftmost content AND from the
+  // majority level (a hanging block's paragraph tails sit at the indented
+  // majority level — short, but not headings).
+  if (
+    l.x0 - leftMargin > INDENT_FRACTION * blockWidth &&
+    l.x0 - majorityLeft > INDENT_FRACTION * blockWidth &&
+    rightInset > SHORT_RIGHT_FRACTION * blockWidth
+  ) {
     return "centered";
   }
   if (rightInset > SHORT_RIGHT_FRACTION * blockWidth) return "paragraphEnd";
-  if (leftInset > INDENT_FRACTION * blockWidth) return "indent";
   return "body";
 }
 
