@@ -1,4 +1,4 @@
-import { plainText, plainTextWithFix, formatDuration, applyWordFixes, type LineBox, type OcrResult } from "./result";
+import { plainText, plainTextWithFix, formatDuration, applyWordFixes, groupParagraphs, type LineBox, type OcrResult } from "./result";
 import { describe, it, expect } from "vitest";
 
 /** Build a LineBox with the geometry the paragraph heuristic reasons about. */
@@ -99,22 +99,30 @@ describe("plainText — mergeParagraphs", () => {
   });
 
   it("keeps a multi-line centered run together", () => {
-    // Two centered heading lines should stay in one block, separate from body.
+    // Two centered heading lines should stay in one block, separate from the
+    // body. (Two body lines: with a single body line the "majority level"
+    // degenerates to the headings themselves — majority reasoning needs the
+    // body to actually be the majority.)
     const r = result([
       line("TITLE A", 240, 0, 360, 20),
       line("TITLE B", 230, 20, 370, 40),
       line("body1", 100, 40, FULL, 60),
+      line("body2", 100, 60, FULL, 80),
     ]);
-    expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1");
+    expect(plainText(r, { mergeParagraphs: true })).toBe("TITLE A TITLE B\n\nbody1 body2");
   });
 
-  it("sorts unsorted input by y0 before grouping", () => {
+  it("preserves input order (backend reading order is trusted, not re-sorted)", () => {
+    // The old implementation re-sorted by y0, which re-interleaved columns
+    // on multi-column pages and undid the backend's reading-order pass.
+    // Grouping now trusts the incoming sequence; y-sorted single-column
+    // input still merges, and shuffled input stays shuffled.
     const r = result([
       line("three", 100, 40, FULL, 60),
       line("one", 100, 0, FULL, 20),
       line("two", 100, 20, FULL, 40),
     ]);
-    expect(plainText(r, { mergeParagraphs: true })).toBe("one two three");
+    expect(plainText(r, { mergeParagraphs: true })).toBe("three one two");
   });
 
   it("trims per-line whitespace and skips empty lines", () => {
@@ -146,6 +154,190 @@ describe("plainText — mergeParagraphs", () => {
       line("y", 100, 20, 100, 40),
     ]);
     expect(plainText(r, { mergeParagraphs: true })).toBe("x y");
+  });
+
+  it("breaks before an indented first line even when the last line fills the width", () => {
+    // First-line indent as the ONLY break signal: the line before each
+    // indent reaches the right margin (not a paragraphEnd) and there is no
+    // vertical gap — the geometry of thawzin_02, where paragraph starts are
+    // marked by a ~80px indent on an ~820px block.
+    const r = result([
+      line("a1", 100, 0, FULL, 20),
+      line("a2", 100, 20, FULL, 40),
+      line("p2s", 180, 40, FULL, 60), // indented start, still reaches right
+      line("p2m", 100, 60, FULL, 80),
+      line("p3s", 180, 80, FULL, 100), // indented start
+      line("p3m", 100, 100, FULL, 120),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a1 a2\n\np2s p2m\n\np3s p3m");
+  });
+
+  it("keeps an indented start attached to its paragraph (breaks before, not after)", () => {
+    // The old classification read an indented full-width line as "centered",
+    // which isolated it: break before AND after. An indent must only START a
+    // paragraph.
+    const r = result([
+      line("one", 100, 0, FULL, 20),
+      line("IND", 180, 20, FULL, 40),
+      line("two", 100, 40, FULL, 60),
+      line("three", 100, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("one\n\nIND two three");
+  });
+
+  it("ignores detector x0 jitter well below the level-split floor", () => {
+    // Body lines wobble ±10px around the left margin. The x0-split floor is
+    // max(16px, 2.5% of block width) = 16px here, so a jitter-level gap
+    // (5px max in this data) never reads as a level boundary.
+    const r = result([
+      line("a", 105, 0, FULL, 20),
+      line("b", 96, 20, FULL, 40),
+      line("c", 108, 40, FULL, 60),
+      line("d", 100, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b c d");
+  });
+
+  it("hanging indent: flush first line starts a paragraph, indented majority merges", () => {
+    // two_colums-1 style — the opposite convention from thawzin_02: the
+    // FIRST line sits flush at the margin and the continuation lines are
+    // indented. The starts are the minority at the LOW x0 level; the
+    // indented majority must not shatter into per-line paragraphs. Note the
+    // 2-of-5 minority sits exactly at the 40% share cap — still marked.
+    const r = result([
+      line("s1", 100, 0, FULL, 20), // flush start
+      line("c1", 200, 20, FULL, 40), // indented continuation
+      line("c2", 200, 40, FULL, 60),
+      line("s2", 100, 60, FULL, 80), // flush start
+      line("c3", 200, 80, FULL, 100),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("s1 c1 c2\n\ns2 c3");
+  });
+
+  it("marks both a right-edge marker and hanging starts (recursive levels)", () => {
+    // Three x0 levels in one block: flush starts (100), indented
+    // continuation (210), and a short right-edge marker (330). The
+    // clustering recurses on the majority, so the marker level AND the
+    // flush-start level are both extracted.
+    const lines: LineBox[] = [];
+    for (let i = 0; i < 15; i++) {
+      const x0 = i % 5 === 0 ? 100 : 210; // starts at i = 0, 5, 10
+      lines.push(line(`l${i}`, x0, i * 25, FULL, i * 25 + 20));
+    }
+    lines.splice(7, 0, line("MARK", 330, 7 * 25, 420, 7 * 25 + 20)); // short, right edge
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      "l0 l1 l2 l3 l4\n\nl5 l6\n\nMARK\n\nl7 l8 l9\n\nl10 l11 l12 l13 l14",
+    );
+  });
+
+  it("never marks starts in a two-line block", () => {
+    // The pool.length >= 3 gate: with two lines there is no majority level
+    // to define "continuation", so an indent carries no information.
+    const r = result([line("a", 100, 0, FULL, 20), line("b", 180, 20, FULL, 40)]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b");
+  });
+
+  it("returns empty text for empty results", () => {
+    expect(plainText(result([]), { mergeParagraphs: true })).toBe("");
+    expect(groupParagraphs([])).toEqual([]);
+  });
+
+  it("no start marking when the x0 levels split 50/50", () => {
+    // Two lines at each level — no majority to define "continuation", so the
+    // level structure carries no paragraph information. Everything merges.
+    const r = result([
+      line("a", 100, 0, FULL, 20),
+      line("b", 200, 20, FULL, 40),
+      line("c", 100, 40, FULL, 60),
+      line("d", 200, 60, FULL, 80),
+    ]);
+    expect(plainText(r, { mergeParagraphs: true })).toBe("a b c d");
+  });
+});
+
+describe("plainText — mergeParagraphs on multi-column pages", () => {
+  // Geometry mirrors the two-column textbook sample: left column x∈[100,300],
+  // right column x∈[350,550], staggered line y (right column sits a few px
+  // lower), gutter 50px. Columns arrive in reading order (all left lines,
+  // then all right) — the backend's column-aware ordering contract.
+  const L_FULL = 300; // x1 of a full left-column line
+  const R_X0 = 350;
+  const R_FULL = 550; // x1 of a full right-column line
+  // Enough lines per block that the 90th-percentile right margin isn't
+  // swayed by a single outlier line (real pages have 30+ lines/column).
+  const N = 12;
+
+  function twoColumnLines(): LineBox[] {
+    const lines: LineBox[] = [];
+    for (let i = 0; i < N; i++) {
+      const y = 60 + i * 25;
+      // Last line of each column ends short ⇒ paragraphEnd inside the column.
+      const x1 = i === N - 1 ? 250 : L_FULL;
+      lines.push(line(`L${i + 1}`, 100, y, x1, y + 20));
+    }
+    for (let i = 0; i < N; i++) {
+      const y = 65 + i * 25; // staggered vs the left column
+      const x1 = i === N - 1 ? 440 : R_FULL;
+      lines.push(line(`R${i + 1}`, R_X0, y, x1, y + 20));
+    }
+    return lines;
+  }
+
+  it("merges each column independently and keeps left-before-right order", () => {
+    const r = result(twoColumnLines());
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
+  });
+
+  it("keeps a full-width header its own paragraph above the columns", () => {
+    const lines = [line("HEADER", 100, 0, R_FULL, 20), ...twoColumnLines()];
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `HEADER\n\n` +
+        `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
+  });
+
+  it("a badge overlapping the gutter by a few px does not chain the columns", () => {
+    // Centered badge in the gutter: overlaps the left column by 20px (≥10%
+    // of its own 67px width → joins the left block, where its centering
+    // isolates it as its own paragraph) and the right column by 3px (< the
+    // 4px floor → splits). Without the tolerance the badge chained both
+    // columns into one block and the page shattered into one-line
+    // paragraphs against page-wide margins.
+    const lines = [
+      ...twoColumnLines().slice(0, N), // left column
+      line("BADGE", 280, 65, 347, 85),
+      ...twoColumnLines().slice(N), // right column
+    ];
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `BADGE\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
+  });
+
+  it("a full-width caption between the columns does not chain them into one block", () => {
+    // Mid-page spanning element: pairwise overlap joins left column →
+    // caption → right column into ONE block, and against its page-wide
+    // margins every left line isolates — the original shattering bug.
+    // Spanning lines (> 2× the median line width) become their own blocks.
+    const lines = [
+      ...twoColumnLines().slice(0, N), // left column
+      line("CAPTION", 100, 700, R_FULL, 720), // 450px wide vs 200px median
+      ...twoColumnLines().slice(N), // right column
+    ];
+    const r = result(lines);
+    expect(plainText(r, { mergeParagraphs: true })).toBe(
+      `${Array.from({ length: N }, (_, i) => `L${i + 1}`).join(" ")}\n\n` +
+        `CAPTION\n\n` +
+        `${Array.from({ length: N }, (_, i) => `R${i + 1}`).join(" ")}`,
+    );
   });
 });
 

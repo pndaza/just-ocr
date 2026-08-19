@@ -387,6 +387,20 @@ fn run_myanmar(
         lines.len()
     );
 
+    // Recover column-aware reading order. Both segmenters emit a flat
+    // y-sorted line list, which interleaves multi-column pages line by
+    // line; this geometric pass (see `reading_order`) reorders them
+    // column-wise and is a no-op on single-column pages.
+    let t = Instant::now();
+    let (lines, cuts) = crate::reading_order::sort_lines(lines, (w, h));
+    log::info!(
+        "[ocr] reading order: {:.1} ms ({} lines, {} column splits, {} band splits)",
+        t.elapsed().as_secs_f64() * 1000.0,
+        lines.len(),
+        cuts.columns,
+        cuts.bands
+    );
+
     // Detected-line heights (bbox height in source pixels). Useful as a sanity
     // signal: a too-small or too-large average hints at over/under-segmentation,
     // and it sizes the resize scale the recognizer applies. Computed from the

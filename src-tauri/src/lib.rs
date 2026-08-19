@@ -10,6 +10,7 @@ mod engine;
 mod languages;
 mod llm_fix;
 mod pdf;
+mod reading_order;
 mod segmentation;
 mod segmenter_adapters;
 mod spelling;
